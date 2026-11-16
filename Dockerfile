@@ -30,7 +30,9 @@ RUN npm run build -w server && npm run build:worker -w server
 # runtime: the standalone output. The working directory is apps/server, because the code finds assets/fonts and
 # server/email/assets through process.cwd() (the standalone trace copies both there).
 FROM base AS runtime
-ENV NODE_ENV=production PORT=3101 HOSTNAME=0.0.0.0
+# KEEP_ALIVE_TIMEOUT (read by the standalone server.js) above the ALB's 330 s idle timeout: with Node's 5 s default
+# the ALB reuses a connection the target has closed and the caller gets a 502.
+ENV NODE_ENV=production PORT=3101 HOSTNAME=0.0.0.0 KEEP_ALIVE_TIMEOUT=335000
 COPY --from=build --chown=node:node /app/apps/server/.next/standalone ./
 COPY --from=build --chown=node:node /app/apps/server/.next/static apps/server/.next/static
 WORKDIR /app/apps/server
