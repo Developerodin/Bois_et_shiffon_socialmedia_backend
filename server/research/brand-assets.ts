@@ -34,7 +34,7 @@ const MAX_PRODUCTS = 12;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const MAX_LOGO_TRIES = 3;
 const PALETTE_PHOTOS = 6;
-/** The whole collection shares one deadline so a slow site can't eat the Research job's 300 s budget. */
+/** The whole collection shares one deadline so a slow site can't hold up the Research job. */
 const DEADLINE_MS = 30_000;
 
 // ponytail: one decode at a time keeps memory near one image (≤16 MP ≈ 64 MB RGBA) on a serverless box.

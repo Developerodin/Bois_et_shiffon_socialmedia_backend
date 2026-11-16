@@ -162,6 +162,8 @@ describe("POST content (story)", () => {
     expect(m.refund).toHaveBeenCalledTimes(1);
     expect(m.refund).toHaveBeenCalledWith("w1", REF);
     expect((db.contentItem.updateMany.mock.calls[0]![0] as { data: unknown }).data).toMatchObject({ status: "BLOCKED", brief: { goal: "newArrival", note: "Writing didn't start. Try again." } });
+    // Only a story still waiting for its writer is parked: one that moved on meanwhile is left alone.
+    expect((db.contentItem.updateMany.mock.calls[0]![0] as { where: unknown }).where).toMatchObject({ id: expect.any(String), status: { in: ["BRIEF_READY", "BLOCKED"] } });
   });
 
   it("rejects a story body without a uuid request id", async () => {

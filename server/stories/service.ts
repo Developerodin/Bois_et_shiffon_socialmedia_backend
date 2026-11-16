@@ -480,8 +480,9 @@ export async function failStoryStart(scope: BrandScope, itemId: string, chargeId
   await refundCharge(scope.workspaceId, chargeId);
   const item = await prisma.contentItem.findFirst({ where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { brief: true } });
   const brief = (item?.brief && typeof item.brief === "object" && !Array.isArray(item.brief) ? item.brief : {}) as Record<string, unknown>;
+  // Only a story still waiting for its writer: never one that moved on meanwhile.
   await prisma.contentItem.updateMany({
-    where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId },
+    where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["BRIEF_READY", "BLOCKED"] } },
     data: { status: "BLOCKED", brief: { ...brief, note: STORY_START_NOTE } as Prisma.InputJsonValue },
   });
 }

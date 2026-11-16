@@ -214,7 +214,7 @@ async function prepareVoice(r: ReelRender) {
   const sheet = plan.presenter === "none" ? null : (await donePresenter(scope, plan.presenter))?.outputKey;
   if (plan.presenter !== "none" && !sheet) return failRender({ renderId: r.id }, new Error("Presenter removed: pick another."), true);
   // ElevenLabs scenes one after another (its shared account allows few requests at once); OpenAI's together.
-  // Retries for a busy provider stop after ~2 min: the job has 300 s and a cut-off attempt would speak everything again.
+  // Retries for a busy provider stop after ~2 min: an attempt cut off by a redeploy would speak everything again.
   const deadline = Date.now() + 120_000;
   // A recorded scene uses its recording (already the render's WAV format); the others are spoken.
   const recorded = await recordingKeys(plan, r.contentItemId);

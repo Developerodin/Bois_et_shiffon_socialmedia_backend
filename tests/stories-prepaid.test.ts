@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
   brandAgentConfig: { findUnique: vi.fn(async () => null) },
-  agentRun: { findMany: vi.fn(async () => []), create: vi.fn(async (a: { data: { input?: unknown } }) => ({ id: "run1", ...a.data })), findFirstOrThrow: vi.fn(), update: vi.fn() },
+  agentRun: { findMany: vi.fn(async () => []), create: vi.fn(async (a: { data: { input?: unknown } }) => ({ id: "run1", ...a.data })), findFirstOrThrow: vi.fn(), update: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
   agentEvent: { create: vi.fn() },
   auditEvent: { create: vi.fn() },
   $executeRaw: vi.fn(),

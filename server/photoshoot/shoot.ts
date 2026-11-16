@@ -87,7 +87,7 @@ export async function createShoot(scope: Scope & { userId: string }, request: Sh
       await refundCharge(scope.workspaceId, chargeId);
       throw e;
     });
-  // Due at once, so the POST's kickRunner picks it up. Nothing else would ever look at a shoot with no job.
+  // Due at once: the worker (or, in dev, the POST's kickRunner) picks it up. Nothing else would ever look at a shoot with no job.
   await enqueueJob({ type: PHOTOSHOOT_JOB, workspaceId: shoot.workspaceId, brandId: shoot.brandId, payload: { shootId: shoot.id }, maxAttempts: attemptsFor(shoot), idempotencyKey: `shoot:${shoot.id}:start` }).catch(async (e: unknown) => {
     await failShoot(shoot.id, e instanceof Error ? e.message : String(e));
     throw e;
@@ -199,8 +199,8 @@ async function openaiShots(sourceKey: string, prompt: string, ratio: ShootRatio,
     method: "POST",
     headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     body: form,
-    // High quality, four images: up to a few minutes. ponytail: under the 300 s job cap with the fetch and uploads;
-    // split into four n=1 calls saved one by one if Ultra ever runs into it.
+    // High quality, four images: up to a few minutes. ponytail: one attempt (maxAttempts 1), so a call that outlasts
+    // the worker's stop grace on a redeploy is lost and refunded; split into four n=1 calls saved one by one if that bites.
     signal: AbortSignal.timeout(200_000),
   });
   const data = (await res.json().catch(() => ({}))) as { data?: { b64_json?: string }[]; error?: { message?: string } };
