@@ -127,10 +127,17 @@ async function reclaimAbandoned(tx: Prisma.TransactionClient, workspaceId: strin
  * Daily sweep: the same reclaim in every workspace with an abandoned reservation, so one isn't left (credits taken, the
  * person's voice possibly at ElevenLabs) until someone in that workspace clones again. Re-read under each lock, so a
  * reservation that went live meanwhile is left alone; refunds are once per charge.
+ * Never throws: a failure is logged (per workspace) and retried tomorrow, so it can't stop the sweep's later steps.
  */
 export async function reclaimAbandonedClones() {
-  const rows = await prisma.voice.findMany({ where: abandonedWhere(), select: { workspaceId: true }, distinct: ["workspaceId"] });
-  for (const { workspaceId } of rows) await prisma.$transaction((tx) => reclaimAbandoned(tx, workspaceId));
+  try {
+    const rows = await prisma.voice.findMany({ where: abandonedWhere(), select: { workspaceId: true }, distinct: ["workspaceId"] });
+    for (const { workspaceId } of rows) {
+      await prisma.$transaction((tx) => reclaimAbandoned(tx, workspaceId)).catch((e: unknown) => console.error(`[clones] reclaim in ${workspaceId}`, e));
+    }
+  } catch (e) {
+    console.error("[clones] reclaim", e);
+  }
 }
 
 /** Where a clone's files live: under its workspace, removed when the voice is deleted. */

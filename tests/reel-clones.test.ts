@@ -165,6 +165,20 @@ describe("the daily sweep's clone reclaim", () => {
   });
 });
 
+describe("the daily sweep's clone reclaim, when one workspace fails", () => {
+  it("logs it and goes on to the next workspace, without throwing into the sweep", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    m.tx.voice.findMany
+      .mockResolvedValueOnce([{ workspaceId: "w1" }, { workspaceId: "w2" }])
+      .mockRejectedValueOnce(new Error("pool timeout")) // w1
+      .mockResolvedValueOnce([{ id: "v2", workspaceId: "w2" }]); // w2
+    await expect(reclaimAbandonedClones()).resolves.toBeUndefined();
+    expect(m.refund).toHaveBeenCalledWith("w2", "v2", m.tx);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining("w1"), expect.any(Error));
+    err.mockRestore();
+  });
+});
+
 describe("removing a clone", () => {
   it("archives and queues its deletion in the same transaction, with an audit event", async () => {
     m.tx.voice.findMany.mockResolvedValue([{ id: "v1", workspaceId: "w1" }]);
