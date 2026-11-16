@@ -56,4 +56,5 @@ RUN PRISMA_VERSION="$(node -p "require('/tmp/package-lock.json').packages['node_
 ENV PATH="/opt/prisma-cli/node_modules/.bin:${PATH}"
 COPY --chown=node:node apps/server/prisma /app/prisma
 USER node
-CMD ["npx", "prisma", "migrate", "deploy", "--schema", "prisma/schema.prisma"]
+# Call the pinned CLI on PATH directly: npx skips PATH and would fetch the latest prisma from the registry.
+CMD ["prisma", "migrate", "deploy", "--schema", "prisma/schema.prisma"]
