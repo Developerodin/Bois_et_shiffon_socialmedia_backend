@@ -28,6 +28,7 @@ vi.mock("@/server/services/platform-admin", async () => ({
   recordPersonView: m.recordPersonView,
 }));
 
+import { GET as getLogs } from "@/app/api/v1/admin/logs/route";
 import { GET as getPeople } from "@/app/api/v1/admin/people/route";
 import { GET as getSpend } from "@/app/api/v1/admin/spend/route";
 import { GET as getWorkspaces } from "@/app/api/v1/admin/workspaces/route";
@@ -127,5 +128,12 @@ describe("platform admin API", () => {
     expect(res.status).toBe(200);
     expect(m.recordPersonView).toHaveBeenCalledTimes(1);
     expect(m.recordPersonView).toHaveBeenCalledWith("u1", "admin1");
+  });
+
+  it("reads a log over all time for days=all (the overviews' latest rows), and the last 30 days by default", async () => {
+    m.platformLogs.mockResolvedValue({ total: 0, rows: [], next: null });
+    await getLogs(req("logs?workspaceId=w1&days=all"));
+    await getLogs(req("logs?workspaceId=w1"));
+    expect(m.platformLogs.mock.calls.map(([o]) => o.days)).toEqual([null, 30]);
   });
 });
