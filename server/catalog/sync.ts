@@ -334,8 +334,11 @@ export async function catalogSyncRunning(scope: Scope) {
 
 /**
  * "Sync now": nothing new while this brand's sync is queued or running (a double click, two people), else a new job.
- * ponytail: check-then-create, so two presses in the same instant can queue two syncs; they run one after the
- * other and the second finds nothing changed.
+ * ponytail: check-then-create, so two presses in the same instant can queue two syncs. With the worker's parallel
+ * loops they (or one with the daily or connect-time sync) can run at the same time; nothing serialises syncs per brand.
+ * The overlap is harmless: rows are last-writer-wins, so the slower one's fetch (at most the 4-minute deadline older)
+ * can land last, and a product the shop added in between can show archived. No row, credit or connection is lost, and
+ * the next sync corrects it. Take an advisory lock per brand around saveRows + record if that ever matters.
  */
 export async function requestCatalogSync(scope: Scope) {
   if (await catalogSyncRunning(scope)) return { queued: false };
