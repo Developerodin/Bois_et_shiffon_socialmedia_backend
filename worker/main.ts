@@ -27,7 +27,7 @@ function sleep(ms: number, signal: AbortSignal) {
 
 export async function runWorker({ intervalMs, signal, concurrency = 4, now = () => new Date() }: { intervalMs: number; signal: AbortSignal; concurrency?: number; now?: () => Date }) {
   let sweptDay = "";
-  // Each loop is sequential, so an abort mid-run waits for that loop's runDueJobs to settle before the loop sees it.
+  // Each loop is sequential. An abort claims nothing new (runDueJobs sees the signal) and waits for the job in flight.
   const loop = async () => {
     while (!signal.aborted) {
       const t = now();
@@ -42,7 +42,7 @@ export async function runWorker({ intervalMs, signal, concurrency = 4, now = () 
         }
       }
       try {
-        const { processed } = await runDueJobs({ budgetMs: BUDGET_MS });
+        const { processed } = await runDueJobs({ budgetMs: BUDGET_MS, signal });
         if (processed) console.log(`[worker] processed ${processed} job(s)`);
       } catch (error) {
         console.error("[worker]", error);

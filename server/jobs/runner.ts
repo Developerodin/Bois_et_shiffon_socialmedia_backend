@@ -48,15 +48,20 @@ const HANDLERS: Record<string, Handler> = {
 };
 
 /**
- * Drains due jobs until none remain or the time budget is spent (design §8b-1). The budget is only
- * checked between jobs, so callers leave headroom under maxDuration (300 s) for one long job.
- * ponytail: sequential, one job at a time; parallelize per brand when volume needs it.
+ * Drains due jobs until none remain, the time budget is spent (design §8b-1) or `signal` aborts. The budget and the
+ * signal are only checked between jobs: an abort claims nothing new and lets the job in flight finish.
+ * ponytail: sequential, one job at a time; the worker runs several of these at once (WORKER_CONCURRENCY).
+ * ponytail: nothing caps a job's run time off Vercel (maxDuration no longer kills it). A worker's stop grace
+ * (compose stop_grace_period, docker stop -t) must exceed the longest job, or the job is killed mid-run and run again
+ * once its lease (LEASE_MS) expires, as a new attempt. Publishing survives that: its attempt is claimed
+ * SCHEDULED → PUBLISHING first and maxAttempts is 1, so the rerun posts nothing and onPublishJobLost marks it
+ * PENDING_VERIFY for a person to check. Paid agent or render work is paid twice. Add a per-job ceiling if that bites.
  */
-export async function runDueJobs({ budgetMs = 45_000 } = {}) {
+export async function runDueJobs({ budgetMs = 45_000, signal }: { budgetMs?: number; signal?: AbortSignal } = {}) {
   const workerId = `runner-${randomUUID()}`;
   const deadline = Date.now() + budgetMs;
   let processed = 0;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !signal?.aborted) {
     const job = await claimNextJob(workerId);
     if (!job) break;
     processed++;

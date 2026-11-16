@@ -32,6 +32,18 @@ describe("a job whose type this runner doesn't know", () => {
   });
 });
 
+describe("runDueJobs with an abort signal", () => {
+  it("claims nothing after the abort, but finishes the job in flight", async () => {
+    const ac = new AbortController();
+    m.claim.mockReset().mockResolvedValue(job); // the queue never runs dry
+    m.release.mockImplementation(async () => ac.abort()); // SIGTERM arrives while the first job runs
+    const { processed } = await runDueJobs({ budgetMs: 5_000, signal: ac.signal });
+    expect(m.claim).toHaveBeenCalledTimes(1);
+    expect(m.release).toHaveBeenCalledTimes(1);
+    expect(processed).toBe(1);
+  });
+});
+
 describe("kickRunner", () => {
   it("schedules a run after the response by default", () => {
     kickRunner();
