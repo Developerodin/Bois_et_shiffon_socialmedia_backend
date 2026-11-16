@@ -2,15 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 const db = vi.hoisted(() => {
-  const d: Record<string, any> = {
+  const d = {
     agentRun: { findUnique: vi.fn(), findFirstOrThrow: vi.fn(), updateMany: vi.fn() },
     agentEvent: { create: vi.fn() },
     contentVersion: { findFirst: vi.fn() },
     job: { findFirst: vi.fn() },
     // holdsLease's SELECT … FOR SHARE: one row while this runner still holds the job.
     $queryRaw: vi.fn(),
+    $transaction: vi.fn(),
   };
-  d.$transaction = vi.fn(async (fn: (tx: unknown) => unknown) => fn(d));
+  d.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(d));
   return d;
 });
 const refund = vi.hoisted(() => vi.fn());
@@ -26,7 +27,7 @@ import { executeAgentRun, onAgentRunFailure } from "@/server/agents/engine";
 const payload = { runId: "r1", workspaceId: "w1", brandId: "b1" };
 const run = { id: "r1", workspaceId: "w1", brandId: "b1", agentKey: "creator", input: { itemId: "i1", chargeId: "c1" }, startedAt: null, triggeredByUserId: null };
 const lease = { jobId: "j1", leasedBy: "runner-1" };
-const succeeded = () => db.agentRun.updateMany.mock.calls.some(([a]: [{ data: { status: string } }]) => a.data.status === "SUCCEEDED");
+const succeeded = () => db.agentRun.updateMany.mock.calls.some(([a]) => (a as { data: { status: string } }).data.status === "SUCCEEDED");
 
 beforeEach(() => {
   vi.clearAllMocks();

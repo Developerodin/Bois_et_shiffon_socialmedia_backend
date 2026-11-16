@@ -11,7 +11,7 @@ const s = vi.hoisted(() => ({
 }));
 
 vi.mock("@/server/db/prisma", () => {
-  const prisma: Record<string, any> = {
+  const prisma = {
     $executeRaw: async () => 0,
     // holdsLease's SELECT … FOR SHARE: one row while this runner still holds the job.
     $queryRaw: async () => (s.leaseHeld ? [{ id: "j1" }] : []),
@@ -31,8 +31,8 @@ vi.mock("@/server/db/prisma", () => {
     integrationConnection: { findFirst: async () => ({ id: "c1", externalAccountId: "ig1", encryptedCredentials: "x", displayName: "Shop", status: "ACTIVE" }) },
     brandProfile: { findFirst: async () => null },
     auditEvent: { create: async ({ data }: { data: unknown }) => void s.audits.push(data) },
+    $transaction: async (fn: (tx: unknown) => unknown): Promise<unknown> => fn(prisma),
   };
-  prisma.$transaction = async (fn: (tx: unknown) => unknown) => fn(prisma);
   return { prisma };
 });
 vi.mock("@/server/catalog/linked", () => ({ linkedProducts: vi.fn(async () => []) }));
