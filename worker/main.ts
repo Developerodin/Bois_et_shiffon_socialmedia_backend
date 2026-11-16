@@ -36,9 +36,10 @@ function sleep(ms: number, signal: AbortSignal) {
 export function workerSettings(env: Record<string, string | undefined> = process.env) {
   const production = env.NODE_ENV === "production";
   const sweep = (env.WORKER_DAILY_SWEEP ?? "").trim().replace(/^["']|["']$/g, "").toLowerCase();
+  const loops = Number(env.WORKER_CONCURRENCY || NaN); // unset or not a number: 4
   return {
     intervalMs: Number(env.WORKER_INTERVAL_MS) || 15_000,
-    concurrency: Math.max(1, Math.floor(Number(env.WORKER_CONCURRENCY) || 4)),
+    concurrency: Number.isNaN(loops) ? 4 : Math.max(1, Math.floor(loops)),
     dailySweep: sweep === "true" || sweep === "1" ? true : sweep === "false" || sweep === "0" ? false : production,
     production,
   };

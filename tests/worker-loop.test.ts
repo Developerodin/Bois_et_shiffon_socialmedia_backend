@@ -127,7 +127,8 @@ describe("workerSettings", () => {
 
   it("clamps WORKER_CONCURRENCY to an integer of at least 1", () => {
     expect(workerSettings({}).concurrency).toBe(4);
-    expect(workerSettings({ WORKER_CONCURRENCY: "0" }).concurrency).toBe(4);
+    expect(workerSettings({ WORKER_CONCURRENCY: "0" }).concurrency).toBe(1);
+    expect(workerSettings({ WORKER_CONCURRENCY: "" }).concurrency).toBe(4);
     expect(workerSettings({ WORKER_CONCURRENCY: "-3" }).concurrency).toBe(1);
     expect(workerSettings({ WORKER_CONCURRENCY: "2.7" }).concurrency).toBe(2);
     expect(workerSettings({ WORKER_CONCURRENCY: "lots" }).concurrency).toBe(4);
