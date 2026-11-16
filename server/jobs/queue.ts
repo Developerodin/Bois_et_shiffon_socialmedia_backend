@@ -128,7 +128,7 @@ export const HOOK_RETRY_MS = 60_000;
  * (deadLetterJob) only after the hook succeeded; if the hook throws or the process dies first, the next claim finds
  * attempts > maxAttempts and runs the hook again, never the job itself.
  */
-export async function failJob(job: Job, error: unknown, retryable = true) {
+export async function failJob(job: Job, error: unknown, retryable = true, lastError = String(error)) {
   const exhausted = !retryable || job.attempts >= job.maxAttempts;
   const { count } = await prisma.job.updateMany({
     where: { id: job.id, leasedBy: job.leasedBy, status: "RUNNING" },
@@ -137,7 +137,7 @@ export async function failJob(job: Job, error: unknown, retryable = true) {
       runAt: new Date(Date.now() + (exhausted ? HOOK_RETRY_MS : backoffMs(job.attempts))),
       ...(exhausted ? { attempts: job.maxAttempts } : {}),
       leasedUntil: null,
-      lastError: String(error).slice(0, 2000),
+      lastError: lastError.slice(0, 2000),
     },
   });
   return count === 1 ? exhausted : null;

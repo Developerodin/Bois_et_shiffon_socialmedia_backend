@@ -71,7 +71,9 @@ export async function runDueJobs({ budgetMs = 45_000, signal }: { budgetMs?: num
     // Also how a parked job whose failure hook didn't finish comes back (giveUp).
     if (job.attempts > job.maxAttempts) {
       const error = new Error("Stopped: it was cut off before finishing on every attempt");
-      if ((await failJob(job, error, false)) !== null) await giveUp(job, handler, error);
+      // Keep the saved error: a parked job's is the real failure (a story render's refusal text is shown from it).
+      // ponytail: a job cut off mid-run after an earlier failed attempt keeps that attempt's error too.
+      if ((await failJob(job, error, false, job.lastError ?? String(error))) !== null) await giveUp(job, handler, error);
       continue;
     }
     // Not a failure of the job: another release may know this type. Leave it for that one, attempt uncounted.

@@ -40,12 +40,13 @@ describe("a job that used its last attempt", () => {
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("runs again in a minute"), expect.any(Error));
 
     // A minute later: the claim counts one more attempt than allowed, so the job itself doesn't run again.
-    m.claim.mockResolvedValueOnce(job(4)).mockResolvedValue(null);
+    m.claim.mockResolvedValueOnce({ ...job(4), lastError: "Error: boom" }).mockResolvedValue(null);
     m.hook.mockResolvedValue(undefined);
     await runDueJobs({ budgetMs: 5_000 });
     expect(m.run).toHaveBeenCalledTimes(1);
     expect(m.hook).toHaveBeenCalledTimes(2);
     expect(writes().at(-1)!.data).toEqual({ status: "DEAD_LETTER" });
+    expect(writes().at(-2)!.data.lastError).toBe("Error: boom"); // the real failure, not "cut off"
   });
 
   it("a runner that lost the lease neither runs the hook nor dead-letters", async () => {
