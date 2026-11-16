@@ -60,14 +60,7 @@ export async function createClone(scope: Scope, input: { name: string; bytes: Ui
 
   // A place is taken by a row being made (no provider id yet) as much as by a live one: two taps can't make a third.
   const voice = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`clones:${scope.workspaceId}`}))`;
-    // A place held by a request that died (timeout, crash) for over 5 minutes is given back, with its credits. It is
-    // archived, not deleted: the request may have died after ElevenLabs made the voice, so the delete job looks there.
-    const abandoned = await tx.voice.findMany({ where: { workspaceId: scope.workspaceId, providerVoiceId: null, archivedAt: null, createdAt: { lt: new Date(Date.now() - 5 * 60_000) } } });
-    for (const a of abandoned) {
-      await archiveClone(tx, a, null, "voice.clone.abandoned");
-      await refundCharge(scope.workspaceId, a.id, tx);
-    }
+    await reclaimAbandoned(tx, scope.workspaceId);
     const live = await tx.voice.count({ where: { workspaceId: scope.workspaceId, archivedAt: null } });
     if (live >= MAX_CLONES) throw new PublishingError(`A workspace can have ${MAX_CLONES} cloned voices. Delete one first.`, 409);
     const consent = { userId: scope.userId, at: new Date().toISOString(), textVersion: CONSENT_VERSION, appVersion: input.appVersion ?? null, audioSha256: createHash("sha256").update(input.bytes).digest("hex") };
@@ -112,6 +105,32 @@ export async function createClone(scope: Scope, input: { name: string; bytes: Ui
     if (e instanceof PublishingError) throw e;
     throw new PublishingError("The voice couldn't be made. Your credits are back. Try again later.", 502);
   }
+}
+
+const abandonedWhere = () => ({ providerVoiceId: null, archivedAt: null, createdAt: { lt: new Date(Date.now() - 5 * 60_000) } });
+
+/**
+ * Takes the workspace's clone lock. A place held by a request that died (timeout, crash) for over 5 minutes is given
+ * back, with its credits. It is archived, not deleted: the request may have died after ElevenLabs made the voice, so
+ * the delete job looks there. Runs before every clone, and daily for every workspace (reclaimAbandonedClones).
+ */
+async function reclaimAbandoned(tx: Prisma.TransactionClient, workspaceId: string) {
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`clones:${workspaceId}`}))`;
+  const abandoned = await tx.voice.findMany({ where: { workspaceId, ...abandonedWhere() } });
+  for (const a of abandoned) {
+    await archiveClone(tx, a, null, "voice.clone.abandoned");
+    await refundCharge(workspaceId, a.id, tx);
+  }
+}
+
+/**
+ * Daily sweep: the same reclaim in every workspace with an abandoned reservation, so one isn't left (credits taken, the
+ * person's voice possibly at ElevenLabs) until someone in that workspace clones again. Re-read under each lock, so a
+ * reservation that went live meanwhile is left alone; refunds are once per charge.
+ */
+export async function reclaimAbandonedClones() {
+  const rows = await prisma.voice.findMany({ where: abandonedWhere(), select: { workspaceId: true }, distinct: ["workspaceId"] });
+  for (const { workspaceId } of rows) await prisma.$transaction((tx) => reclaimAbandoned(tx, workspaceId));
 }
 
 /** Where a clone's files live: under its workspace, removed when the voice is deleted. */

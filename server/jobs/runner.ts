@@ -22,7 +22,7 @@ import "@/server/reels/presenters"; // registers its asset kind
 import { purgeOldRecordings } from "@/server/reels/recordings";
 import { purgeStaleUploads } from "@/server/stories/uploads";
 import { onStoryRenderFailure, runStoryRender, STORY_RENDER_JOB } from "@/server/stories/service";
-import { onVoiceDeleteFailure, runVoiceDelete, VOICE_DELETE_JOB } from "@/server/reels/clones";
+import { onVoiceDeleteFailure, reclaimAbandonedClones, runVoiceDelete, VOICE_DELETE_JOB } from "@/server/reels/clones";
 import { ReconnectNeeded, refreshExpiringTokens } from "@/server/services/connections";
 import { executePublication, onPublishJobLost, PUBLISH_JOB, PublishingError } from "@/server/services/publishing";
 import { runMonthlyPlans } from "@/server/services/automations";
@@ -155,6 +155,7 @@ async function dailySweep() {
   await enqueueDailyCatalogSyncs();
   await purgeOldRecordings();
   await purgeStaleUploads();
+  await reclaimAbandonedClones();
   const scheduled = AGENTS.filter((a) => a.schedule === "daily");
   if (scheduled.length === 0) return;
   const startOfDay = new Date(new Date().toISOString().slice(0, 10));

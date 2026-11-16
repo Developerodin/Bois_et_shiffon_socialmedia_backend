@@ -16,7 +16,7 @@ vi.mock("@/server/storage/media", () => ({ putMedia: vi.fn(), deleteMedia: vi.fn
 vi.mock("@/server/reels/voice", () => ({ speak: vi.fn(async () => new Uint8Array(8)), SAMPLE_LINE: "x" }));
 
 import { permissionScope, SYSTEM_ROLES } from "@/server/auth/permissions.catalog";
-import { archiveMemberClones, CONSENT_VERSION, createClone, deleteClone } from "@/server/reels/clones";
+import { archiveMemberClones, CONSENT_VERSION, createClone, deleteClone, reclaimAbandonedClones } from "@/server/reels/clones";
 import { needsAiDisclosure, toVersionBody } from "@/server/reels/plan";
 import { postText } from "@/server/services/publishing";
 
@@ -145,6 +145,23 @@ describe("clones that go wrong", () => {
     await onVoiceDeleteFailure({ voiceId: "v1" }, new Error("ElevenLabs 503"), true);
     expect(m.enqueue).toHaveBeenCalledWith(expect.objectContaining({ type: "voices.delete", payload: { voiceId: "v1" }, runAt: expect.any(Date), idempotencyKey: expect.stringMatching(/^voice:v1:delete:\d+$/) }), m.tx);
     expect(m.tx.auditEvent.create.mock.calls[0][0].data).toMatchObject({ action: "voice.clone.delete_failed", entityId: "v1" });
+  });
+});
+
+describe("the daily sweep's clone reclaim", () => {
+  it("gives back every workspace's abandoned reservation under that workspace's lock: archived, delete queued, refunded", async () => {
+    m.tx.voice.findMany
+      .mockResolvedValueOnce([{ workspaceId: "w1" }, { workspaceId: "w2" }]) // workspaces with one
+      .mockResolvedValueOnce([{ id: "v1", workspaceId: "w1" }]) // w1, re-read under its lock
+      .mockResolvedValueOnce([]); // w2: went live meanwhile
+    await reclaimAbandonedClones();
+    expect(m.tx.voice.findMany.mock.calls[0][0]).toMatchObject({ where: { providerVoiceId: null, archivedAt: null }, distinct: ["workspaceId"] });
+    expect(m.prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(m.tx.$executeRaw).toHaveBeenCalledTimes(2); // one clone lock per workspace
+    expect(m.tx.voice.update).toHaveBeenCalledWith({ where: { id: "v1" }, data: { archivedAt: expect.any(Date) } });
+    expect(m.enqueue).toHaveBeenCalledWith(expect.objectContaining({ type: "voices.delete", payload: { voiceId: "v1" } }), m.tx);
+    expect(m.refund).toHaveBeenCalledTimes(1);
+    expect(m.refund).toHaveBeenCalledWith("w1", "v1", m.tx);
   });
 });
 
