@@ -17,6 +17,11 @@ export type PostPayload = {
   boardId: string | null;
   /** An Instagram story: one container per frame (see the INSTAGRAM publisher). */
   story?: StoryPayload;
+  /**
+   * Awaited immediately before the platform's final, irreversible call (media_publish, threads_publish, the Page post,
+   * the Pin). If it throws, nothing is sent. Not used for stories, which check per frame (onPublishing).
+   */
+  beforePublish?: () => Promise<void>;
 };
 /**
  * `frames`: every frame of the story, links signed just before the call; `skip`: frames already posted (their url may
@@ -70,6 +75,7 @@ export const PUBLISHERS: Partial<
   Record<IntegrationProvider, (p: PostPayload, account: { id: string; token: string }) => Promise<Published>>
 > = {
   async META(p, { id, token }) {
+    await p.beforePublish?.();
     const res = p.imageUrl
       ? await post(`${GRAPH}/${id}/photos`, { url: p.imageUrl, caption: p.text, access_token: token })
       : await post(`${GRAPH}/${id}/feed`, { message: p.text, access_token: token });
@@ -125,6 +131,7 @@ export const PUBLISHERS: Partial<
       c = await post(`${IG}/${id}/media`, { image_url: p.imageUrl!, caption: p.text, alt_text: p.altText, access_token: token });
       await ready(c.id);
     }
+    await p.beforePublish?.();
     const res = await post(`${IG}/${id}/media_publish`, { creation_id: c.id, access_token: token });
     const link = await call<{ permalink?: string }>(`${IG}/${res.id}?fields=permalink&access_token=${encodeURIComponent(token)}`).catch(() => ({ permalink: undefined }));
     return { externalId: res.id, externalUrl: link.permalink ?? null };
@@ -137,12 +144,14 @@ export const PUBLISHERS: Partial<
       access_token: token,
     });
     await waitForContainer(`${THREADS}/${c.id}?fields=FIELD&access_token=${encodeURIComponent(token)}`, "status");
+    await p.beforePublish?.();
     const res = await post(`${THREADS}/${id}/threads_publish`, { creation_id: c.id, access_token: token });
     const link = await call<{ permalink?: string }>(`${THREADS}/${res.id}?fields=permalink&access_token=${encodeURIComponent(token)}`).catch(() => ({ permalink: undefined }));
     return { externalId: res.id, externalUrl: link.permalink ?? null };
   },
 
   async PINTEREST(p, { token }) {
+    await p.beforePublish?.();
     const res = await call<{ id: string }>(`${PINTEREST}/pins`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },

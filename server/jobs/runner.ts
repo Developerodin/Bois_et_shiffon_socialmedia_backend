@@ -12,7 +12,7 @@ import { AiProviderError } from "@/server/ai/provider";
 import { CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
 import { prisma } from "@/server/db/prisma";
 import { EMAIL_SEND_JOB, sendOutboxEmail } from "@/server/email/outbox";
-import { claimNextJob, completeJob, enqueueJob, failJob, holdLease, releaseJob } from "@/server/jobs/queue";
+import { claimNextJob, completeJob, enqueueJob, failJob, holdLease, type Lease, releaseJob } from "@/server/jobs/queue";
 import { onShootFailure, PHOTOSHOOT_JOB, runShoot } from "@/server/photoshoot/shoot";
 import { advanceRender, failRender, REEL_RENDER_JOB } from "@/server/reels/render";
 import { onAssetFailure, REEL_ASSET_JOB, runAsset } from "@/server/reels/assets";
@@ -28,7 +28,7 @@ import { runMonthlyPlans } from "@/server/services/automations";
 import { renewDuePlans } from "@/server/services/subscriptions";
 
 type Handler = {
-  run: (payload: unknown) => Promise<void>;
+  run: (payload: unknown, lease: Lease) => Promise<void>;
   onFailure?: (payload: unknown, error: unknown, exhausted: boolean) => Promise<void>;
 };
 
@@ -79,7 +79,7 @@ export async function runDueJobs({ budgetMs = 45_000, signal }: { budgetMs?: num
     }
     const release = holdLease(job);
     try {
-      await handler.run(job.payload);
+      await handler.run(job.payload, { jobId: job.id, leasedBy: job.leasedBy });
       await completeJob(job);
     } catch (error) {
       // A catalogue sync whose Shopify token was refused waits for a person to reconnect; a story render refused

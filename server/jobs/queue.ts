@@ -73,6 +73,22 @@ export function holdLease(job: Job) {
   return () => clearInterval(timer);
 }
 
+/** The claim a handler runs under (runner.ts passes it): enough to check that this runner still holds the job. */
+export type Lease = { jobId: string; leasedBy: string | null };
+
+/**
+ * For a handler's last irreversible step or final write, inside its transaction: whether this runner still holds the
+ * job, with a minute to spare (longer than one provider call's 30 s timeout). FOR SHARE keeps another runner from
+ * reclaiming or failing the job until the caller's transaction ends.
+ */
+export async function holdsLease(tx: Prisma.TransactionClient, lease: Lease) {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id FROM "Job"
+    WHERE id = ${lease.jobId} AND "leasedBy" = ${lease.leasedBy} AND status = 'RUNNING' AND "leasedUntil" > now() + interval '1 minute'
+    FOR SHARE`;
+  return rows.length === 1;
+}
+
 /** Only the lease holder may complete/fail a job (a reclaimed job's old runner is ignored). */
 export async function completeJob(job: Job) {
   await prisma.job.updateMany({

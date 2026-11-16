@@ -3,7 +3,7 @@ import { aiDisclosureLine, needsAiDisclosure } from "@/server/reels/plan";
 import type { ApprovalVerdict, ContentChannel, IntegrationProvider, Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefused } from "@/server/integrations/publishers";
-import { enqueueJob } from "@/server/jobs/queue";
+import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { safeHttpUrl } from "@espanda/shared";
 import { hasOtherApprover, requirePermission } from "@/server/auth/permissions";
@@ -418,8 +418,11 @@ export async function schedulePublication(input: {
   return attempt;
 }
 
+/** beforePublish found this attempt no longer live: nothing was sent, and nothing is written (it isn't this runner's). */
+class PublishStopped extends Error {}
+
 /** Job handler. Never throws: a retry could double-post, so every outcome is recorded instead. */
-export async function executePublication(payload: unknown) {
+export async function executePublication(payload: unknown, lease?: Lease) {
   const { attemptId } = payload as { attemptId: string };
   const claimed = await prisma.publicationAttempt.updateMany({ where: { id: attemptId, status: "SCHEDULED" }, data: { status: "PUBLISHING" } });
   if (claimed.count !== 1) return; // cancelled, or already handled
@@ -508,15 +511,26 @@ export async function executePublication(payload: unknown) {
   const body = latest.body as Body;
   const target = a.target as Target;
   const profile = await prisma.brandProfile.findFirst({ where: { brandId: a.brandId }, select: { websiteUrl: true } });
+  // Immediately before the platform's irreversible call, the CAS a story makes per frame (save): this attempt must
+  // still be PUBLISHING and this runner must still hold its job. Otherwise it was declared lost while the containers
+  // processed (releaseState after 10 minutes, onPublishJobLost after a lost lease), and a person may already have said
+  // "it didn't post" and booked it again: posting now would post it twice. The CAS also moves updatedAt, so
+  // releaseState's 10 minutes start over for the one call left (30 s timeout).
+  const beforePublish = async () => {
+    const live = await prisma.$transaction(async (tx) =>
+      (!lease || (await holdsLease(tx, lease))) && (await tx.publicationAttempt.updateMany({ where: { id: a.id, status: "PUBLISHING" }, data: { updatedAt: new Date() } })).count === 1);
+    if (!live) throw new PublishStopped();
+  };
   try {
     // Uploads are private: the platform gets a link valid for an hour, made at the moment of posting.
     const images = [...(await Promise.all((target.media ?? []).map((k) => signedMediaUrl(k, 3600)))), ...(target.links ?? (target.imageUrl ? [target.imageUrl] : []))];
     const res = await publisher(
-      { text: postText(body), title: body.pinTitle || body.hook || item.title, altText: body.altText ?? "", link: safeHttpUrl(profile?.websiteUrl)?.href ?? null, imageUrl: images[0] ?? null, imageUrls: images, videoUrl: target.videoKey ? await signedMediaUrl(target.videoKey, 3600) : (target.videoUrl ?? null), boardId: target.boardId },
+      { text: postText(body), title: body.pinTitle || body.hook || item.title, altText: body.altText ?? "", link: safeHttpUrl(profile?.websiteUrl)?.href ?? null, imageUrl: images[0] ?? null, imageUrls: images, videoUrl: target.videoKey ? await signedMediaUrl(target.videoKey, 3600) : (target.videoUrl ?? null), boardId: target.boardId, beforePublish },
       { id: conn.externalAccountId, token },
     );
     await finish("PUBLISHED", { externalId: res.externalId, externalUrl: safeHttpUrl(res.externalUrl)?.href ?? null, publishedAt: new Date(), error: null }, "PUBLISHED");
   } catch (e) {
+    if (e instanceof PublishStopped) return;
     const msg = e instanceof Error ? e.message.slice(0, 300) : "Unknown error";
     if (e instanceof PublishRefused) {
       // The platform no longer accepts this token: say so on the account, not just on this post.
@@ -615,8 +629,9 @@ export async function executePublication(payload: unknown) {
 }
 
 /**
- * The publish job died mid-run (timeout, crash) and won't be retried: whatever is still PUBLISHING
- * may or may not have posted, so a person checks the account.
+ * The publish job died mid-run (timeout, crash) or lost its lease, and won't be retried: whatever is still PUBLISHING
+ * may or may not have posted, so a person checks the account. A runner still going finds this at its beforePublish
+ * (or its next story frame) and stops.
  */
 export async function onPublishJobLost(payload: unknown) {
   const { attemptId } = payload as { attemptId: string };
@@ -791,7 +806,11 @@ export async function releaseState(scope: { workspaceId: string; brandId: string
     prisma.publicationAttempt.findMany({ where: { contentItemId: item.id }, orderBy: { createdAt: "desc" }, take: 20 }),
     currentApproval(item.id, latest, item.channel),
   ]);
-  // ponytail: a crashed worker leaves PUBLISHING forever; after 10 min treat it as unknown outcome.
+  // A worker that died leaves PUBLISHING; after 10 min without a write, treat it as an unknown outcome. The job's lease
+  // reclaim (onPublishJobLost) usually gets there first; this covers a queue nobody drains. A live publish can take
+  // longer than 10 min (a slow reel polls its container for up to ~28 min), so this can catch one still running: its
+  // beforePublish CAS then finds PENDING_VERIFY and it posts nothing, and the person checks the account and sees
+  // nothing there. Safe, at the price of publishing that one again. ponytail: raise the 10 min if that happens often.
   for (const a of attempts) {
     if (a.status === "PUBLISHING" && Date.now() - a.updatedAt.getTime() > 10 * 60_000) {
       if (storyTargetOf(a.target)) {
