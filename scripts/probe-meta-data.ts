@@ -3,7 +3,7 @@
  * (no OAuth flow or https tunnel needed). Prints data shapes and counts, never tokens.
  *   INSTAGRAM_TEST_TOKEN — Instagram use case → API setup with Instagram login → Generate access tokens
  *   THREADS_TEST_TOKEN   — Threads use case → Settings → User Token Generator (public tester account)
- * Run: npm run probe:meta -w web
+ * Run: npm run probe:meta -w server
  */
 type Json = Record<string, unknown> & { data?: Json[]; error?: { message?: string; code?: number } };
 
@@ -57,7 +57,7 @@ async function threads(token: string) {
 (async () => {
   const ig = process.env.INSTAGRAM_TEST_TOKEN;
   const th = process.env.THREADS_TEST_TOKEN;
-  if (!ig && !th) console.log("Set INSTAGRAM_TEST_TOKEN and/or THREADS_TEST_TOKEN in apps/web/.env first.");
+  if (!ig && !th) console.log("Set INSTAGRAM_TEST_TOKEN and/or THREADS_TEST_TOKEN in apps/server/.env first.");
   if (ig) await instagram(ig);
   else console.log("– Instagram skipped (no INSTAGRAM_TEST_TOKEN)");
   if (th) await threads(th);

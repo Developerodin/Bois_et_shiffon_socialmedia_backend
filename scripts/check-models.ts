@@ -3,7 +3,7 @@
  * breakpoints, and the escalation / backup paths, with OpenAI, the model settings and the ledger write faked.
  * No network, no database. Uses a made-up line-up: it checks the logic, not a vendor's models (those are set in
  * Platform admin → AI models).
- * Run: npm run check:models -w web
+ * Run: npm run check:models -w server
  */
 import assert from "node:assert/strict";
 import { z } from "zod";

@@ -1,7 +1,7 @@
 /**
  * Brand-asset extraction checks. Parsing asserts always run; `--offline` skips the network part
  * (SSRF/SVG/truncation rejection, Shopify catalogue and a real logo stored + deleted on Neon).
- * Run: npm run check:brand-assets -w web [-- --offline]
+ * Run: npm run check:brand-assets -w server [-- --offline]
  */
 import assert from "node:assert/strict";
 import { dominantColors, isNeutral, parseColor } from "@/server/research/colors";

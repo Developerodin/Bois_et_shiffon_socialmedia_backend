@@ -1,7 +1,7 @@
 /**
  * Dev tool: run the SEO or GEO agent against any URL for the seeded brand, without the job queue
  * and without changing the brand's saved website. Saves a real AuditReport.
- * Run: npm run audit -w web -- seo https://www.example.com
+ * Run: npm run audit -w server -- seo https://www.example.com
  */
 import { randomUUID } from "node:crypto";
 import { loadBrandContext } from "@/server/agents/brand-context";

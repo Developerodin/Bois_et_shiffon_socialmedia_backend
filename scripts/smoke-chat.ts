@@ -2,7 +2,7 @@
  * CMO chat on Neon + the running app (npm run start): the tools read the right brand data and
  * refuse agent runs for roles without agents.run; the route streams, saves the conversation,
  * explains an empty AI balance plainly, and keeps conversations private to their owner.
- * Run: npm run smoke:chat -w web
+ * Run: npm run smoke:chat -w server
  */
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";

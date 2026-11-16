@@ -11,7 +11,7 @@
  * - medium: reading, finding and structuring (lookup, summary, ideas, audits, chat). Accuracy and speed.
  * - light: short, low-stakes calls where a loose answer is fine. Nothing that quotes the brand goes here: the
  *   cheapest model tested returned a section heading when asked for the site's slogan.
- * Before changing a tier's model, run the test set against the new one (npm run eval -w web -- --models <name>).
+ * Before changing a tier's model, run the test set against the new one (npm run eval -w server -- --models <name>).
  */
 import type { ModelConfig } from "@/server/ai/model-config";
 

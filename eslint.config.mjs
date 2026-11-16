@@ -9,26 +9,29 @@ const compat = new FlatCompat({
   baseDirectory: __dirname,
 });
 
+const SOURCES = "{ts,tsx,js,jsx,mjs}";
+
+// The Server takes nothing from the Web Frontend: no components, and no relative import that climbs out of
+// apps/server (shared code lives in @espanda/shared). One block per folder depth, since how many "../" leave the app
+// depends on where the file sits (ESLint keeps only the last matching block's options for a rule).
+const boundary = (depth) => ({
+  files: [`${"*/".repeat(depth)}*.${SOURCES}`],
+  rules: {
+    "no-restricted-imports": [
+      "error",
+      {
+        patterns: [
+          { group: ["@/components", "@/components/*"], message: "Website code: the Server doesn't import the Web Frontend." },
+          { regex: `^(\.\./){${depth + 1},}`, message: "Leaves apps/server: import from inside the app, or from @espanda/shared." },
+        ],
+      },
+    ],
+  },
+});
+
 const eslintConfig = [
   ...compat.extends("next/core-web-vitals", "next/typescript"),
-  // The browser side (pages, components, lib) must not reach server code or server-only packages; it goes through
-  // the API. Files still doing so are marked "converted in task N" and are fixed as the split proceeds.
-  {
-    files: ["app/**/*.{ts,tsx}", "components/**/*.{ts,tsx}", "lib/**/*.{ts,tsx}"],
-    ignores: ["app/api/**"],
-    rules: {
-      "no-restricted-imports": [
-        "error",
-        {
-          paths: ["@prisma/client", "prisma", "next-auth", "@ai-sdk/openai", "nodemailer", "bcryptjs", "sharp", "ffmpeg-static", "ffprobe-static", "jose"].map((name) => ({ name, message: "Server-only: reach it through the API." })),
-          patterns: [
-            { group: ["@/server", "@/server/**", "@/auth*"], message: "Server-only: reach it through the API." },
-            { group: ["next-auth/*", "!next-auth/react", "@auth/*", "@aws-sdk/*"], message: "Server-only: reach it through the API." },
-          ],
-        },
-      ],
-    },
-  },
+  ...Array.from({ length: 12 }, (_, depth) => boundary(depth)),
   // These tests fake Prisma with in-memory tables whose rows and where-clauses have no fixed shape.
   {
     files: ["tests/stories-by-hand.test.ts", "tests/stories-publish.test.ts", "tests/stories-save.test.ts"],

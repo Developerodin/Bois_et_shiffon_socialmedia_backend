@@ -3,7 +3,7 @@
  *  1. composite tenant FK rejects a row whose workspaceId doesn't own its brandId (AT-021)
  *  2. concurrent claims of one job → exactly one winner (AT-007)
  *  3. agent pipeline: start → job → runner → AI (mock or OpenAI) → Agent Log → SUCCEEDED
- * Run: npm run smoke:agents -w web   (cleans up after itself)
+ * Run: npm run smoke:agents -w server   (cleans up after itself)
  */
 import assert from "node:assert/strict";
 import { prisma } from "@/server/db/prisma";

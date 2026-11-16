@@ -1,5 +1,6 @@
 import type { IntegrationConnection, Prisma } from "@prisma/client";
 import { z } from "zod";
+import type { CatalogSync, SyncReason } from "@espanda/shared";
 import { SHOPIFY_REFUSED, shopifyVariants, type ShopifyVariant } from "@/server/catalog/shopify";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
@@ -18,9 +19,6 @@ export const CATALOG_SYNC_JOB = "catalog.sync";
 
 type Scope = { workspaceId: string; brandId: string };
 type SyncedSource = "WEBSITE" | "SHOPIFY";
-/** `error` is the message the web shows; `reason` lets the app say it in the person's language. */
-export type CatalogSync = { at: string; source: SyncedSource | null; count: number; error: string | null; reason?: SyncReason | null };
-export type SyncReason = "not-a-feed" | "partial" | "failed" | "shopify-refused";
 type Note = { error: string; reason: SyncReason };
 
 /** What a sync writes: every field it owns, except stockCheckedAt and archivedAt, which saving sets. */

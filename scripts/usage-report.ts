@@ -1,6 +1,6 @@
 /**
  * What we've spent: AI calls by model, tier and task, and other paid APIs, in USD and INR. Read-only.
- * Run: npm run usage -w web [-- --days 30]   (default: everything recorded)
+ * Run: npm run usage -w server [-- --days 30]   (default: everything recorded)
  * INR uses USD_INR from .env when set, else today's rate from open.er-api.com.
  * ponytail: loads every row in the period into memory; fine to ~100k calls, then aggregate in SQL (groupBy) instead.
  * Rows from before 2026-10-29 have tokens but no stored cost: they're priced from their tokens at today's list price,

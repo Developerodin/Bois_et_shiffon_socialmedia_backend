@@ -1,7 +1,7 @@
 /**
  * Manual agent runs cost credits: new workspace starts at 20, each run takes 5, the 5th is refused,
  * a failed run is refunded, and UNLIMITED_CREDIT_WORKSPACES never runs out. Throwaway workspace.
- * Run: npm run smoke:credits -w web
+ * Run: npm run smoke:credits -w server
  */
 import assert from "node:assert/strict";
 import { prisma } from "@/server/db/prisma";

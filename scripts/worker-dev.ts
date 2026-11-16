@@ -2,7 +2,7 @@
  * Local dev worker: drains the job queue every few seconds.
  * Dev only — in production the runner is kicked by after() + the daily cron,
  * because a polling loop would keep Neon awake (design §8b-1).
- * Run: npm run worker:dev -w web
+ * Run: npm run worker:dev -w server
  */
 import { runDueJobs } from "@/server/jobs/runner";
 

@@ -4,7 +4,7 @@ import { hasUnlimitedCredits } from "@/server/services/credits";
 /**
  * Plans (mobile "06 No subscription"): a workspace's plan unlocks making videos (reel renders) and generating the
  * posts calendar, and adds its credits every month. No payments yet: a platform admin activates a plan
- * (`npm run set-plan -w web`); store purchases plug in here later. Workspaces with unlimited credits count as planned.
+ * (`npm run set-plan -w server`); store purchases plug in here later. Workspaces with unlimited credits count as planned.
  * ponytail: prices aren't set, so the app shows "Pricing is not available yet" instead of a purchase button.
  */
 export const PLANS = {

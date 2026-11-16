@@ -1,11 +1,11 @@
 /**
  * Product catalogue pure-logic checks (server/catalog): feed variant → row, price parsing, HTML stripping,
- * variant titles, "archive only after a complete fetch", the row cap, Shopify ids and throttling, the stock label.
+ * variant titles, "archive only after a complete fetch", the row cap, Shopify ids and throttling. (The stock label is
+ * the website's: apps/web/tests/stock-label.test.ts.)
  * No network, no database.
  * Run: npx tsx --conditions=react-server --env-file=.env scripts/check-catalog.ts
  */
 import assert from "node:assert/strict";
-import { stockLabel } from "@/components/products/api";
 import { shopDomain, throttleWaitMs } from "@/server/catalog/shopify";
 import { archiveWhere, capRows, MAX_ROWS, parsePrice, sameRow, shopifyRows, variantNumericId, variantTitle, websiteRows } from "@/server/catalog/sync";
 
@@ -139,14 +139,5 @@ for (const bad of ["44123456789", "gid://shopify/Product/1", "gid://shopify/Prod
 // Throttling: wait (requested − available) / restoreRate seconds; nothing when the bucket already holds enough.
 assert.equal(throttleWaitMs({ requestedQueryCost: 502, actualQueryCost: null, throttleStatus: { currentlyAvailable: 2, restoreRate: 50 } }), 10_000);
 assert.equal(throttleWaitMs({ requestedQueryCost: 100, actualQueryCost: 80, throttleStatus: { currentlyAvailable: 900, restoreRate: 50 } }), 0);
-
-// Stock label: a count wins when positive; 0 or less with inStock true (untracked / keep selling) is "In stock".
-assert.equal(stockLabel({ stockQuantity: 12, inStock: true }), "12 in stock");
-assert.equal(stockLabel({ stockQuantity: 0, inStock: true }), "In stock");
-assert.equal(stockLabel({ stockQuantity: -3, inStock: true }), "In stock");
-assert.equal(stockLabel({ stockQuantity: 0, inStock: false }), "Out of stock");
-assert.equal(stockLabel({ stockQuantity: 0, inStock: null }), "Out of stock");
-assert.equal(stockLabel({ stockQuantity: null, inStock: true }), "In stock");
-assert.equal(stockLabel({ stockQuantity: null, inStock: null }), "Unknown");
 
 console.log("check-catalog: all checks passed");

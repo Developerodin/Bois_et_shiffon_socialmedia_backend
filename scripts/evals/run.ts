@@ -1,10 +1,10 @@
 /**
  * Runs the test set (cases.ts) and reports pass/fail, cost and speed per case and model.
- *   npm run eval -w web                          each case on the model its task is routed to (the release gate)
- *   npm run eval -w web -- --models all          every model ticked "Compare in tests", to pick tiers (see the "cheapest that passes")
- *   npm run eval -w web -- --models <name>,<name> --only creator,inject
- *   npm run eval -w web -- --judge               also score writing tasks with a stronger, pinned judge model
- *   npm run eval -w web -- --models all --only doc,creator --pairwise --repeat 3
+ *   npm run eval -w server                          each case on the model its task is routed to (the release gate)
+ *   npm run eval -w server -- --models all          every model ticked "Compare in tests", to pick tiers (see the "cheapest that passes")
+ *   npm run eval -w server -- --models <name>,<name> --only creator,inject
+ *   npm run eval -w server -- --judge               also score writing tasks with a stronger, pinned judge model
+ *   npm run eval -w server -- --models all --only doc,creator --pairwise --repeat 3
  *                                                each model's writing against the routed model's, side by side
  * Run it before changing a tier's model, after OpenAI ships a model, and after changing a prompt.
  * Exit code 1 when a case fails on its routed model: usable as a CI / release gate.

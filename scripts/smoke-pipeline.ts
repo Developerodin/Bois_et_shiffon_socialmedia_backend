@@ -2,7 +2,7 @@
  * Content pipeline end to end on Neon with the mock AI (no OpenAI calls, no credits needed):
  * scout → shortlist → planner → brief → creator → quality → analyst, plus the fix loop
  * (blocked draft → creator revises → new version → quality passes). Uses a throwaway brand.
- * Run: npm run smoke:pipeline -w web
+ * Run: npm run smoke:pipeline -w server
  */
 process.env.OPENAI_API_KEY = ""; // force the mock provider before anything reads it
 

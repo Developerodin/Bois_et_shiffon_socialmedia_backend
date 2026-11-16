@@ -2,7 +2,7 @@
  * Competitor audits on Neon with the mock AI (no OpenAI credits needed; PageSpeed/crawl are real):
  * discovery → paid fresh audit (credits, lock, no double charge while running) → shared library
  * seen by another workspace without the requester → refund on failure → insufficient credits.
- * Uses throwaway workspaces/brands. Run: npm run smoke:competitors -w web
+ * Uses throwaway workspaces/brands. Run: npm run smoke:competitors -w server
  */
 process.env.OPENAI_API_KEY = ""; // mock AI before anything reads it
 

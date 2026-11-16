@@ -1,6 +1,6 @@
 /**
  * Live check against the linked Neon branch: Postgres round-trip + Object
- * Storage put → presigned GET → delete. Run: npm run smoke:neon -w web
+ * Storage put → presigned GET → delete. Run: npm run smoke:neon -w server
  */
 import { prisma } from "@/server/db/prisma";
 import {

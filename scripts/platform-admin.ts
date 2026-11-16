@@ -1,10 +1,10 @@
 /**
  * Who is a platform admin (User.isPlatformAdmin: Platform admin → AI models, /admin). Run by someone with database access;
  * there is deliberately no screen for it, since a platform admin sees every workspace.
- *   npm run platform-admin -w web -- list
- *   npm run platform-admin -w web -- create platform@example.com   a new account just for this, password printed once
- *   npm run platform-admin -w web -- grant person@example.com
- *   npm run platform-admin -w web -- revoke person@example.com
+ *   npm run platform-admin -w server -- list
+ *   npm run platform-admin -w server -- create platform@example.com   a new account just for this, password printed once
+ *   npm run platform-admin -w server -- grant person@example.com
+ *   npm run platform-admin -w server -- revoke person@example.com
  * Each change is recorded as an AuditEvent (platform.admin_granted / platform.admin_revoked).
  */
 import { randomBytes } from "node:crypto";
@@ -37,7 +37,7 @@ const email = rawEmail?.trim().toLowerCase();
     return;
   }
   if ((command !== "grant" && command !== "revoke") || !email) {
-    console.error("Usage: npm run platform-admin -w web -- list | create <email> | grant <email> | revoke <email>");
+    console.error("Usage: npm run platform-admin -w server -- list | create <email> | grant <email> | revoke <email>");
     process.exitCode = 1;
     return;
   }

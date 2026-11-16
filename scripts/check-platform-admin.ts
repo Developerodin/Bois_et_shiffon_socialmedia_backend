@@ -2,7 +2,7 @@
  * The admin console shows each person's permissions; they must be exactly what the app enforces. Compares
  * workspaceDetail() with effectivePermissions() for every member of every workspace, on the workspace and on each
  * project. Read-only (reads the database named in .env).
- * Run: npm run check:platform-admin -w web
+ * Run: npm run check:platform-admin -w server
  */
 import assert from "node:assert/strict";
 import { effectivePermissions } from "@/server/auth/permissions";

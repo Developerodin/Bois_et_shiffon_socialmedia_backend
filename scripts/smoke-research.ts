@@ -1,7 +1,7 @@
 /**
  * Live Slice 1 check on Neon: create brand → Research agent crawls the site →
  * five DRAFT docs → confirm / edit / stale-edit / stale-confirm rules.
- * Uses a throwaway brand (deleted after). Run: npm run smoke:research -w web [url]
+ * Uses a throwaway brand (deleted after). Run: npm run smoke:research -w server [url]
  */
 import assert from "node:assert/strict";
 import { prisma } from "@/server/db/prisma";

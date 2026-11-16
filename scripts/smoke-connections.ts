@@ -1,7 +1,7 @@
 /**
  * Live connect-flow check on Neon (no provider login needed): start → state stored hashed →
  * callback consumes it once (replay + wrong user rejected) → disconnect wipes tokens.
- * Run: npm run smoke:connections -w web
+ * Run: npm run smoke:connections -w server
  */
 import assert from "node:assert/strict";
 import { prisma } from "@/server/db/prisma";

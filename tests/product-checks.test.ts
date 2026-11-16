@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { stockLabel } from "@/components/products/api";
 import {
   gateIssues, pricesIn, productName, productRows, rankCandidates, snapshotOf, stillPriced, stockState, type LinkedProduct, type ProductRow, type Snapshot,
 } from "@/server/content/product-checks";
@@ -45,16 +44,17 @@ describe("stockState", () => {
     expect(stockState([row({ stockCheckedAt: hoursAgo(80) }), row({ inStock: false })], now)).toBe("unconfirmed");
   });
 
-  // The mobile stockLabel (apps/mobile/src/ui/business/products.ts) is the same rule; it can't be imported here
-  // (its "@/i18n" is mobile's alias), so the web one stands for both.
-  it("agrees with the web stockLabel for in, out and unknown", () => {
-    const web = { "In stock": "in", "Out of stock": "out", Unknown: "unknown" } as Record<string, string>;
-    for (const inStock of [true, false, null]) {
-      for (const stockQuantity of [null, 0, 5, -2]) {
-        const r = row({ inStock, stockQuantity });
-        const label = stockLabel(r);
-        expect(stockState([r], now), `${inStock}/${stockQuantity}`).toBe(web[label] ?? "in");
-      }
+  // The web's stockLabel (apps/web/tests/stock-label.test.ts) and the mobile one (apps/mobile/src/ui/business/products.ts)
+  // follow the same rule. The apps can't import each other, so both tests hold the same cases: a label of "N in stock"
+  // or "In stock" is in, "Out of stock" is out, "Unknown" is unknown.
+  it("agrees with the apps' stock labels", () => {
+    const table: [boolean | null, number | null, string][] = [
+      [true, null, "in"], [true, 0, "in"], [true, 5, "in"], [true, -2, "in"],
+      [false, null, "out"], [false, 0, "out"], [false, 5, "in"], [false, -2, "out"],
+      [null, null, "unknown"], [null, 0, "out"], [null, 5, "in"], [null, -2, "out"],
+    ];
+    for (const [inStock, stockQuantity, state] of table) {
+      expect(stockState([row({ inStock, stockQuantity })], now), `${inStock}/${stockQuantity}`).toBe(state);
     }
   });
 });

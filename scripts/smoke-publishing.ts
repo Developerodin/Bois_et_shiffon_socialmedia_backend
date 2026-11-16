@@ -5,7 +5,7 @@
  * draft changed after scheduling, cancel; a person's edit (new version, voids approval, stale edits
  * refused); "request changes" reaching the Creator with the approver's note; agents never overwrite
  * a newer draft; expiring tokens refreshed before posting, refused ones flagged for reconnect;
- * disconnecting cancels scheduled posts. Throwaway workspace. Run: npm run smoke:publishing -w web
+ * disconnecting cancels scheduled posts. Throwaway workspace. Run: npm run smoke:publishing -w server
  */
 import assert from "node:assert/strict";
 import { encryptCredentials } from "@/server/crypto/credentials";

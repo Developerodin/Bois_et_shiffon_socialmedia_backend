@@ -3,7 +3,7 @@
  * project invite → accept (single use) → Member sees only that project with the project role →
  * project admin adds a colleague, can't reach another project → custom role → role change →
  * last-owner guard → password reset (single use, revokes sessions). Cleans up.
- * Run: npm run smoke:rbac -w web
+ * Run: npm run smoke:rbac -w server
  */
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import assert from "node:assert/strict";

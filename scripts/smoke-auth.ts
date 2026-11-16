@@ -1,7 +1,7 @@
 /**
  * Live login-hardening check against the running app (port 3100) + Neon:
  * rate limit, unknown-email timing, session revocation, disabled accounts.
- * Run with the app started: npm run smoke:auth -w web
+ * Run with the app started: npm run smoke:auth -w server
  */
 import assert from "node:assert/strict";
 import bcrypt from "bcryptjs";

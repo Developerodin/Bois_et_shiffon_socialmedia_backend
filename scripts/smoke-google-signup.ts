@@ -2,7 +2,7 @@
  * Google sign-up provisioning on Neon: an email invited to a project joins that workspace as
  * Member with the project role (invite used up) and still gets a workspace of its own;
  * a new email gets its own workspace as Owner.
- * Run: npm run smoke:google -w web
+ * Run: npm run smoke:google -w server
  */
 import assert from "node:assert/strict";
 import { prisma } from "@/server/db/prisma";
