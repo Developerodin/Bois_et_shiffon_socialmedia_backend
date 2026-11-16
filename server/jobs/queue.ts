@@ -85,6 +85,17 @@ export function backoffMs(attempts: number) {
   return Math.min(60 * 60_000, 2 ** attempts * 15_000);
 }
 
+/**
+ * Hands a claimed job back untouched (a type this runner doesn't know, e.g. queued by a newer release): pending again
+ * in a minute, the claim's attempt not counted. Guarded by the lease so a reclaimed job isn't disturbed.
+ */
+export async function releaseJob(job: Pick<Job, "id" | "leasedBy">) {
+  await prisma.job.updateMany({
+    where: { id: job.id, leasedBy: job.leasedBy, status: "RUNNING" },
+    data: { status: "PENDING", runAt: new Date(Date.now() + 60_000), leasedUntil: null, leasedBy: null, attempts: { decrement: 1 } },
+  });
+}
+
 /** Whether the job has no tries left, or null when this runner had lost the lease (nothing written: not its to fail). */
 export async function failJob(job: Job, error: unknown, retryable = true) {
   const exhausted = !retryable || job.attempts >= job.maxAttempts;

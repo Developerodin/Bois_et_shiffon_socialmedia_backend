@@ -2,10 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 
 vi.hoisted(() => {
-  process.env.AWS_ACCESS_KEY_ID = "test";
-  process.env.AWS_SECRET_ACCESS_KEY = "test";
-  process.env.AWS_REGION = "us-east-1";
-  process.env.AWS_ENDPOINT_URL = "https://storage.example.com";
+  process.env.STORAGE_ACCESS_KEY_ID = "test";
+  process.env.STORAGE_SECRET_ACCESS_KEY = "test";
+  process.env.STORAGE_REGION = "us-east-1";
+  process.env.STORAGE_ENDPOINT = "https://storage.example.com";
 });
 
 const m = vi.hoisted(() => ({

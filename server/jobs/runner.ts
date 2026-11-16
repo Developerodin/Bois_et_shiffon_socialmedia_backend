@@ -12,7 +12,7 @@ import { AiProviderError } from "@/server/ai/provider";
 import { CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
 import { prisma } from "@/server/db/prisma";
 import { EMAIL_SEND_JOB, sendOutboxEmail } from "@/server/email/outbox";
-import { claimNextJob, completeJob, enqueueJob, failJob, holdLease } from "@/server/jobs/queue";
+import { claimNextJob, completeJob, enqueueJob, failJob, holdLease, releaseJob } from "@/server/jobs/queue";
 import { onShootFailure, PHOTOSHOOT_JOB, runShoot } from "@/server/photoshoot/shoot";
 import { advanceRender, failRender, REEL_RENDER_JOB } from "@/server/reels/render";
 import { onAssetFailure, REEL_ASSET_JOB, runAsset } from "@/server/reels/assets";
@@ -67,9 +67,13 @@ export async function runDueJobs({ budgetMs = 45_000 } = {}) {
       if ((await failJob(job, error, false)) !== null) await handler?.onFailure?.(job.payload, error, true).catch(() => {});
       continue;
     }
+    // Not a failure of the job: another release may know this type. Leave it for that one, attempt uncounted.
+    if (!handler) {
+      await releaseJob(job);
+      continue;
+    }
     const release = holdLease(job);
     try {
-      if (!handler) throw new Error(`No handler for job type ${job.type}`);
       await handler.run(job.payload);
       await completeJob(job);
     } catch (error) {
@@ -77,10 +81,10 @@ export async function runDueJobs({ budgetMs = 45_000 } = {}) {
       // (stale, approved meanwhile, text or clip window) would be refused again. Retrying can't help either.
       const refused = (job.type === CATALOG_SYNC_JOB && error instanceof ReconnectNeeded) || (job.type === STORY_RENDER_JOB && error instanceof PublishingError);
       const retryable = error instanceof AiProviderError ? error.retryable : !(error instanceof NothingToDoError || refused);
-      const exhausted = await failJob(job, error, retryable && Boolean(handler));
+      const exhausted = await failJob(job, error, retryable);
       // A runner that lost its lease leaves the job to whoever holds it: its failure hooks (mark failed, refund) would
       // undo work the other runner may still finish.
-      if (exhausted !== null) await handler?.onFailure?.(job.payload, error, exhausted).catch(() => {});
+      if (exhausted !== null) await handler.onFailure?.(job.payload, error, exhausted).catch(() => {});
     } finally {
       release();
     }
@@ -90,6 +94,8 @@ export async function runDueJobs({ budgetMs = 45_000 } = {}) {
 
 /** Run the queue after the response is sent, so user-triggered work starts immediately. */
 export function kickRunner() {
+  // The standalone worker process owns the queue (RUN_JOBS_IN_API=false); the API only enqueues.
+  if (process.env.RUN_JOBS_IN_API === "false") return;
   after(() => runDueJobs().then(() => undefined));
 }
 

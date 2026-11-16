@@ -9,16 +9,22 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import type { TenantScope } from "@/server/tenant/scope";
 
 /**
- * Neon Object Storage (S3-compatible). Credentials, endpoint and region come
- * from the AWS_* env vars pulled by `neon deploy`. Bucket is private (neon.ts):
+ * S3-compatible object storage (Neon locally, any S3 endpoint on EC2). Credentials, endpoint, region and bucket come
+ * from the STORAGE_* env vars, passed to the client explicitly so the host's AWS_* defaults (e.g. an EC2 instance
+ * role) never leak in. Bucket is private (neon.ts):
  * store the key in Postgres, hand out presigned URLs on read (DEC-013).
  */
-export const MEDIA_BUCKET = "media";
+export const MEDIA_BUCKET = process.env.STORAGE_BUCKET || "media";
 
+const storage = {
+  endpoint: process.env.STORAGE_ENDPOINT,
+  region: process.env.STORAGE_REGION,
+  credentials: { accessKeyId: process.env.STORAGE_ACCESS_KEY_ID ?? "", secretAccessKey: process.env.STORAGE_SECRET_ACCESS_KEY ?? "" },
+};
 // ponytail: one module-level client; Neon requires path-style addressing
-const s3 = new S3Client({ forcePathStyle: true });
+const s3 = new S3Client({ ...storage, forcePathStyle: true });
 // Presigning only: with the default checksum behaviour the SDK adds x-amz-checksum parameters the phone can't satisfy.
-const presigner = new S3Client({ forcePathStyle: true, requestChecksumCalculation: "WHEN_REQUIRED" });
+const presigner = new S3Client({ ...storage, forcePathStyle: true, requestChecksumCalculation: "WHEN_REQUIRED" });
 
 const SEGMENT = /^[A-Za-z0-9_-]+$/;
 const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
