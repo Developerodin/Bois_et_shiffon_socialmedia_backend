@@ -8,7 +8,7 @@ import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
 import { CREDIT_COSTS, FREE_MANUAL_AGENTS, InsufficientCreditsError, refundCharge, spendCredits } from "@/server/services/credits";
 import { validateAiWorkflowPayload } from "@/server/jobs/claim";
-import { enqueueJob } from "@/server/jobs/queue";
+import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 
 export const AGENT_RUN_JOB = "agent.run";
 
@@ -143,7 +143,7 @@ export async function startAgentRun(input: {
 }
 
 /** Job handler. Throws on failure so the queue applies retry/backoff. */
-export async function executeAgentRun(rawPayload: unknown) {
+export async function executeAgentRun(rawPayload: unknown, lease?: Lease) {
   const payload = AgentRunJobPayload.parse(rawPayload);
   validateAiWorkflowPayload(payload);
   const run = await prisma.agentRun.findFirstOrThrow({
@@ -170,10 +170,13 @@ export async function executeAgentRun(rawPayload: unknown) {
     });
   };
 
-  await prisma.agentRun.update({
-    where: { id: run.id },
+  // Each status write is a compare-and-set on the status it expects, so a run failed (and refunded) by another runner
+  // can't become SUCCEEDED, nor a finished one FAILED.
+  const started = await prisma.agentRun.updateMany({
+    where: { id: run.id, status: { in: ["QUEUED", "RUNNING"] } },
     data: { status: "RUNNING", startedAt: run.startedAt ?? new Date(), error: null },
   });
+  if (started.count !== 1) return; // finished meanwhile
   await log("INFO", `${agent.name} started`);
 
   const ctx: AgentContext = {
@@ -201,10 +204,15 @@ export async function executeAgentRun(rawPayload: unknown) {
   const agentInput: Record<string, unknown> = { ...((run.input ?? {}) as object) };
   delete agentInput.chargeId;
   const output = await agent.run(ctx, agent.inputSchema.parse(agentInput));
-  await prisma.agentRun.update({
-    where: { id: run.id },
-    data: { status: "SUCCEEDED", finishedAt: new Date(), output: output ?? undefined },
-  });
+  // Only while this runner still holds the job: one that lost its lease (renewals failed) leaves the run to the runner
+  // that reclaimed it. ponytail: what the agent itself wrote meanwhile stays; only the run's own result is refused.
+  const finished = await prisma.$transaction(async (tx) =>
+    (!lease || (await holdsLease(tx, lease))) &&
+    (await tx.agentRun.updateMany({ where: { id: run.id, status: "RUNNING" }, data: { status: "SUCCEEDED", finishedAt: new Date(), output: output ?? undefined } })).count === 1);
+  if (!finished) {
+    console.warn(`[agents] run ${run.id}: lost its job or no longer RUNNING; its result wasn't saved`);
+    return;
+  }
   await log("SUCCESS", `${agent.name} finished`);
 }
 
@@ -229,18 +237,26 @@ export async function onAgentRunFailure(rawPayload: unknown, error: unknown, exh
   // The message alone: the UI reads it (e.g. "No new drafts…" means nothing to do), so no "Error: " prefix.
   const text = error instanceof Error ? error.message : String(error);
   // A run that finished (its job died before being marked done, then was re-run or reclaimed) stays finished and paid.
-  const before = await prisma.agentRun.findUnique({ where: { id: runId }, select: { status: true } });
-  if (!before || before.status === "SUCCEEDED") return;
-  const run = await prisma.agentRun.update({
-    where: { id: runId },
-    data: exhausted
-      ? { status: "FAILED", finishedAt: new Date(), error: text.slice(0, 2000) }
-      : { status: "QUEUED", error: text.slice(0, 2000) },
-  });
+  // A run that already ended (FAILED by an earlier call of this hook) is left as it is: no second write, no event.
+  const run = await prisma.agentRun.findUnique({ where: { id: runId } });
+  if (!run || run.status === "SUCCEEDED" || run.status === "FAILED") return;
   // Paid runs (e.g. competitor site audits) get their credits back when they finally fail, unless they already
   // delivered: a re-run of a paid story finds nothing left to do, but the story it wrote is there.
   const chargeId = (run.input as { chargeId?: string } | null)?.chargeId;
-  if (exhausted && chargeId && !(await delivered(run))) await refundCharge(run.workspaceId, chargeId);
+  const refund = exhausted && !!chargeId && !(await delivered(run));
+  // Compare-and-set from QUEUED/RUNNING, with the refund in the same transaction: a run is never FAILED without its
+  // refund, and a run that SUCCEEDED meanwhile is neither marked failed nor refunded.
+  const moved = await prisma.$transaction(async (tx) => {
+    const { count } = await tx.agentRun.updateMany({
+      where: { id: runId, status: { in: ["QUEUED", "RUNNING"] } },
+      data: exhausted
+        ? { status: "FAILED", finishedAt: new Date(), error: text.slice(0, 2000) }
+        : { status: "QUEUED", error: text.slice(0, 2000) },
+    });
+    if (count === 1 && refund) await refundCharge(run.workspaceId, chargeId!, tx);
+    return count === 1;
+  });
+  if (!moved) return;
   await prisma.agentEvent.create({
     data: {
       workspaceId: run.workspaceId,

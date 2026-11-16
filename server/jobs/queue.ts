@@ -63,12 +63,17 @@ export async function claimNextJob(workerId: string): Promise<Job | null> {
  * Keeps a running job's lease alive (every third of LEASE_MS) so a long job, like a 5+ minute Research run,
  * isn't reclaimed and run twice while it's still working. A crashed or cut-off runner stops renewing, so its
  * lease still expires and crash recovery works as before. Returns the stop function.
+ * A failed or refused renewal is logged, not acted on here: a runner whose lease lapsed finds out at its final write
+ * (holdsLease), and complete/fail are lease-guarded anyway.
  */
 export function holdLease(job: Job) {
   const timer = setInterval(() => {
     prisma.$executeRaw`
       UPDATE "Job" SET "leasedUntil" = now() + ${`${LEASE_MS} milliseconds`}::interval
-      WHERE id = ${job.id} AND "leasedBy" = ${job.leasedBy} AND status = 'RUNNING'`.catch(() => {});
+      WHERE id = ${job.id} AND "leasedBy" = ${job.leasedBy} AND status = 'RUNNING'`.then(
+      (n) => { if (n === 0) console.warn(`[jobs] ${job.type} ${job.id}: lease lost to another runner; its final write will be refused`); },
+      (e) => console.error(`[jobs] ${job.type} ${job.id}: lease renewal failed`, e),
+    );
   }, LEASE_MS / 3);
   return () => clearInterval(timer);
 }
