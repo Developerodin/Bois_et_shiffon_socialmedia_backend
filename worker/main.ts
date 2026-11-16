@@ -28,33 +28,41 @@ function sleep(ms: number, signal: AbortSignal) {
 }
 
 /**
- * The worker's settings from its env. WORKER_DAILY_SWEEP: unset means on only when NODE_ENV=production, so a dev or
- * local worker (worker:dev, a local docker worker on a shared dev database) never queues the paid daily sweep (scheduled
+ * The worker's settings from its env. WORKER_DAILY_SWEEP: true/1 or false/0 (any case, quotes ignored, since
+ * `docker run --env-file` keeps them); unset or anything else means on only when NODE_ENV=production, so a dev or local
+ * worker (worker:dev, a local docker worker on a shared dev database) never queues the paid daily sweep (scheduled
  * agent runs, plan renewals) by surprise. WORKER_CONCURRENCY is clamped to an integer of at least 1.
  */
 export function workerSettings(env: Record<string, string | undefined> = process.env) {
-  const sweep = env.WORKER_DAILY_SWEEP;
+  const production = env.NODE_ENV === "production";
+  const sweep = (env.WORKER_DAILY_SWEEP ?? "").trim().replace(/^["']|["']$/g, "").toLowerCase();
   return {
     intervalMs: Number(env.WORKER_INTERVAL_MS) || 15_000,
     concurrency: Math.max(1, Math.floor(Number(env.WORKER_CONCURRENCY) || 4)),
-    dailySweep: sweep === undefined || sweep === "" ? env.NODE_ENV === "production" : sweep === "true",
+    dailySweep: sweep === "true" || sweep === "1" ? true : sweep === "false" || sweep === "0" ? false : production,
+    production,
   };
 }
 
-export async function runWorker({ intervalMs, signal, concurrency = 4, dailySweep = true, now = () => new Date() }: { intervalMs: number; signal: AbortSignal; concurrency?: number; dailySweep?: boolean; now?: () => Date }) {
+export async function runWorker({ intervalMs, signal, concurrency = 4, dailySweep = true, production = false, now = () => new Date() }: { intervalMs: number; signal: AbortSignal; concurrency?: number; dailySweep?: boolean; production?: boolean; now?: () => Date }) {
   let sweptDay = "";
   // Each loop is sequential. An abort claims nothing new (runDueJobs sees the signal) and waits for the job in flight.
   const loop = async () => {
     while (!signal.aborted) {
       const t = now();
       const day = t.toISOString().slice(0, 10);
-      if (dailySweep && t.getUTCHours() >= SWEEP_HOUR_UTC && sweptDay !== day) {
+      if (t.getUTCHours() >= SWEEP_HOUR_UTC && sweptDay !== day) {
         sweptDay = day; // taken before the await, so only one loop queues it
-        try {
-          await enqueueDailySweep(); // idempotent per day, so a restart that forgets sweptDay is harmless
-        } catch (error) {
-          sweptDay = "";
-          console.error("[worker] daily sweep", error); // tried again next loop
+        // Off in production stops plan renewals, token refreshes and catalog syncs: say so every day, not only at start.
+        if (!dailySweep) {
+          if (production) console.warn("[worker] daily sweep is OFF in production (WORKER_DAILY_SWEEP): plan renewals, token refreshes and scheduled agents are not running");
+        } else {
+          try {
+            await enqueueDailySweep(); // idempotent per day, so a restart that forgets sweptDay is harmless
+          } catch (error) {
+            sweptDay = "";
+            console.error("[worker] daily sweep", error); // tried again next loop
+          }
         }
       }
       try {

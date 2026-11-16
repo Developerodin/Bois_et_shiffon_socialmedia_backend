@@ -114,6 +114,12 @@ describe("workerSettings", () => {
     expect(workerSettings({}).dailySweep).toBe(false); // worker:dev (tsx) leaves NODE_ENV unset
   });
 
+  it("reads true/1 and false/0 in any case, with quotes kept by docker --env-file ignored", () => {
+    for (const v of ["true", "TRUE", " True ", "1", '"true"', "'1'"]) expect(workerSettings({ WORKER_DAILY_SWEEP: v }).dailySweep).toBe(true);
+    for (const v of ["false", "False", "0", '"false"']) expect(workerSettings({ NODE_ENV: "production", WORKER_DAILY_SWEEP: v }).dailySweep).toBe(false);
+    expect(workerSettings({ NODE_ENV: "production", WORKER_DAILY_SWEEP: "maybe" }).dailySweep).toBe(true); // unrecognised: the default
+  });
+
   it("WORKER_DAILY_SWEEP overrides that either way", () => {
     expect(workerSettings({ NODE_ENV: "production", WORKER_DAILY_SWEEP: "false" }).dailySweep).toBe(false); // a local docker worker
     expect(workerSettings({ NODE_ENV: "development", WORKER_DAILY_SWEEP: "true" }).dailySweep).toBe(true);
@@ -129,6 +135,22 @@ describe("workerSettings", () => {
 });
 
 describe("runWorker with the daily sweep off", () => {
+  it("warns at each day's sweep time in production", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ac = new AbortController();
+    const c = clock("2026-11-16T06:00:00Z");
+    let n = 0;
+    m.run.mockImplementation(async () => {
+      c.advance(12 * 3600_000); // two loops a day
+      if (++n >= 4) ac.abort();
+      return { processed: 0, workerId: "w" };
+    });
+    await runWorker({ intervalMs: 1, signal: ac.signal, concurrency: 1, dailySweep: false, production: true, now: c.now });
+    expect(m.sweep).not.toHaveBeenCalled();
+    expect(warn.mock.calls.filter(([msg]) => String(msg).includes("daily sweep is OFF"))).toHaveLength(2);
+    warn.mockRestore();
+  });
+
   it("never queues it", async () => {
     const ac = new AbortController();
     m.run.mockImplementation(async () => {
