@@ -27,7 +27,7 @@ async function runLoops(startIso: string, loops: number, stepMs: number) {
     if (++n >= loops) ac.abort();
     return { processed: 0, workerId: "w" };
   });
-  await runWorker({ intervalMs: 1, signal: ac.signal, now: c.now });
+  await runWorker({ intervalMs: 1, signal: ac.signal, concurrency: 1, now: c.now });
   return n;
 }
 
@@ -54,7 +54,7 @@ describe("runWorker", () => {
     let finish!: () => void;
     m.run.mockImplementation(() => new Promise((r) => { finish = () => r({ processed: 1, workerId: "w" }); }));
     let done = false;
-    const p = runWorker({ intervalMs: 1, signal: ac.signal }).then(() => { done = true; });
+    const p = runWorker({ intervalMs: 1, signal: ac.signal, concurrency: 1 }).then(() => { done = true; });
     await vi.waitFor(() => expect(m.run).toHaveBeenCalledTimes(1));
     ac.abort();
     await new Promise((r) => setTimeout(r, 20));
@@ -69,7 +69,40 @@ describe("runWorker", () => {
     const ac = new AbortController();
     m.run.mockRejectedValueOnce(new Error("db down")).mockImplementation(async () => { ac.abort(); return { processed: 0, workerId: "w" }; });
     vi.spyOn(console, "error").mockImplementation(() => {});
-    await runWorker({ intervalMs: 1, signal: ac.signal });
+    await runWorker({ intervalMs: 1, signal: ac.signal, concurrency: 1 });
     expect(m.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("starts a job queued during a long run within the poll interval, on another loop", async () => {
+    // A tiny queue: each runDueJobs call takes the next job, as claimNextJob would.
+    const queue = ["research"];
+    const ran: string[] = [];
+    let finishLong!: () => void;
+    m.run.mockImplementation(async () => {
+      const job = queue.shift();
+      if (!job) return { processed: 0, workerId: "w" };
+      ran.push(job);
+      if (job === "research") await new Promise<void>((r) => { finishLong = r; });
+      return { processed: 1, workerId: "w" };
+    });
+    const ac = new AbortController();
+    const p = runWorker({ intervalMs: 5, signal: ac.signal, concurrency: 2 });
+    await vi.waitFor(() => expect(ran).toEqual(["research"]));
+    queue.push("password-reset email");
+    await vi.waitFor(() => expect(ran).toEqual(["research", "password-reset email"]), { timeout: 200 });
+    ac.abort();
+    finishLong();
+    await p;
+  });
+
+  it("queues the daily sweep once even with several loops", async () => {
+    const ac = new AbortController();
+    let n = 0;
+    m.run.mockImplementation(async () => {
+      if (++n >= 12) ac.abort();
+      return { processed: 0, workerId: "w" };
+    });
+    await runWorker({ intervalMs: 1, signal: ac.signal, concurrency: 4, now: () => new Date("2026-11-16T06:00:00Z") });
+    expect(m.sweep).toHaveBeenCalledTimes(1);
   });
 });
