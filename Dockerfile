@@ -4,7 +4,7 @@
 #   docker build -f apps/server/Dockerfile --target migrate -t espanda-server-migrate .
 # No env is baked in: DATABASE_URL, AUTH_SECRET, provider keys and the rest arrive at run time.
 # x86_64 only: ffprobe-static ships no Linux arm64 binary.
-FROM --platform=linux/amd64 node:20-bookworm-slim AS base
+FROM --platform=linux/amd64 node:22-bookworm-slim AS base
 ENV NEXT_TELEMETRY_DISABLED=1
 # Prisma's engine is linked against OpenSSL 3 (binaryTargets debian-openssl-3.0.x); the slim image has no openssl.
 RUN apt-get update \
