@@ -7,6 +7,7 @@
  * Raise WORKER_CONCURRENCY or add worker instances (claims use SKIP LOCKED, the sweep is idempotent) when that bites.
  */
 import { enqueueDailySweep, runDueJobs } from "@/server/jobs/runner";
+import { assertProductionEnv } from "@/server/production-env";
 
 const SWEEP_HOUR_UTC = 5; // the old cron's 05:00
 const BUDGET_MS = 30_000;
@@ -56,6 +57,7 @@ export async function runWorker({ intervalMs, signal, concurrency = 4, now = () 
 
 // Entry point. The bundle (dist/worker.js) and tsx both run this file directly; tests only import runWorker.
 if (process.env.VITEST === undefined) {
+  assertProductionEnv(); // the same checks the api runs at startup: email links from jobs need an https AUTH_URL
   const ac = new AbortController();
   const stop = (name: string) => () => {
     console.log(`[worker] ${name}: finishing the jobs in flight, then exiting`);

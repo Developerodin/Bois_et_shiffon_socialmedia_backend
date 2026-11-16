@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const m = vi.hoisted(() => ({ claim: vi.fn(), complete: vi.fn(), fail: vi.fn(), release: vi.fn(), after: vi.fn() }));
-vi.mock("@/server/db/prisma", () => ({ prisma: {} }));
+const m = vi.hoisted(() => ({ claim: vi.fn(), complete: vi.fn(), fail: vi.fn(), release: vi.fn(), after: vi.fn(), findDue: vi.fn() }));
+vi.mock("@/server/db/prisma", () => ({ prisma: { job: { findFirst: m.findDue } } }));
 vi.mock("next/server", () => ({ after: m.after }));
 vi.mock("@/server/jobs/queue", async (orig) => ({
   ...(await orig<object>()),
@@ -12,7 +12,7 @@ vi.mock("@/server/jobs/queue", async (orig) => ({
   holdLease: () => () => {},
 }));
 
-import { kickRunner, runDueJobs } from "@/server/jobs/runner";
+import { kickIfDue, kickRunner, runDueJobs } from "@/server/jobs/runner";
 
 const job = { id: "j1", type: "from.a.newer.release", payload: {}, attempts: 1, maxAttempts: 5, leasedBy: "w" };
 
@@ -54,5 +54,13 @@ describe("kickRunner", () => {
     process.env.RUN_JOBS_IN_API = "false";
     kickRunner();
     expect(m.after).not.toHaveBeenCalled();
+  });
+});
+
+describe("kickIfDue", () => {
+  it("doesn't query the queue when the worker process owns it (RUN_JOBS_IN_API=false)", async () => {
+    process.env.RUN_JOBS_IN_API = "false";
+    await kickIfDue();
+    expect(m.findDue).not.toHaveBeenCalled();
   });
 });

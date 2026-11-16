@@ -329,7 +329,6 @@ export async function spendBreakdown(scope: SpendScope) {
     byApi: sortUsd(byApi.map((r) => ({ api: `${r.provider} ${r.operation}`, usd: num(r._sum.costUsd), calls: r._count._all }))),
   };
 }
-export type SpendBreakdown = Awaited<ReturnType<typeof spendBreakdown>>;
 
 // ── Logs ────────────────────────────────────────────────────────────────────
 
@@ -421,7 +420,6 @@ export async function nameLookup(rows: Named[]) {
     brand: r.brandId ? (brand.get(r.brandId) ?? "(deleted project)") : null,
   });
 }
-export type LogRow = Awaited<ReturnType<typeof platformLogs>>["rows"][number];
 
 /**
  * Every workspace, for the workspace picker (Logs, Activity).
@@ -442,7 +440,6 @@ export async function peopleMatching(who?: string) {
   const people = await prisma.user.findMany({ where: { OR: [{ email: { contains: needle, mode: "insensitive" } }, { name: { contains: needle, mode: "insensitive" } }] }, select: { id: true }, take: 200 });
   return people.map((p) => p.id);
 }
-export type PickerOptions = Awaited<ReturnType<typeof pickerOptions>>;
 
 // ── Audit of admin views ────────────────────────────────────────────────────
 

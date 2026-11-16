@@ -106,11 +106,12 @@ export function kickRunner() {
 
 let lastDueCheck = 0;
 /**
- * Called from routes the open app polls: if a job is overdue (a scheduled post, an agent retry),
- * run it now instead of waiting for the cron. At most one check per 30 s per server instance.
- * ponytail: only runs while someone has the app open; a frequent cron (see docs/ENV_SETUP.md) covers idle hours.
+ * Called from routes the open app polls: if a job is overdue (a scheduled post, an agent retry), run it now in this
+ * process. At most one check per 30 s per server instance. Only matters where the API runs jobs (dev); in production
+ * (RUN_JOBS_IN_API=false) the worker polls the queue itself, so this skips the query.
  */
 export async function kickIfDue() {
+  if (process.env.RUN_JOBS_IN_API === "false") return;
   if (Date.now() - lastDueCheck < 30_000) return;
   lastDueCheck = Date.now();
   const due = await prisma.job.findFirst({

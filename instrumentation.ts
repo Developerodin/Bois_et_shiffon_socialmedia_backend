@@ -1,6 +1,6 @@
-/** Runs once when the Next server starts. A non-https AUTH_URL in production would mint http links and insecure cookies. */
+import { assertProductionEnv } from "@/server/production-env";
+
+/** Runs once when the Next server starts. */
 export function register() {
-  if (process.env.NODE_ENV === "production" && !process.env.AUTH_URL?.startsWith("https://")) {
-    throw new Error("AUTH_URL must be an https:// URL in production");
-  }
+  assertProductionEnv();
 }

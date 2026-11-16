@@ -1,4 +1,4 @@
-import { NO_WORKSPACE, type ActivitySort } from "@espanda/shared";
+import type { ActivitySort } from "@espanda/shared";
 import { prisma } from "@/server/db/prisma";
 import { cursorOf, type Cursor, nameLookup, olderThan, PAGE, TEST_WORKSPACE } from "@/server/services/platform-admin";
 
@@ -103,8 +103,6 @@ export async function activityList({ workspaceId, userIds, days = null, sort = "
   const names = await nameLookup(rows);
   return { total: all.length, hasMore: all.length > page * PAGE, rows: rows.map((r) => ({ ...r, ...names(r) })) };
 }
-
-export { NO_WORKSPACE };
 
 // ── One person's timeline ───────────────────────────────────────────────────
 

@@ -19,7 +19,14 @@ export const MEDIA_BUCKET = process.env.STORAGE_BUCKET || "media";
 const storage = {
   endpoint: process.env.STORAGE_ENDPOINT,
   region: process.env.STORAGE_REGION,
-  credentials: { accessKeyId: process.env.STORAGE_ACCESS_KEY_ID ?? "", secretAccessKey: process.env.STORAGE_SECRET_ACCESS_KEY ?? "" },
+  // Read on first use, so a missing key fails with this message instead of a signature error. Production checks them
+  // at startup too (server/production-env.ts).
+  credentials: async () => {
+    const accessKeyId = process.env.STORAGE_ACCESS_KEY_ID;
+    const secretAccessKey = process.env.STORAGE_SECRET_ACCESS_KEY;
+    if (!accessKeyId || !secretAccessKey) throw new Error("Object storage isn't set up: STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY are missing");
+    return { accessKeyId, secretAccessKey };
+  },
 };
 // ponytail: one module-level client; Neon requires path-style addressing
 const s3 = new S3Client({ ...storage, forcePathStyle: true });
