@@ -12,7 +12,8 @@ import { AiProviderError } from "@/server/ai/provider";
 import { CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
 import { prisma } from "@/server/db/prisma";
 import { EMAIL_SEND_JOB, sendOutboxEmail } from "@/server/email/outbox";
-import { claimNextJob, completeJob, enqueueJob, failJob, holdLease, type Lease, releaseJob } from "@/server/jobs/queue";
+import type { Job } from "@prisma/client";
+import { claimNextJob, completeJob, deadLetterJob, enqueueJob, failJob, holdLease, type Lease, releaseJob } from "@/server/jobs/queue";
 import { onShootFailure, PHOTOSHOOT_JOB, runShoot } from "@/server/photoshoot/shoot";
 import { advanceRender, failRender, REEL_RENDER_JOB } from "@/server/reels/render";
 import { onAssetFailure, REEL_ASSET_JOB, runAsset } from "@/server/reels/assets";
@@ -67,9 +68,10 @@ export async function runDueJobs({ budgetMs = 45_000, signal }: { budgetMs?: num
     processed++;
     const handler = HANDLERS[job.type];
     // Reclaimed after its last attempt died mid-run (timeout, crash): stop here instead of looping forever.
+    // Also how a parked job whose failure hook didn't finish comes back (giveUp).
     if (job.attempts > job.maxAttempts) {
       const error = new Error("Stopped: it was cut off before finishing on every attempt");
-      if ((await failJob(job, error, false)) !== null) await handler?.onFailure?.(job.payload, error, true).catch(() => {});
+      if ((await failJob(job, error, false)) !== null) await giveUp(job, handler, error);
       continue;
     }
     // Not a failure of the job: another release may know this type. Leave it for that one, attempt uncounted.
@@ -89,12 +91,31 @@ export async function runDueJobs({ budgetMs = 45_000, signal }: { budgetMs?: num
       const exhausted = await failJob(job, error, retryable);
       // A runner that lost its lease leaves the job to whoever holds it: its failure hooks (mark failed, refund) would
       // undo work the other runner may still finish.
-      if (exhausted !== null) await handler.onFailure?.(job.payload, error, exhausted).catch(() => {});
+      if (exhausted) await giveUp(job, handler, error);
+      else if (exhausted === false) await handler.onFailure?.(job.payload, error, false).catch((e) => console.error(`[jobs] ${job.type} ${job.id}: failure hook failed`, e));
     } finally {
       release();
     }
   }
   return { processed, workerId };
+}
+
+/**
+ * A job out of tries, parked by failJob: run its failure hook (mark failed, refund, queue a later retry), then
+ * dead-letter it. If the hook throws, or the process dies before it finishes, the job stays parked and its next claim
+ * (HOOK_RETRY_MS later) runs the hook again through the attempts > maxAttempts branch, never the job itself. So an
+ * agent run isn't left RUNNING without its refund, nor a voice delete without its later retry. Every hook is safe to
+ * run twice: each is a compare-and-set on its entity's status. ponytail: a hook that always throws is retried every
+ * minute, logged each time; a retried hook gets the generic "cut off" error, not the original one.
+ */
+async function giveUp(job: Job, handler: Handler | undefined, error: unknown) {
+  try {
+    await handler?.onFailure?.(job.payload, error, true);
+  } catch (e) {
+    console.error(`[jobs] ${job.type} ${job.id}: failure hook failed; it runs again in a minute`, e);
+    return;
+  }
+  await deadLetterJob(job);
 }
 
 /** Run the queue after the response is sent, so user-triggered work starts immediately. */

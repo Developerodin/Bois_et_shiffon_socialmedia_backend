@@ -198,6 +198,9 @@ async function voicesNamedFor(voiceId: string) {
  * Job onFailure: a delete that used up its 8 tries (about an hour: an ElevenLabs outage, a missing key) is queued again
  * in 6 hours, with an audit event, so a withdrawn voice is never left at ElevenLabs for good.
  * ponytail: it keeps retrying every 6 h until it succeeds; an alert to an admin is the upgrade if these pile up.
+ * The retry and its audit share one transaction. The runner re-runs this hook until it succeeds (runner.ts giveUp); in
+ * the rare case it succeeded but the process died before the job was dead-lettered, a second retry is queued, which
+ * is harmless (a delete that finds the voice gone counts as done).
  */
 export async function onVoiceDeleteFailure(payload: unknown, error: unknown, exhausted: boolean) {
   if (!exhausted) return;
@@ -205,8 +208,10 @@ export async function onVoiceDeleteFailure(payload: unknown, error: unknown, exh
   const v = await prisma.voice.findUnique({ where: { id: voiceId } });
   if (!v?.archivedAt) return; // the job only fails before its last write, so an archived voice still has work left
   const runAt = new Date(Date.now() + 6 * 3600_000);
-  await enqueueJob({ type: VOICE_DELETE_JOB, workspaceId: v.workspaceId, payload: { voiceId }, runAt, maxAttempts: 8, idempotencyKey: `voice:${voiceId}:delete:${runAt.getTime()}` });
-  await audit(prisma, v.workspaceId, null, "voice.clone.delete_failed", voiceId, { error: String(error).slice(0, 300), retryAt: runAt.toISOString() });
+  await prisma.$transaction(async (tx) => {
+    await enqueueJob({ type: VOICE_DELETE_JOB, workspaceId: v.workspaceId, payload: { voiceId }, runAt, maxAttempts: 8, idempotencyKey: `voice:${voiceId}:delete:${runAt.getTime()}` }, tx);
+    await audit(tx, v.workspaceId, null, "voice.clone.delete_failed", voiceId, { error: String(error).slice(0, 300), retryAt: runAt.toISOString() });
+  });
 }
 
 /** Whether this person may clone (the Voices screen shows the button only then). */

@@ -23,7 +23,8 @@ describe("the runner and story renders", () => {
     const refusal = new PublishingError("Someone else changed this story. Your changes weren't saved.", 409, "story.stale");
     m.run.mockRejectedValue(refusal);
     await runDueJobs({ budgetMs: 5_000 });
-    expect(m.updateMany.mock.calls[0][0].data.status).toBe("DEAD_LETTER");
+    expect(m.updateMany.mock.calls[0][0].data).toMatchObject({ status: "PENDING", attempts: job.maxAttempts }); // parked for its hook
+    expect(m.updateMany.mock.calls.at(-1)![0].data.status).toBe("DEAD_LETTER");
     expect(m.onFailure).toHaveBeenCalledWith(job.payload, refusal, true);
   });
 

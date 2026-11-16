@@ -143,7 +143,7 @@ describe("clones that go wrong", () => {
     await onVoiceDeleteFailure({ voiceId: "v1" }, new Error("ElevenLabs 503"), false);
     expect(m.enqueue).not.toHaveBeenCalled(); // the queue still retries this one itself
     await onVoiceDeleteFailure({ voiceId: "v1" }, new Error("ElevenLabs 503"), true);
-    expect(m.enqueue).toHaveBeenCalledWith(expect.objectContaining({ type: "voices.delete", payload: { voiceId: "v1" }, runAt: expect.any(Date), idempotencyKey: expect.stringMatching(/^voice:v1:delete:\d+$/) }));
+    expect(m.enqueue).toHaveBeenCalledWith(expect.objectContaining({ type: "voices.delete", payload: { voiceId: "v1" }, runAt: expect.any(Date), idempotencyKey: expect.stringMatching(/^voice:v1:delete:\d+$/) }), m.tx);
     expect(m.tx.auditEvent.create.mock.calls[0][0].data).toMatchObject({ action: "voice.clone.delete_failed", entityId: "v1" });
   });
 });

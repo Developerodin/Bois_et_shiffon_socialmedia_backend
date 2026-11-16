@@ -117,17 +117,32 @@ export async function releaseJob(job: Pick<Job, "id" | "leasedBy">) {
   });
 }
 
-/** Whether the job has no tries left, or null when this runner had lost the lease (nothing written: not its to fail). */
+/** How long a job out of tries waits before its failure hook is run again, if the first run of it didn't finish. */
+export const HOOK_RETRY_MS = 60_000;
+
+/**
+ * Whether the job has no tries left, or null when this runner had lost the lease (nothing written: not its to fail).
+ * A job out of tries isn't dead-lettered yet: it is parked, pending again in HOOK_RETRY_MS with no tries left, so that
+ * its failure hook (mark failed, refund, queue a later retry) runs at least once. The runner dead-letters it
+ * (deadLetterJob) only after the hook succeeded; if the hook throws or the process dies first, the next claim finds
+ * attempts > maxAttempts and runs the hook again, never the job itself.
+ */
 export async function failJob(job: Job, error: unknown, retryable = true) {
   const exhausted = !retryable || job.attempts >= job.maxAttempts;
   const { count } = await prisma.job.updateMany({
     where: { id: job.id, leasedBy: job.leasedBy, status: "RUNNING" },
     data: {
-      status: exhausted ? "DEAD_LETTER" : "PENDING",
-      runAt: exhausted ? undefined : new Date(Date.now() + backoffMs(job.attempts)),
+      status: "PENDING",
+      runAt: new Date(Date.now() + (exhausted ? HOOK_RETRY_MS : backoffMs(job.attempts))),
+      ...(exhausted ? { attempts: job.maxAttempts } : {}),
       leasedUntil: null,
       lastError: String(error).slice(0, 2000),
     },
   });
   return count === 1 ? exhausted : null;
+}
+
+/** After a parked job's failure hook succeeded: dead-letter it, unless another runner has claimed it meanwhile. */
+export async function deadLetterJob(job: Pick<Job, "id" | "leasedBy">) {
+  await prisma.job.updateMany({ where: { id: job.id, leasedBy: job.leasedBy, status: "PENDING" }, data: { status: "DEAD_LETTER" } });
 }
