@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => ({ run: vi.fn(), sweep: vi.fn() }));
 vi.mock("@/server/jobs/runner", () => ({ runDueJobs: m.run, enqueueDailySweep: m.sweep }));
 
-import { runWorker } from "@/worker/main";
+import { runWorker, workerSettings } from "@/worker/main";
 
 /** A clock the test moves by hand; each loop's sleep is the only thing that ticks it. */
 function clock(startIso: string) {
@@ -104,5 +104,38 @@ describe("runWorker", () => {
     });
     await runWorker({ intervalMs: 1, signal: ac.signal, concurrency: 4, now: () => new Date("2026-11-16T06:00:00Z") });
     expect(m.sweep).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("workerSettings", () => {
+  it("queues the daily sweep by default only in production", () => {
+    expect(workerSettings({ NODE_ENV: "production" }).dailySweep).toBe(true);
+    expect(workerSettings({ NODE_ENV: "development" }).dailySweep).toBe(false);
+    expect(workerSettings({}).dailySweep).toBe(false); // worker:dev (tsx) leaves NODE_ENV unset
+  });
+
+  it("WORKER_DAILY_SWEEP overrides that either way", () => {
+    expect(workerSettings({ NODE_ENV: "production", WORKER_DAILY_SWEEP: "false" }).dailySweep).toBe(false); // a local docker worker
+    expect(workerSettings({ NODE_ENV: "development", WORKER_DAILY_SWEEP: "true" }).dailySweep).toBe(true);
+  });
+
+  it("clamps WORKER_CONCURRENCY to an integer of at least 1", () => {
+    expect(workerSettings({}).concurrency).toBe(4);
+    expect(workerSettings({ WORKER_CONCURRENCY: "0" }).concurrency).toBe(4);
+    expect(workerSettings({ WORKER_CONCURRENCY: "-3" }).concurrency).toBe(1);
+    expect(workerSettings({ WORKER_CONCURRENCY: "2.7" }).concurrency).toBe(2);
+    expect(workerSettings({ WORKER_CONCURRENCY: "lots" }).concurrency).toBe(4);
+  });
+});
+
+describe("runWorker with the daily sweep off", () => {
+  it("never queues it", async () => {
+    const ac = new AbortController();
+    m.run.mockImplementation(async () => {
+      ac.abort();
+      return { processed: 0, workerId: "w" };
+    });
+    await runWorker({ intervalMs: 1, signal: ac.signal, concurrency: 1, dailySweep: false, now: () => new Date("2026-11-16T06:00:00Z") });
+    expect(m.sweep).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,6 @@
 /**
- * Standalone job worker (EC2): drains the queue in a loop and queues the daily sweep once a day.
+ * Standalone job worker (EC2): drains the queue in a loop and, when WORKER_DAILY_SWEEP is on, queues the daily sweep
+ * once a day.
  * Run built: node dist/worker.js. Run in dev: npm run worker:dev -w server.
  * It runs WORKER_CONCURRENCY (default 4) independent claim loops, so a 5-minute Research run doesn't hold up a
  * password-reset email or a scheduled publish: an idle loop claims those within one poll interval.
@@ -26,14 +27,28 @@ function sleep(ms: number, signal: AbortSignal) {
   });
 }
 
-export async function runWorker({ intervalMs, signal, concurrency = 4, now = () => new Date() }: { intervalMs: number; signal: AbortSignal; concurrency?: number; now?: () => Date }) {
+/**
+ * The worker's settings from its env. WORKER_DAILY_SWEEP: unset means on only when NODE_ENV=production, so a dev or
+ * local worker (worker:dev, a local docker worker on a shared dev database) never queues the paid daily sweep (scheduled
+ * agent runs, plan renewals) by surprise. WORKER_CONCURRENCY is clamped to an integer of at least 1.
+ */
+export function workerSettings(env: Record<string, string | undefined> = process.env) {
+  const sweep = env.WORKER_DAILY_SWEEP;
+  return {
+    intervalMs: Number(env.WORKER_INTERVAL_MS) || 15_000,
+    concurrency: Math.max(1, Math.floor(Number(env.WORKER_CONCURRENCY) || 4)),
+    dailySweep: sweep === undefined || sweep === "" ? env.NODE_ENV === "production" : sweep === "true",
+  };
+}
+
+export async function runWorker({ intervalMs, signal, concurrency = 4, dailySweep = true, now = () => new Date() }: { intervalMs: number; signal: AbortSignal; concurrency?: number; dailySweep?: boolean; now?: () => Date }) {
   let sweptDay = "";
   // Each loop is sequential. An abort claims nothing new (runDueJobs sees the signal) and waits for the job in flight.
   const loop = async () => {
     while (!signal.aborted) {
       const t = now();
       const day = t.toISOString().slice(0, 10);
-      if (t.getUTCHours() >= SWEEP_HOUR_UTC && sweptDay !== day) {
+      if (dailySweep && t.getUTCHours() >= SWEEP_HOUR_UTC && sweptDay !== day) {
         sweptDay = day; // taken before the await, so only one loop queues it
         try {
           await enqueueDailySweep(); // idempotent per day, so a restart that forgets sweptDay is harmless
@@ -65,10 +80,9 @@ if (process.env.VITEST === undefined) {
   };
   process.once("SIGTERM", stop("SIGTERM"));
   process.once("SIGINT", stop("SIGINT"));
-  const intervalMs = Number(process.env.WORKER_INTERVAL_MS) || 15_000;
-  const concurrency = Number(process.env.WORKER_CONCURRENCY) || 4;
-  console.log(`[worker] started, ${concurrency} loop(s) polling every ${intervalMs} ms`);
-  runWorker({ intervalMs, signal: ac.signal, concurrency }).then(
+  const settings = workerSettings();
+  console.log(`[worker] started, ${settings.concurrency} loop(s) polling every ${settings.intervalMs} ms, daily sweep ${settings.dailySweep ? "on" : "off (WORKER_DAILY_SWEEP)"}`);
+  runWorker({ ...settings, signal: ac.signal }).then(
     () => {
       console.log("[worker] stopped");
       process.exit(0);
