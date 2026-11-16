@@ -632,15 +632,35 @@ export async function executePublication(payload: unknown, lease?: Lease) {
  * The publish job died mid-run (timeout, crash) or lost its lease, and won't be retried: whatever is still PUBLISHING
  * may or may not have posted, so a person checks the account. A runner still going finds this at its beforePublish
  * (or its next story frame) and stops.
+ * A job that died before it claimed its attempt left it SCHEDULED, with no job left to run it: nothing was sent, so it
+ * fails like a refusal before posting (a story with frames already out goes back to PARTIAL).
  */
 export async function onPublishJobLost(payload: unknown) {
   const { attemptId } = payload as { attemptId: string };
-  const a = await prisma.publicationAttempt.findFirst({ where: { id: attemptId, status: "PUBLISHING" } });
+  const a = await prisma.publicationAttempt.findFirst({ where: { id: attemptId, status: { in: ["SCHEDULED", "PUBLISHING"] } } });
+  if (a?.status === "SCHEDULED") return publishNeverStarted(a);
   if (storyTargetOf(a?.target)) return storyJobLost(attemptId);
   await prisma.publicationAttempt.updateMany({
     where: { id: attemptId, status: "PUBLISHING" },
     data: { status: "PENDING_VERIFY", error: "Publishing stopped midway. Check the account before trying again." },
   });
+}
+
+async function publishNeverStarted(a: Prisma.PublicationAttemptGetPayload<object>) {
+  const st = storyTargetOf(a.target);
+  const posted = st ? postedCount(st.progress) : 0;
+  const error = "Publishing didn't start. Nothing was posted. Publish it again.";
+  await prisma.$transaction(async (tx) => {
+    const { count } = await tx.publicationAttempt.updateMany({
+      where: { id: a.id, status: "SCHEDULED" },
+      data: posted ? { status: "PARTIAL", error: `${posted} of ${st!.frames} frames are posted. Posting the rest didn't start.` } : { status: "FAILED", error },
+    });
+    if (count !== 1) return;
+    if (!posted) await tx.contentItem.update({ where: { id: a.contentItemId }, data: { status: "APPROVED" } });
+    await tx.auditEvent.create({
+      data: { workspaceId: a.workspaceId, brandId: a.brandId, actorUserId: a.createdByUserId, action: `content.publish.${posted ? "partial" : "failed"}`, entityType: "PublicationAttempt", entityId: a.id, metadata: { provider: a.provider, lost: true, started: false } },
+    });
+  }, TX);
 }
 
 /**

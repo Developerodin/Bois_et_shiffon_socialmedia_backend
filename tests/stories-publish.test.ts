@@ -329,6 +329,22 @@ describe("a lost story job", () => {
     expect(item().status).toBe("PUBLISHED");
   });
 
+  it("a job that died before claiming its attempt: nothing was sent, so FAILED and the item back to APPROVED", async () => {
+    seed(4, { status: "SCHEDULED" });
+    db.attempts.push({ id: "a9", ...scope, contentItemId: "s1", contentVersionId: "v1", connectionId: "c1", createdByUserId: "u1", status: "SCHEDULED", target: { story: true, frames: 4, progress: [] } });
+    await onPublishJobLost({ attemptId: "a9" });
+    expect(att("a9")).toMatchObject({ status: "FAILED", error: "Publishing didn't start. Nothing was posted. Publish it again." });
+    expect(item().status).toBe("APPROVED");
+    expect(db.audits.at(-1)).toMatchObject({ action: "content.publish.failed", metadata: { lost: true, started: false } });
+  });
+  it("a Post the rest that never started goes back to PARTIAL, item still SCHEDULED", async () => {
+    seed(4, { status: "SCHEDULED" });
+    db.attempts.push({ id: "a9", ...scope, contentItemId: "s1", contentVersionId: "v1", connectionId: "c1", createdByUserId: "u1", status: "SCHEDULED", target: { story: true, frames: 4, progress: [{ i: 0, state: "published", mediaId: "m0" }] } });
+    await onPublishJobLost({ attemptId: "a9" });
+    expect(att("a9")).toMatchObject({ status: "PARTIAL", error: "1 of 4 frames are posted. Posting the rest didn't start." });
+    expect(item().status).toBe("SCHEDULED");
+  });
+
   const publishing = (progress: FrameProgress) => {
     seed();
     db.attempts.push({ id: "a9", ...scope, contentItemId: "s1", contentVersionId: "v1", connectionId: "c1", createdByUserId: "u1", status: "PUBLISHING", target: { story: true, frames: 4, progress } });
