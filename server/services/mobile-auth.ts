@@ -44,6 +44,8 @@ export async function sendEmailCode(input: z.infer<typeof EmailInput>, request: 
     // ponytail: so a stranger requesting codes for someone's email voids the one in their inbox, and 8 wrong guesses
     // lock its verifying for 15 min; per-email limits can't tell them from the owner. Upgrade: longer codes or a
     // per-device challenge if that abuse shows up.
+    // Two requests at once: the lock makes the second wait, so its delete sees (and voids) the first one's code.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${identifier(email)}))`;
     await tx.verificationToken.deleteMany({ where: { identifier: identifier(email) } });
     await tx.verificationToken.create({ data: { identifier: identifier(email), token: hash(email, code), expires: new Date(Date.now() + CODE_TTL_MS) } });
     await queueEmail(tx, {

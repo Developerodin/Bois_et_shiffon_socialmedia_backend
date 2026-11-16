@@ -6,6 +6,7 @@ const m = vi.hoisted(() => {
   const db = {
     user: { findUnique: fn(), create: fn(), update: fn(), updateMany: fn() },
     verificationToken: { deleteMany: fn(), create: fn() },
+    $executeRaw: vi.fn(async () => 0),
     auditEvent: { create: fn() },
   };
   return { db, prisma: { ...db, $transaction: vi.fn(async (f: (t: typeof db) => unknown) => f(db)) }, queueEmail: fn() };
@@ -107,5 +108,14 @@ describe("email sign-in codes (mobile)", () => {
     const where = m.db.verificationToken.deleteMany.mock.calls[0][0].where;
     expect(where).toEqual({ identifier: "mobile-code:a@b.co" });
     expect(m.db.verificationToken.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("serialises requests for one email with a lock taken before the delete, so parallel requests can't leave two codes", async () => {
+    m.db.user.findUnique.mockResolvedValue(null);
+    await sendEmailCode({ email: "a@b.co" }, request);
+    const [sql, key] = m.db.$executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, string];
+    expect(sql.join("?")).toContain("pg_advisory_xact_lock");
+    expect(key).toBe("mobile-code:a@b.co");
+    expect(m.db.$executeRaw.mock.invocationCallOrder[0]).toBeLessThan(m.db.verificationToken.deleteMany.mock.invocationCallOrder[0]);
   });
 });
