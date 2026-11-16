@@ -22,7 +22,7 @@ const boundary = (depth) => ({
       {
         patterns: [
           { group: ["@/components", "@/components/*"], message: "Website code: the Server doesn't import the Web Frontend." },
-          { regex: `^(\.\./){${depth + 1},}`, message: "Leaves apps/server: import from inside the app, or from @espanda/shared." },
+          { regex: `^(\\.\\./){${depth + 1},}`, message: "Leaves apps/server: import from inside the app, or from @espanda/shared." },
         ],
       },
     ],
