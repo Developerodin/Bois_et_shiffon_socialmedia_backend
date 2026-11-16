@@ -212,13 +212,35 @@ describe("advanceRender", () => {
     expect(m.enqueue).not.toHaveBeenCalled();
   });
 
+  it("a long join refreshes its claim every minute, so a tick doesn't start a second join beside it", async () => {
+    const wav = Buffer.alloc(44 + 48_000);
+    wav.write("RIFF", 0); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22);
+    wav.writeUInt32LE(24_000, 24); wav.writeUInt32LE(48_000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write("data", 36);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(wav)));
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    const stale = new Date(Date.now() - 400_000);
+    m.tx.reelRender.findUnique.mockResolvedValue(render({ step: "JOIN", claimedAt: stale, outputs: { ...outputs, clipUrls: ["https://cdn/a.mp4", "https://cdn/b.mp4"] } }));
+    m.tx.reelRender.updateMany.mockResolvedValue({ count: 1 });
+    m.tx.contentItem.findFirst.mockResolvedValue({ id: "i1", status: "DRAFT_REVIEW", versions: [{ id: "v1", version: 2, body: plan }] });
+    m.joinReel.mockImplementationOnce(async () => void vi.advanceTimersByTime(60_000)); // ffmpeg takes a minute
+    await advanceRender({ renderId: "r1" });
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    const writes = m.tx.reelRender.updateMany.mock.calls.map(([a]) => a as { where: { claimedAt?: Date }; data: { claimedAt?: Date | null; step?: string } });
+    const [claim, beat] = writes;
+    expect(claim.where.claimedAt).toBe(stale); // re-claimed the stale join
+    expect(beat.where).toEqual({ id: "r1", step: "JOIN", claimedAt: claim.data.claimedAt }); // CAS on its own claim
+    expect(beat.data.claimedAt).toBeInstanceOf(Date);
+    expect(writes.at(-1)!.data.step).toBe("DONE");
+  });
+
   it("a failing join releases its claim and retries, then fails and refunds on the third", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("link expired"); }));
     const joining = (joinErrors: number) => render({ step: "JOIN", claimedAt: null, outputs: { ...outputs, clipUrls: ["https://cdn/a.mp4", "https://cdn/b.mp4"], joinErrors } });
     m.tx.reelRender.updateMany.mockResolvedValue({ count: 1 });
     m.tx.reelRender.findUnique.mockResolvedValue(joining(0));
     await expect(advanceRender({ renderId: "r1" })).rejects.toThrow("link expired");
-    expect(m.tx.reelRender.updateMany).toHaveBeenLastCalledWith({ where: { id: "r1", step: "JOIN" }, data: expect.objectContaining({ claimedAt: null, outputs: expect.objectContaining({ joinErrors: 1 }) }) });
+    expect(m.tx.reelRender.updateMany).toHaveBeenLastCalledWith({ where: { id: "r1", step: "JOIN", claimedAt: expect.any(Date) }, data: expect.objectContaining({ claimedAt: null, outputs: expect.objectContaining({ joinErrors: 1 }) }) });
     expect(m.refund).not.toHaveBeenCalled();
     m.tx.reelRender.findUnique.mockResolvedValue(joining(2));
     await advanceRender({ renderId: "r1" });

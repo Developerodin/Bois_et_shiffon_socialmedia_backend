@@ -36,9 +36,11 @@ import { requirePlan } from "@/server/services/subscriptions";
 export const REEL_RENDER_JOB = "reel.render";
 const POLL_MS = 20_000;
 const CLAIM_STALE_MS = 2 * 60_000;
-// A join downloads every clip and runs ffmpeg (each capped at 120 s) inside one job (300 s cap): only a claim older
-// than that is a crashed join. Shorter, and a second tick would join the same reel in parallel.
+// A join (downloads, seam checks, ffmpeg, upload) has no time cap in the worker, so it refreshes its claim every
+// JOIN_BEAT_MS while it runs: a claim not refreshed for JOIN_STALE_MS is a join that stopped (crash, kill), and only
+// then may a tick join again. Without the refresh, a join slower than JOIN_STALE_MS would get a second one in parallel.
 const JOIN_STALE_MS = 6 * 60_000;
+const JOIN_BEAT_MS = 60_000;
 const JOIN_TRIES = 3;
 const GIVE_UP_MS = 24 * 3600_000;
 const GIVE_UP_ERROR = "The video took more than a day. Credits refunded; try again.";
@@ -331,23 +333,37 @@ async function retryOnBackup(r: ReelRender, scenes: number[]) {
 async function join(r: ReelRender, urls: string[]) {
   const out = { ...(r.outputs as Outputs), clipUrls: urls };
   // One join at a time: CLIPS→JOIN, or re-claiming a JOIN whose claim went stale (a crashed join).
+  let claimedAt = new Date();
   const claimed = r.step === "CLIPS"
-    ? await prisma.reelRender.updateMany({ where: { id: r.id, step: "CLIPS" }, data: { step: "JOIN", outputs: out as Prisma.InputJsonValue, claimedAt: new Date() } })
-    : await prisma.reelRender.updateMany({ where: { id: r.id, step: "JOIN", claimedAt: r.claimedAt }, data: { claimedAt: new Date() } });
+    ? await prisma.reelRender.updateMany({ where: { id: r.id, step: "CLIPS" }, data: { step: "JOIN", outputs: out as Prisma.InputJsonValue, claimedAt } })
+    : await prisma.reelRender.updateMany({ where: { id: r.id, step: "JOIN", claimedAt: r.claimedAt }, data: { claimedAt } });
   if (claimed.count !== 1) return;
+  // The claim is refreshed every minute while this join runs (CAS on the value it set), so only a join that stopped
+  // goes stale after JOIN_STALE_MS.
+  let beat: Promise<unknown> = Promise.resolve();
+  const timer = setInterval(() => {
+    const at = new Date();
+    beat = prisma.reelRender.updateMany({ where: { id: r.id, step: "JOIN", claimedAt }, data: { claimedAt: at } }).then(({ count }) => { if (count) claimedAt = at; }, () => {});
+  }, JOIN_BEAT_MS);
+  const stopBeat = async () => {
+    clearInterval(timer);
+    await beat;
+  };
   const scope = { workspaceId: r.workspaceId, brandId: r.brandId };
   const dir = await mkdtemp(path.join(tmpdir(), "reel-"));
   let made: boolean;
   try {
     made = await joinClips(r, out, urls, scope, dir);
   } catch (e) {
+    await stopBeat();
     // Release the claim so the queue's retry joins again at once; give up (and refund) after a few failures,
-    // e.g. clip links that expired or a clip ffmpeg can't read.
+    // e.g. clip links that expired or a clip ffmpeg can't read. Only this join's own claim: never another join's.
     const tries = (out.joinErrors ?? 0) + 1;
     if (tries >= JOIN_TRIES) return failRender({ renderId: r.id }, e, true);
-    await prisma.reelRender.updateMany({ where: { id: r.id, step: "JOIN" }, data: { claimedAt: null, outputs: { ...out, joinErrors: tries } as Prisma.InputJsonValue } });
+    await prisma.reelRender.updateMany({ where: { id: r.id, step: "JOIN", claimedAt }, data: { claimedAt: null, outputs: { ...out, joinErrors: tries } as Prisma.InputJsonValue } });
     throw e;
   } finally {
+    await stopBeat();
     await rm(dir, { recursive: true, force: true });
   }
   if (made) {
