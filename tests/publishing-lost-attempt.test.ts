@@ -4,7 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // 10 minutes, or onPublishJobLost after a lost lease): the old runner must not reach media_publish.
 const s = vi.hoisted(() => ({
   attempt: {} as Record<string, unknown>,
-  leaseHeld: true,
+  // The job's lease: seconds until leasedUntil while this runner holds it, null once another runner took it.
+  leaseAhead: 300 as number | null,
+  queryFails: false,
   onPoll: null as null | (() => void),
   published: 0,
   audits: [] as unknown[],
@@ -13,8 +15,12 @@ const s = vi.hoisted(() => ({
 vi.mock("@/server/db/prisma", () => {
   const prisma = {
     $executeRaw: async () => 0,
-    // holdsLease's SELECT … FOR SHARE: one row while this runner still holds the job.
-    $queryRaw: async () => (s.leaseHeld ? [{ id: "j1" }] : []),
+    // holdsLease's SELECT … FOR SHARE: one row while this runner holds the job with more than the margin left.
+    $queryRaw: async (sql: TemplateStringsArray, ...values: unknown[]) => {
+      if (s.queryFails) throw new Error("Timed out fetching a new connection from the connection pool");
+      const margin = sql.join("?").includes("1 minute") ? 60 : Number(values[2] ?? 0);
+      return s.leaseAhead !== null && s.leaseAhead > margin ? [{ id: "j1" }] : [];
+    },
     publicationAttempt: {
       updateMany: async ({ where, data }: { where: { id: string; status: string }; data: object }) => {
         if (s.attempt.id !== where.id || s.attempt.status !== where.status) return { count: 0 };
@@ -70,7 +76,8 @@ beforeEach(() => {
     id: "a1", workspaceId: "w1", brandId: "b1", contentItemId: "i1", contentVersionId: "v2", packageHash: approval.packageHash,
     connectionId: "c1", provider: "INSTAGRAM", createdByUserId: "u1", status: "SCHEDULED", target: { imageUrl: "https://shop.example/milo.jpg" },
   };
-  s.leaseHeld = true;
+  s.leaseAhead = 300;
+  s.queryFails = false;
   s.onPoll = null;
   s.published = 0;
   s.audits = [];
@@ -98,11 +105,25 @@ describe("a non-story publish re-checks its attempt just before media_publish", 
     expect(s.attempt.status).toBe("FAILED");
   });
 
-  it("posts nothing, and writes nothing, when this runner lost the job's lease", async () => {
-    s.onPoll = () => void (s.leaseHeld = false); // reclaimed by another loop: onPublishJobLost decides, not us
+  it("posts nothing when this runner lost the job's lease, and says nothing was posted", async () => {
+    s.onPoll = () => void (s.leaseAhead = null); // reclaimed by another loop
     await executePublication({ attemptId: "a1" }, lease);
     expect(s.published).toBe(0);
-    expect(s.attempt.status).toBe("PUBLISHING");
-    expect(s.audits).toEqual([]);
+    expect(s.attempt).toMatchObject({ status: "FAILED", error: expect.stringContaining("Nothing was posted") });
+  });
+
+  it("a lease that is late, not lost (renewals failed, 30 s left), posts nothing and isn't left PUBLISHING", async () => {
+    s.onPoll = () => void (s.leaseAhead = 30); // less than the minute the last call needs
+    await executePublication({ attemptId: "a1" }, lease);
+    expect(s.published).toBe(0);
+    expect(s.attempt).toMatchObject({ status: "FAILED", error: expect.stringContaining("Nothing was posted") });
+  });
+
+  it("a database error during the re-check is FAILED (nothing sent), not \"couldn't confirm whether it posted\"", async () => {
+    s.onPoll = () => void (s.queryFails = true);
+    await executePublication({ attemptId: "a1" }, lease);
+    expect(s.published).toBe(0);
+    expect(s.attempt.status).toBe("FAILED");
+    expect(String(s.attempt.error)).not.toContain("couldn't confirm");
   });
 });

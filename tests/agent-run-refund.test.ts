@@ -92,15 +92,23 @@ describe("executeAgentRun's status writes", () => {
     expect(db.agentRun.updateMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: { id: "r1", status: "RUNNING" }, data: expect.objectContaining({ status: "SUCCEEDED" }) }));
   });
 
-  it("a runner that lost its lease doesn't write SUCCEEDED over the run another runner took over", async () => {
+  it("a runner that lost its lease doesn't write SUCCEEDED, and throws so the queue's lease-guarded failJob decides", async () => {
     db.$queryRaw.mockResolvedValue([]); // renewals failed, the job was reclaimed
-    await executeAgentRun(payload, lease);
+    await expect(executeAgentRun(payload, lease)).rejects.toThrow("wasn't saved");
     expect(succeeded()).toBe(false);
+  });
+
+  it("a lease that is late, not lost (two renewals failed, 30 s left), still ends the run SUCCEEDED", async () => {
+    // The lease row holds only for a margin under 30 s; a 1-minute margin would refuse it and strand the run RUNNING.
+    db.$queryRaw.mockImplementation(async (sql: TemplateStringsArray, ...values: unknown[]) =>
+      30 > (sql.join("?").includes("1 minute") ? 60 : Number(values[2] ?? 0)) ? [{ id: "j1" }] : []);
+    await executeAgentRun(payload, lease);
+    expect(succeeded()).toBe(true);
   });
 
   it("a run failed (and refunded) meanwhile stays FAILED: the SUCCEEDED compare-and-set matches nothing", async () => {
     db.agentRun.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
-    await executeAgentRun(payload, lease);
+    await executeAgentRun(payload, lease).catch(() => {});
     expect(db.agentEvent.create).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ level: "SUCCESS" }) }));
   });
 

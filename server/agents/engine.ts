@@ -204,15 +204,15 @@ export async function executeAgentRun(rawPayload: unknown, lease?: Lease) {
   const agentInput: Record<string, unknown> = { ...((run.input ?? {}) as object) };
   delete agentInput.chargeId;
   const output = await agent.run(ctx, agent.inputSchema.parse(agentInput));
-  // Only while this runner still holds the job: one that lost its lease (renewals failed) leaves the run to the runner
-  // that reclaimed it. ponytail: what the agent itself wrote meanwhile stays; only the run's own result is refused.
+  // Only while this runner still holds the job (no margin: a DB-only write, and the row lock keeps a reclaim out): one
+  // that lost its lease leaves the run to the runner that reclaimed it. It throws rather than returns, so the queue's
+  // lease-guarded failJob decides: nothing if the lease is gone, else a retry or the failure hook (FAILED, refund). A
+  // return would let completeJob mark the job done and strand the run RUNNING.
+  // ponytail: what the agent itself wrote meanwhile stays; only the run's own result is refused.
   const finished = await prisma.$transaction(async (tx) =>
     (!lease || (await holdsLease(tx, lease))) &&
     (await tx.agentRun.updateMany({ where: { id: run.id, status: "RUNNING" }, data: { status: "SUCCEEDED", finishedAt: new Date(), output: output ?? undefined } })).count === 1);
-  if (!finished) {
-    console.warn(`[agents] run ${run.id}: lost its job or no longer RUNNING; its result wasn't saved`);
-    return;
-  }
+  if (!finished) throw new Error("This run's result wasn't saved: its job was taken over or the run ended meanwhile");
   await log("SUCCESS", `${agent.name} finished`);
 }
 

@@ -418,7 +418,7 @@ export async function schedulePublication(input: {
   return attempt;
 }
 
-/** beforePublish found this attempt no longer live: nothing was sent, and nothing is written (it isn't this runner's). */
+/** beforePublish stopped the post before the platform's final call: nothing was sent. */
 class PublishStopped extends Error {}
 
 /** Job handler. Never throws: a retry could double-post, so every outcome is recorded instead. */
@@ -515,10 +515,12 @@ export async function executePublication(payload: unknown, lease?: Lease) {
   // still be PUBLISHING and this runner must still hold its job. Otherwise it was declared lost while the containers
   // processed (releaseState after 10 minutes, onPublishJobLost after a lost lease), and a person may already have said
   // "it didn't post" and booked it again: posting now would post it twice. The CAS also moves updatedAt, so
-  // releaseState's 10 minutes start over for the one call left (30 s timeout).
+  // releaseState's 10 minutes start over for the one call left (30 s timeout). The lease must have a minute to spare,
+  // longer than that call. A check that fails, or throws (a pool timeout), stops before anything is sent.
   const beforePublish = async () => {
     const live = await prisma.$transaction(async (tx) =>
-      (!lease || (await holdsLease(tx, lease))) && (await tx.publicationAttempt.updateMany({ where: { id: a.id, status: "PUBLISHING" }, data: { updatedAt: new Date() } })).count === 1);
+      (!lease || (await holdsLease(tx, lease, 60))) && (await tx.publicationAttempt.updateMany({ where: { id: a.id, status: "PUBLISHING" }, data: { updatedAt: new Date() } })).count === 1)
+      .catch(() => false);
     if (!live) throw new PublishStopped();
   };
   try {
@@ -530,7 +532,10 @@ export async function executePublication(payload: unknown, lease?: Lease) {
     );
     await finish("PUBLISHED", { externalId: res.externalId, externalUrl: safeHttpUrl(res.externalUrl)?.href ?? null, publishedAt: new Date(), error: null }, "PUBLISHED");
   } catch (e) {
-    if (e instanceof PublishStopped) return;
+    // Nothing was sent. Still PUBLISHING (a lease that is late or lost, or a database error): FAILED, back to APPROVED,
+    // so it isn't left for releaseState to call "check the account". Already settled or declared lost: the CAS in
+    // finish leaves that as it is.
+    if (e instanceof PublishStopped) return void (await finish("FAILED", { error: "Publishing stopped before posting. Nothing was posted. Try again." }, "APPROVED"));
     const msg = e instanceof Error ? e.message.slice(0, 300) : "Unknown error";
     if (e instanceof PublishRefused) {
       // The platform no longer accepts this token: say so on the account, not just on this post.

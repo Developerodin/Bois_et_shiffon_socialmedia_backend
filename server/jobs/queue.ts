@@ -83,13 +83,14 @@ export type Lease = { jobId: string; leasedBy: string | null };
 
 /**
  * For a handler's last irreversible step or final write, inside its transaction: whether this runner still holds the
- * job, with a minute to spare (longer than one provider call's 30 s timeout). FOR SHARE keeps another runner from
- * reclaiming or failing the job until the caller's transaction ends.
+ * job. FOR SHARE keeps another runner from reclaiming or failing the job until the caller's transaction ends, so a
+ * DB-only final write needs no margin (0). A check before an external call passes `marginSecs`, longer than that call,
+ * so the lease can't lapse while it is in flight.
  */
-export async function holdsLease(tx: Prisma.TransactionClient, lease: Lease) {
+export async function holdsLease(tx: Prisma.TransactionClient, lease: Lease, marginSecs = 0) {
   const rows = await tx.$queryRaw<{ id: string }[]>`
     SELECT id FROM "Job"
-    WHERE id = ${lease.jobId} AND "leasedBy" = ${lease.leasedBy} AND status = 'RUNNING' AND "leasedUntil" > now() + interval '1 minute'
+    WHERE id = ${lease.jobId} AND "leasedBy" = ${lease.leasedBy} AND status = 'RUNNING' AND "leasedUntil" > now() + make_interval(secs => ${marginSecs}::float8)
     FOR SHARE`;
   return rows.length === 1;
 }
