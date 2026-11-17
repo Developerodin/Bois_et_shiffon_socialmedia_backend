@@ -56,7 +56,7 @@ services:
       migrate: { condition: service_completed_successfully }
 
   web:
-    build: { context: ${WEB_DIR:-../web} }
+    build: { context: "${WEB_DIR:-../web}" }
     image: espanda-web
     environment:
       SERVER_URL: http://server-api:3101
