@@ -282,6 +282,25 @@ describe("startRender", () => {
     expect(m.spend).not.toHaveBeenCalled();
   });
 
+  const doneBefore = () =>
+    m.tx.reelRender.findFirst.mockImplementation(async (a: { where: { step?: unknown } }) => (a.where.step === "DONE" ? render({ step: "DONE" }) : null));
+
+  it("asks before paying again for a version that already has a video", async () => {
+    ready();
+    doneBefore();
+    await expect(startRender({ ...scope, userId: "u1", itemId: "i1", version: 2 })).rejects.toMatchObject({ status: 409, code: "render.alreadyDone" });
+    expect(m.tx.reelRender.findFirst).toHaveBeenCalledWith({ where: { contentVersionId: "v1", step: "DONE" } });
+    expect(m.spend).not.toHaveBeenCalled();
+  });
+
+  it("makes it again, charged, when asked to", async () => {
+    ready();
+    doneBefore();
+    m.tx.reelRender.aggregate.mockResolvedValue({ _max: { attempt: 1 } });
+    await startRender({ ...scope, userId: "u1", itemId: "i1", version: 2, again: true });
+    expect(m.spend).toHaveBeenCalledWith(expect.objectContaining({ refId: "v1:2" }));
+  });
+
   it("try again after a failure is a new, charged attempt", async () => {
     ready();
     m.tx.reelRender.aggregate.mockResolvedValue({ _max: { attempt: 1 } });

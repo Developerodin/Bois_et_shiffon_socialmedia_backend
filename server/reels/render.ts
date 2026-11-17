@@ -108,7 +108,7 @@ export async function enqueueTick(r: Pick<ReelRender, "id" | "workspaceId" | "br
 const ACTIVE = ["VOICE", "CLIPS", "JOIN"] as const;
 
 /** "Make video" / "Try again": validates the latest plan version, charges once per attempt, queues the render. */
-export async function startRender(input: { workspaceId: string; brandId: string; userId: string; itemId: string; version: number }) {
+export async function startRender(input: { workspaceId: string; brandId: string; userId: string; itemId: string; version: number; again?: boolean }) {
   await requirePlan(input.workspaceId); // making a video needs a plan (mobile L02 gate)
   // A library voice can't speak on ElevenLabs' free plan: said before anything is charged. Asked outside the locked
   // transaction below (a network call). ponytail: reads the latest plan here; the transaction re-checks the version.
@@ -123,6 +123,8 @@ export async function startRender(input: { workspaceId: string; brandId: string;
     const running = await tx.reelRender.findFirst({ where: { contentItemId: item.id, step: { in: [...ACTIVE] } } });
     if (running) return { running };
     if (latest.version !== input.version) throw new PublishingError("A newer plan exists. Review it, then make the video.");
+    // The same plan already made a video: paying again needs a yes (`again`). An edit makes a new version, so it isn't asked.
+    if (!input.again && (await tx.reelRender.findFirst({ where: { contentVersionId: latest.id, step: "DONE" } }))) throw new PublishingError("This version already has a video. Make it again?", 409, "render.alreadyDone");
     if (["SCHEDULED", "PUBLISHED"].includes(item.status)) throw new PublishingError("This reel is already scheduled or posted.", 409);
     const parsed = ReelPlan.safeParse(latest.body);
     if (!parsed.success) throw new PublishingError("This plan isn't complete yet", 400);

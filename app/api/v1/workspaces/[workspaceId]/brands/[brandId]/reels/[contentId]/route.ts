@@ -45,7 +45,7 @@ export async function PATCH(request: Request, context: Params) {
 }
 
 const Action = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("render"), version: z.number().int().min(1) }),
+  z.object({ action: z.literal("render"), version: z.number().int().min(1), again: z.boolean().optional() }),
   z.object({ action: z.literal("send"), version: z.number().int().min(1), how: z.literal("download") }),
   z.object({ action: z.literal("recheck") }),
   z.object({ action: z.literal("register-link"), url: z.string().min(1).max(500) }),
@@ -63,7 +63,7 @@ export async function POST(request: Request, context: Params) {
     const { contentId: itemId } = await context.params;
     if (body.action === "render") {
       try {
-        const r = await startRender({ ...scope, itemId, version: body.version });
+        const r = await startRender({ ...scope, itemId, version: body.version, again: body.again });
         kickRunner();
         return Response.json({ render: { id: r.id, step: r.step, attempt: r.attempt } }, { status: 202 });
       } catch (e) {
