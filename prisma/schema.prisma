@@ -563,6 +563,15 @@ model RateLimitBucket {
   @@index([windowStart])
 }
 
+/// Short-lived shared values (clone challenges, in-flight markers, read caches); see server/db/transient.ts.
+model TransientEntry {
+  key       String   @id
+  value     Json
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
 // --- RBAC + account flows (ported from Cad IAM, minus impersonation) ---
 
 /// Workspace role = named set of permission keys from server/auth/permissions.catalog.ts.

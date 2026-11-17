@@ -190,6 +190,7 @@ async function dailySweep() {
 async function pruneOldRows() {
   const ago = (days: number) => new Date(Date.now() - days * 86_400_000);
   await prisma.rateLimitBucket.deleteMany({ where: { windowStart: { lt: ago(2) } } });
+  await prisma.transientEntry.deleteMany({ where: { expiresAt: { lt: new Date() } } });
   await prisma.oAuthStateTransaction.deleteMany({ where: { expiresAt: { lt: ago(2) } } });
   await prisma.job.deleteMany({ where: { status: "COMPLETED", updatedAt: { lt: ago(30) } } });
   await prisma.emailOutbox.deleteMany({ where: { status: { in: ["SENT", "NOT_CONFIGURED"] }, createdAt: { lt: ago(30) } } });
