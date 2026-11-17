@@ -46,7 +46,7 @@ The Web Frontend also reads three optional settings (all at run time):
 |---|---|
 | `WEB_FEATURES` | Comma list of website feature flags switched on for everyone. Unset: none. |
 | `WEB_FEATURE_WORKSPACES` | Comma list of `feature:workspaceId` pairs: a flag on for those workspaces only. |
-| `STORAGE_ORIGIN` | The object storage / media origin (e.g. `https://media.example.com`). It is added to the `img-src`/`media-src` of the report-only content security policy. Anything that is not an http(s) origin is cleaned or left out. |
+| `STORAGE_ORIGIN` | The object storage / media origin (e.g. `https://media.example.com`). It is added to the `media-src` and `connect-src` of the report-only content security policy. Anything that is not an http(s) origin is cleaned or left out. |
 
 ## Target groups
 

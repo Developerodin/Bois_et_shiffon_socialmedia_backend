@@ -415,7 +415,8 @@ export async function deleteStory(scope: Scope, itemId: string) {
 
 const STORY_GOALS = ["newArrival", "productFeature", "specialOffer"] as const;
 export const STORY_START_NOTE = "Writing didn't start. Try again.";
-const noCredits = () => new PublishingError("Not enough credits to write a story.", 402, "story.credits");
+/** Keeps the story.credits code the phone reads and adds the shape the web opens its paywall on. */
+const noCredits = (e: InsufficientCreditsError) => new PublishingError("Not enough credits to write a story.", 402, "story.credits", { insufficientCredits: true, balance: e.balance, needed: e.needed });
 /** Brand-scoped and prefixed, so another brand's (or feature's) id can never match this charge in spendCredits/refundCharge. */
 const chargeRef = (brandId: string, requestId: string) => `story:${brandId}:${requestId}`;
 
@@ -458,7 +459,7 @@ export async function createStory(scope: Scope, input: { goal: (typeof STORY_GOA
       try {
         await spendCredits({ workspaceId: scope.workspaceId, amount: CREDIT_COSTS.storyWrite, reason: "story-write", refId, userId: scope.userId });
       } catch (e) {
-        if (e instanceof InsufficientCreditsError) throw noCredits();
+        if (e instanceof InsufficientCreditsError) throw noCredits(e);
         throw e;
       }
     }
@@ -506,7 +507,7 @@ export async function reopenStoryWrite(scope: Scope, itemId: string): Promise<st
       try {
         chargeId = await spendCredits({ workspaceId: scope.workspaceId, amount: CREDIT_COSTS.storyWrite, reason: "story-write", refId: `${prefix}${retries + 1}`, userId: scope.userId });
       } catch (e) {
-        if (e instanceof InsufficientCreditsError) throw noCredits();
+        if (e instanceof InsufficientCreditsError) throw noCredits(e);
         throw e;
       }
     } else if (await entry("story-write")) chargeId = last;

@@ -79,6 +79,12 @@ export async function POST(request: Request, context: { params: Promise<Params> 
 
 function toProblem(error: unknown) {
   if (error instanceof AgentStartError) {
+    if (error.credits) {
+      return Response.json(
+        { type: "https://api.brandpilot/errors/agent-start", title: "Agent could not start", status: 402, detail: error.message, insufficientCredits: true, ...error.credits },
+        { status: 402 },
+      );
+    }
     return problemResponse({
       type: "https://api.brandpilot/errors/agent-start",
       title: "Agent could not start",

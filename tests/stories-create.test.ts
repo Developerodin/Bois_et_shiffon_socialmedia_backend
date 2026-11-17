@@ -86,7 +86,7 @@ describe("createStory", () => {
 
   it("refuses without credits with 402 story.credits and creates no item", async () => {
     m.spend.mockRejectedValue(new InsufficientCreditsError(2, 5));
-    await expect(createStory(scope, input)).rejects.toMatchObject({ status: 402, code: "story.credits" });
+    await expect(createStory(scope, input)).rejects.toMatchObject({ status: 402, code: "story.credits", data: { insufficientCredits: true, balance: 2, needed: 5 } });
     expect(db.contentItem.create).not.toHaveBeenCalled();
   });
 });

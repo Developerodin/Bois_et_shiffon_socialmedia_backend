@@ -18,6 +18,8 @@ export class AgentStartError extends Error {
   constructor(
     message: string,
     readonly status: 402 | 404 | 409 | 422 | 429,
+    /** Set on a 402, so the route can answer with the { insufficientCredits, balance, needed } shape clients open the paywall on. */
+    readonly credits?: { balance: number; needed: number },
   ) {
     super(message);
     this.name = "AgentStartError";
@@ -73,7 +75,7 @@ export async function startAgentRun(input: {
     try {
       chargeId = await spendCredits({ workspaceId: input.workspaceId, amount: CREDIT_COSTS.manualRun, reason: `agent-run:${agent.key}`, userId: input.userId });
     } catch (e) {
-      if (e instanceof InsufficientCreditsError) throw new AgentStartError(`This run needs ${e.needed} credits; you have ${e.balance}.`, 402);
+      if (e instanceof InsufficientCreditsError) throw new AgentStartError(`This run needs ${e.needed} credits; you have ${e.balance}.`, 402, { balance: e.balance, needed: e.needed });
       throw e;
     }
   }

@@ -16,7 +16,10 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     const { competitorId } = await context.params;
     const result = await startCompetitorAudit({ ...scope, competitorId });
     if (result.status === "insufficient-credits") {
-      return problemResponse({ type: "https://api.brandpilot/errors/insufficient-credits", title: "Not enough credits", status: 402, detail: `This audit needs ${result.needed} credits; you have ${result.balance}.` });
+      return Response.json(
+        { type: "https://api.brandpilot/errors/insufficient-credits", title: "Not enough credits", status: 402, detail: `This audit needs ${result.needed} credits; you have ${result.balance}.`, insufficientCredits: true, balance: result.balance, needed: result.needed },
+        { status: 402 },
+      );
     }
     if (result.status === "started") kickRunner();
     return Response.json(result, { status: result.status === "started" ? 202 : 200 });
