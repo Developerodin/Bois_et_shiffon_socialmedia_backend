@@ -1,0 +1,195 @@
+# Design System — Multi-Brand AI CMO Platform
+
+Neutral platform chrome; **per-brand** accent may come from brand photography and optional `BrandProfile` theme tokens later. **shadcn/ui** + Tailwind CSS. Do not copy Okara or Scalio branding. B&C seed uses warm editorial tokens below as **one brand’s** preview—not global product skin.
+
+---
+
+## 1. Principles
+
+- **Editorial hierarchy:** Content and imagery lead; chrome stays quiet
+- **Restraint:** Neutral surfaces, one accent, generous whitespace
+- **Status clarity:** Workflow states (draft, in review, approved, published, failed) always visible
+- **Accessibility:** WCAG 2.2 AA contrast for text; focus rings; keyboard paths for dialogs and tables
+
+---
+
+## 2. Color tokens (CSS variables)
+
+Source of truth: `apps/web/app/globals.css` (hex, light mode only). The values below are as built.
+
+| Token | Value | Usage |
+|-------|-------|--------|
+| `--background` | `#f6f5f9` | Page background behind panels (cool off-white) |
+| `--foreground` | `#191620` | Primary text |
+| `--card` | `#ffffff` | Cards, panels, sidebar, top bar |
+| `--muted` | `#f2f0f7` | Secondary surfaces, loading placeholders, disabled buttons |
+| `--muted-foreground` | `#5e596b` | Meta text |
+| `--border` | `#ded9e6` | Card outlines, dividers |
+| `--primary` / `--primary-strong` | `#5b50d6` / `#4c40bb` | Actions, active nav |
+| `--accent` / `--accent-foreground` | `#eeeafc` / `#4c40bb` | Icon tiles, selected rows |
+| `--destructive` | `#b42318` | Errors, reject |
+| `--success` | `#1a7f4b` | Approved, healthy |
+| `--warning` | `#9a5b00` | Warnings |
+
+**Brand note:** In brand-scoped views, product/hero imagery carries color; platform chrome stays neutral so any onboarded brand’s assets dominate.
+
+---
+
+## 3. Typography
+
+| Role | Font stack | Size / line |
+|------|------------|-------------|
+| Display (`.font-display`) | `Inter` | `text-2xl` page greetings, `text-lg` panel titles |
+| UI / body | `Inter`, system-ui | `text-sm` base, `leading-relaxed` |
+| Mono / data | `JetBrains Mono` | SKUs, ids, metrics |
+
+Loaded via `next/font` in `app/layout.tsx`.
+
+---
+
+## 4. Spacing & layout
+
+- Base unit: 4px (`space-1`); radius token `--radius: 1rem` (`rounded-2xl` for cards and controls)
+- Shell: sidebar `232px`, top bar `72px` (`h-18`), assistant panel on the right from `xl`
+- Non-Overview pages: `p-8` inside the main area
+- **Overview panels** (`components/workspace/panel-layout.tsx`): each panel is a card (`rounded-2xl border bg-card shadow-sm`) on `--background`, `12px` (`gap-3` / `p-3`) between cards. The gap between columns is the resize handle; its line shows only on hover or focus. A column whose panels are all collapsed shrinks to `15rem`.
+- **Inside a panel:** one inset for everything, `px-5`. Sections are separated by spacing (`py-4`), not divider lines; list rows that need edge-to-edge hover use `-mx-2 px-2`.
+- Icon tiles: agent and task icons sit on `bg-accent` tiles (`size-8 rounded-lg` in rows, `size-12 rounded-xl` in the agent grid).
+- Max content width for reading: `max-w-3xl` (brief editor); dashboards `max-w-7xl`
+
+---
+
+## 5. Elevation & borders
+
+- Cards: `border border-border shadow-sm` (no heavy shadows)
+- Modals: `shadow-lg`
+- Focus: `ring-2 ring-primary ring-offset-2`
+
+---
+
+## 6. shadcn/ui components (install order)
+
+1. `button`, `input`, `label`, `textarea`
+2. `dialog`, `dropdown-menu`, `select`
+3. `table`, `badge`, `tabs`
+4. `calendar` (date picker for Screen 7)
+5. `toast` / sonner for feedback
+6. `sheet` for mobile nav
+
+Customize via CSS variables above in `components.json`.
+
+---
+
+## 7. Application components (feature-level)
+
+| Component | Responsibility |
+|-----------|----------------|
+| `AppShell` | Sidebar + header + workspace selector + **brand switcher** |
+| `BrandSwitcher` | Lists accessible brands; shows `displayName` + status; blocks navigation actions when none selected (REQ-PLAT-002) |
+| `BrandLabel` | Chip in header: active brand name; portfolio mode shows “Portfolio” badge |
+| `PageHeader` | Title, breadcrumbs, primary action |
+| `StatusBadge` | Maps workflow enums to color + label |
+| `EmptyState` | Illustration-free; clear CTA |
+| `DataTable` | Sortable columns, filter row |
+| `OpportunityCard` | Score, rationale, product chip |
+| `ContentPreview` | IG caption truncation preview (125 chars) — mirrors `caption.py` UX |
+| `ApprovalBanner` | Version id, approver, blocking checks |
+| `IntegrationHealthPill` | Connected / degraded / error |
+| `LoadingSkeleton` | List and card placeholders |
+
+---
+
+## 8. Imagery
+
+- Product thumbnails: fixed aspect `aspect-[4/5]` in grids
+- Hero previews: `aspect-video` for Reel
+- Use `next/image` with explicit sizes; lazy load below fold
+- Placeholder when asset rights `PENDING` — never show unlicensed competitor media
+
+---
+
+## 9. Motion
+
+- Subtle: `transition-colors duration-150`
+- Avoid gratuitous animation; respect `prefers-reduced-motion`
+
+---
+
+## 10. Responsive breakpoints
+
+| Breakpoint | Behavior |
+|------------|----------|
+| `< md` | Collapsible nav sheet; stack filters |
+| `md+` | Sidebar visible |
+| `lg+` | Two-column studio (editor + preview) |
+
+---
+
+## 11. Content-specific patterns
+
+### Opportunity feed
+
+- Left: source + timestamp + provenance link
+- Center: title + AI summary (labeled)
+- Right: score + actions (shortlist / reject)
+
+### Studio
+
+- Split pane: editor | live preview (platform toggle)
+- Version timeline vertical rail
+
+### Calendar
+
+- Month grid + list toggle; overdue in `--warning`
+
+---
+
+## 12. Accessibility checklist (per screen)
+
+- [ ] All icons with `aria-hidden` + text label or `aria-label`
+- [ ] Form errors linked with `aria-describedby`
+- [ ] Table headers `scope="col"`
+- [ ] Dialog focus trap and Esc close
+- [ ] Color not sole indicator of status (icon + text)
+
+---
+
+## 13. Authorization & data honesty (Phase 0.5)
+
+### Permission-denied states
+
+- Destructive or privileged actions hidden **and** server-enforced; when user lacks capability, show inline **“You don’t have permission”** with request-access hint — never a no-op button.
+- OWNER separation override (`content.approve.self`): confirm dialog + audit notice in `ApprovalBanner`.
+
+### Stale commercial data
+
+- Product stock past freshness TTL: `--warning` badge **“Stock unverified”** with last-checked timestamp; publish CTA disabled at UI level (server still authoritative).
+- Expired offer linked to draft: banner **“Offer ended”** with link to commercial settings.
+
+### Unavailable metrics (REQ-BRIEF-019)
+
+- Use em dash or **“Unavailable”** label — never `0` for missing platform metrics.
+- `delayed` metrics: subtle **“Updating…”** with `observedAt` when known.
+- Comparison charts: footnote when metrics are not cross-platform comparable (GA4 vs Meta).
+
+### Integration health
+
+- `IntegrationHealthPill`: `healthy` | `degraded` | `error` | `disconnected` with reconnect CTA on `error`.
+
+---
+
+## 14. Files to create (Screen 1)
+
+- `app/globals.css` — tokens
+- `tailwind.config.ts` — extend fontFamily, colors
+- `components/ui/*` — shadcn
+- `components/layout/app-shell.tsx`
+- `components/layout/brand-switcher.tsx`
+
+### Brand switcher UX (REQ-PLAT-002)
+
+- Placement: header, adjacent to workspace selector
+- No primary CTA (create brief, approve, publish, connect integration) without `activeBrandId` — show inline prompt “Select a brand”
+- Archived brands: visible to admins in switcher with “Archived” badge; read-only history routes only
+- Portfolio view: separate nav entry; distinct from brand context (DEC-022)
+- `lib/design-tokens.ts` — export status color map for badges
