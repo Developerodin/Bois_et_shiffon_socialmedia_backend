@@ -1,5 +1,6 @@
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
+import { paidStart } from "@/server/api/client";
 import { AgentStartError, startAgentRun } from "@/server/agents/engine";
 import { getAgent } from "@/server/agents/registry";
 import { prisma } from "@/server/db/prisma";
@@ -49,35 +50,41 @@ export async function POST(request: Request, context: { params: Promise<Params> 
       return problemResponse({ type: "https://api.brandpilot/errors/agent-start", title: "Agent could not start", status: 403, detail: "This agent is started from its own feature." });
     }
     const body = await request.json().catch(() => ({}));
-    // Generating the calendar needs a plan (mobile L05).
-    if (agentKey === "planner") {
-      try {
-        await requirePlan(scope.workspaceId);
-      } catch (e) {
-        if (e instanceof PlanRequiredError) return Response.json({ planRequired: true, title: e.message }, { status: 402 });
-        throw e;
+    return paidStart(request, { feature: `agent-run:${agentKey}`, workspaceId: scope.workspaceId }, async () => {
+      // Generating the calendar needs a plan (mobile L05).
+      if (agentKey === "planner") {
+        try {
+          await requirePlan(scope.workspaceId);
+        } catch (e) {
+          if (e instanceof PlanRequiredError) return Response.json({ planRequired: true, title: e.message }, { status: 402 });
+          throw e;
+        }
       }
-    }
 
-    const run = await startAgentRun({
-      workspaceId: scope.workspaceId,
-      brandId: scope.brandId,
-      agentKey,
-      trigger: "manual",
-      userId: scope.userId,
-      input: (body as { input?: unknown }).input,
-    });
-    kickRunner();
-    return Response.json({ run: { id: run.id, status: run.status } }, { status: 202 });
-  } catch (error) {
-    if (error instanceof AgentStartError) {
-      return problemResponse({
-        type: "https://api.brandpilot/errors/agent-start",
-        title: "Agent could not start",
-        status: error.status,
-        detail: error.message,
+      const run = await startAgentRun({
+        workspaceId: scope.workspaceId,
+        brandId: scope.brandId,
+        agentKey,
+        trigger: "manual",
+        userId: scope.userId,
+        input: (body as { input?: unknown }).input,
       });
-    }
-    return fromAccessError(error);
+      kickRunner();
+      return Response.json({ run: { id: run.id, status: run.status } }, { status: 202 });
+    }, toProblem);
+  } catch (error) {
+    return toProblem(error);
   }
+}
+
+function toProblem(error: unknown) {
+  if (error instanceof AgentStartError) {
+    return problemResponse({
+      type: "https://api.brandpilot/errors/agent-start",
+      title: "Agent could not start",
+      status: error.status,
+      detail: error.message,
+    });
+  }
+  return fromAccessError(error);
 }

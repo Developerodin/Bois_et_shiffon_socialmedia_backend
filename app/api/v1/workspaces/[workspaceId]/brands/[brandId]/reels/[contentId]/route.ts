@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
+import { paidStart } from "@/server/api/client";
 import { kickIfDue, kickRunner } from "@/server/jobs/runner";
 import { ReelPlan } from "@/server/reels/plan";
 import { enqueueTick, startRender } from "@/server/reels/render";
@@ -62,16 +63,18 @@ export async function POST(request: Request, context: Params) {
     if (scope instanceof Response) return scope;
     const { contentId: itemId } = await context.params;
     if (body.action === "render") {
-      try {
-        const r = await startRender({ ...scope, itemId, version: body.version, again: body.again });
-        kickRunner();
-        return Response.json({ render: { id: r.id, step: r.step, attempt: r.attempt } }, { status: 202 });
-      } catch (e) {
-        if (e instanceof InsufficientCreditsError) return Response.json({ insufficientCredits: true, balance: e.balance, needed: e.needed }, { status: 402 });
-        // No plan: 402 with planRequired, so the app opens the plan gate (L02) rather than "not enough credits".
-        if (e instanceof PlanRequiredError) return Response.json({ planRequired: true, title: e.message }, { status: 402 });
-        throw e;
-      }
+      return paidStart(request, { feature: "reel-render", workspaceId: scope.workspaceId, refId: itemId }, async () => {
+        try {
+          const r = await startRender({ ...scope, itemId, version: body.version, again: body.again });
+          kickRunner();
+          return Response.json({ render: { id: r.id, step: r.step, attempt: r.attempt } }, { status: 202 });
+        } catch (e) {
+          if (e instanceof InsufficientCreditsError) return Response.json({ insufficientCredits: true, balance: e.balance, needed: e.needed }, { status: 402 });
+          // No plan: 402 with planRequired, so the app opens the plan gate (L02) rather than "not enough credits".
+          if (e instanceof PlanRequiredError) return Response.json({ planRequired: true, title: e.message }, { status: 402 });
+          throw e;
+        }
+      }, toProblem);
     }
     if (body.action === "recheck") return Response.json({ status: await recheckQuality(scope, itemId) }, { status: 202 });
     if (body.action === "send") return Response.json(await sendReel(scope, itemId, body.version));

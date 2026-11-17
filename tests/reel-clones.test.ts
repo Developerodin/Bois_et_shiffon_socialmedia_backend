@@ -101,7 +101,7 @@ describe("making a clone", () => {
 
 describe("the live-reading challenge", () => {
   it("asks an old app to update before anything is charged", async () => {
-    const { challengeId: _, ...old } = input;
+    const old = { ...input, challengeId: undefined };
     await expect(createClone(scope, old)).rejects.toMatchObject({ status: 409, code: "clone.updateApp" });
     expect(m.take).not.toHaveBeenCalled();
     expect(m.spend).not.toHaveBeenCalled();
