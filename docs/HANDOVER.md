@@ -24,7 +24,7 @@ now also returns each action's price and `freeAgents`; additive), web `7ed2fef..
 **Decisions that change what people see**
 - Page titles are `text-3xl` (were smaller).
 - Badge colours come from one map: admin `RUNNING` is now indigo (info); text on tints uses the new `--success-ink` and
-  `--warning-ink` so contrast passes 4.5:1. Admin run/call `ESCALATED` and `FELL_BACK` lost their amber (now muted).
+  `--warning-ink` so contrast passes 4.5:1. Admin run/call `ESCALATED` and `FELL_BACK` stay amber (warn).
 - Unlimited (test) workspaces show no price: their charges are zero, a price would be false.
 - The Overview feed's icon-only run buttons carry the price in `aria-label`/`title`, so it shows on hover and to a
   screen reader, not on screen. Ask if it should be visible text.
@@ -53,11 +53,16 @@ Note which routes really rendered (admin may be redirected to /welcome or /admin
 7. `JobProgress` until the photoshoot uses it.
 
 **Deferred minors (for a final fix round)**
-- `lib/status.ts`: add `ESCALATED` and `FELL_BACK` to the warn group.
 - `ai-models-tab`: missing `pb-0` when ready (about 32px dead space); check the long `usedBy` badge on a narrow screen.
 - Credits chip and sidebar import `tool` from the top bar (circular import in the chip): move it to a shared file.
-- `JobProgress`: slow/failed notices mount with their content (may be skipped by screen readers); aria-valuenow not
-  clamped; empty steps read "Done".
+- `JobProgress`: the slow/failed notices need a live role (the failed line has none; they mount with their content, so
+  screen readers may skip them). Fix before feature 2 renders it. Also aria-valuenow is not clamped and empty steps read
+  "Done".
+- Credits chip: "Couldn't read the balance" shows when only the /subscription read failed; reword so it says what failed.
+- Open owner question: the Overview feed's run-button price is only in hover and screen-reader text (see above).
+- Before relying on the layout, run the UI audit at 320 px and 1280 px in a fresh browser (command above). The Overview's
+  layout hint now sits above the panel columns (not in the top bar), which fixed the top bar overflowing at 1024 to
+  about 1600 px.
 - `PageSkeleton` double-reads "Loading"; the page-titles scan has no non-empty guard.
 - Sheet stays open if the viewport widens to md while open; a modifier or middle click on a sheet link also closes it.
 
