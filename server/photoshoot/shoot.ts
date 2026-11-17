@@ -6,7 +6,7 @@ import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
 import { SHOOT_TIERS, SHOTS, type ShootRatio, TIERS } from "@/server/photoshoot/tiers";
 import { fetchResult, higgsfield } from "@/server/reels/higgsfield";
-import { refundCharge, spendCredits } from "@/server/services/credits";
+import { chargeRefunded, refundCharge, spendCredits } from "@/server/services/credits";
 import { ownMediaKey, PublishingError } from "@/server/services/publishing";
 import { requirePlan } from "@/server/services/subscriptions";
 import { mediaKey, putMedia, signedMediaUrl } from "@/server/storage/media";
@@ -95,6 +95,7 @@ export async function createShoot(scope: Scope & { userId: string }, request: Sh
   if (requestId) {
     const existing = await shootForRequest(scope, requestId);
     if (existing) return { shoot: existing, repeated: true };
+    if (await chargeRefunded(scope.workspaceId, requestId)) throw new PublishingError("That request was already tried. Start again.", 409, "request.idTaken");
   }
   const id = requestId ?? randomUUID();
   const credits = TIERS[request.tier].credits;
@@ -105,11 +106,17 @@ export async function createShoot(scope: Scope & { userId: string }, request: Sh
     .catch(async (e: unknown) => {
       // Two presses at once with one request id: the other made the shoot and owns this same charge (same refId).
       if (requestId && (e as { code?: string }).code === "P2002") {
-        lostRace = await shootForRequest(scope, requestId).catch(async (taken: unknown) => {
-          await refundCharge(scope.workspaceId, chargeId); // another workspace's id: this charge is ours alone
-          throw taken;
-        });
-        if (lostRace) return null;
+        const winner = await prisma.photoShoot.findUnique({ where: { id: requestId } });
+        if (winner && winner.workspaceId === scope.workspaceId && winner.brandId === scope.brandId) {
+          lostRace = winner;
+          return null;
+        }
+        if (winner) {
+          // Another workspace's shoot: this charge is ours alone. Another brand in this workspace shares the same charge
+          // (refId is per workspace) and its shoot runs on it, so it stays.
+          if (winner.workspaceId !== scope.workspaceId) await refundCharge(scope.workspaceId, chargeId);
+          throw new PublishingError("That request id is already used.", 409, "request.idTaken");
+        }
       }
       await refundCharge(scope.workspaceId, chargeId);
       throw e;

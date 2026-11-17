@@ -15,6 +15,16 @@ describe("client tag", () => {
     expect(clientOf(req("curl/8"))).toEqual({ kind: "unknown", version: null });
   });
 
+  it("tells untagged callers apart by how they sign in: Bearer is the phone, the cookie is the website", () => {
+    const bearer = new Request("http://localhost/x", { headers: { authorization: "Bearer t" } });
+    const cookie = new Request("http://localhost/x", { headers: { cookie: "authjs.session-token=s" } });
+    expect(clientOf(bearer)).toEqual({ kind: "mobile", version: null });
+    expect(clientOf(cookie)).toEqual({ kind: "web", version: null });
+    process.env.PAID_STARTS_OFF_FOR = "web";
+    expect(paidStartsPaused(cookie)?.status).toBe(503);
+    expect(paidStartsPaused(bearer)).toBeNull();
+  });
+
   it("pauses paid starts only for the listed clients", async () => {
     expect(paidStartsPaused(req("web/1"))).toBeNull();
     process.env.PAID_STARTS_OFF_FOR = "web";

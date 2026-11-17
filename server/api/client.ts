@@ -1,9 +1,13 @@
 import { problemResponse } from "@/server/api/http-error";
 
-/** Which app is calling, from `X-Client: web/<version>` or `mobile/<version>`. Anything else is "unknown". */
+/** Which app is calling, from `X-Client: web/<version>` or `mobile/<version>`, else from how it signs in. */
 export function clientOf(request: Request): { kind: "web" | "mobile" | "unknown"; version: string | null } {
   const m = /^(web|mobile)\/(\S{1,40})$/.exec(request.headers.get("x-client")?.trim() ?? "");
-  return m ? { kind: m[1] as "web" | "mobile", version: m[2] } : { kind: "unknown", version: null };
+  if (m) return { kind: m[1] as "web" | "mobile", version: m[2] };
+  // Untagged (older app builds, and the website until it sends the tag): Bearer is the phone, a cookie the website.
+  if (request.headers.get("authorization")?.startsWith("Bearer ")) return { kind: "mobile", version: null };
+  if (request.headers.get("cookie")) return { kind: "web", version: null };
+  return { kind: "unknown", version: null };
 }
 
 /**

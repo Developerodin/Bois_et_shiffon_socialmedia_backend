@@ -3,15 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => {
   const fn = () => vi.fn();
   const tx = { $executeRaw: vi.fn(async () => 0), voice: { count: fn(), create: fn(), update: fn(), updateMany: fn(), delete: fn(), findFirst: fn(), findMany: fn(), findUnique: fn(), findUniqueOrThrow: fn() }, auditEvent: { create: fn() } };
-  return { tx, prisma: { ...tx, $transaction: vi.fn(async (f: unknown) => (typeof f === "function" ? f(tx) : Promise.all(f as unknown[]))) }, spend: fn(), refund: fn(), enqueue: fn(), perms: fn(), take: fn(), heard: fn() };
+  return { tx, prisma: { ...tx, $transaction: vi.fn(async (f: unknown) => (typeof f === "function" ? f(tx) : Promise.all(f as unknown[]))) }, spend: fn(), refund: fn(), enqueue: fn(), perms: fn(), take: fn(), heard: fn(), refunded: fn() };
 });
 vi.mock("@/server/db/prisma", () => ({ prisma: m.prisma }));
-vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), spendCredits: m.spend, refundCharge: m.refund }));
+vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), spendCredits: m.spend, refundCharge: m.refund, chargeRefunded: m.refunded }));
 vi.mock("@/server/services/subscriptions", () => ({ requirePlan: vi.fn(async () => {}) }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: m.enqueue }));
 vi.mock("@/server/auth/permissions", () => ({ effectivePermissions: m.perms }));
-vi.mock("@/server/reels/recordings", async (orig) => ({ saysTheScript: (await orig<typeof import("@/server/reels/recordings")>()).saysTheScript, audioFormat: () => "mp4", toWav: vi.fn(async () => new Uint8Array(8)), transcribe: m.heard }));
-vi.mock("@/server/reels/clone-challenge", () => ({ takeChallenge: m.take }));
+vi.mock("@/server/reels/recordings", async (orig) => ({ ...(({ saysTheScript, words }) => ({ saysTheScript, words }))(await orig<typeof import("@/server/reels/recordings")>()), audioFormat: () => "mp4", toWav: vi.fn(async () => new Uint8Array(8)), transcribe: m.heard }));
+vi.mock("@/server/reels/clone-challenge", async (orig) => ({ ...(await orig<object>()), takeChallenge: m.take }));
 vi.mock("@/server/reels/wav", () => ({ wavSeconds: () => 75 }));
 vi.mock("@/server/storage/media", () => ({ putMedia: vi.fn(), deleteMedia: vi.fn() }));
 vi.mock("@/server/reels/voice", () => ({ speak: vi.fn(async () => new Uint8Array(8)), SAMPLE_LINE: "x" }));
@@ -46,6 +46,7 @@ beforeEach(() => {
   m.tx.voice.delete.mockResolvedValue({});
   m.spend.mockResolvedValue("charge1");
   m.take.mockResolvedValue({ lang: "en", text: PASSAGE });
+  m.refunded.mockResolvedValue(false);
   m.heard.mockResolvedValue(PASSAGE);
   m.enqueue.mockResolvedValue({});
 });
@@ -134,6 +135,14 @@ describe("clone request ids", () => {
     expect(m.spend).not.toHaveBeenCalled();
     expect(m.take).not.toHaveBeenCalled();
     expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("won't reuse a request id whose charge was refunded (the first try failed)", async () => {
+    m.prisma.voice.findUnique.mockResolvedValue(null);
+    m.refunded.mockResolvedValue(true);
+    await expect(createClone(scope, { ...input, requestId: RID })).rejects.toMatchObject({ status: 409, code: "request.idTaken" });
+    expect(m.take).not.toHaveBeenCalled();
+    expect(m.spend).not.toHaveBeenCalled();
   });
 
   it("refuses another workspace's request id without charging", async () => {

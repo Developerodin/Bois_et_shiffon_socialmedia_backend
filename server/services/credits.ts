@@ -74,6 +74,14 @@ export async function spendCredits(input: { workspaceId: string; amount: number;
   return chargeId;
 }
 
+/**
+ * Whether a charge under this ref was given back. A request id whose first try failed and was refunded can't be
+ * used again: spendCredits would hand back that refunded charge, and the retry would run unpaid.
+ */
+export async function chargeRefunded(workspaceId: string, refId: string) {
+  return !!(await prisma.creditEntry.findFirst({ where: { workspaceId, reason: "refund", refId }, select: { id: true } }));
+}
+
 /** Give a charge back (failed run). Idempotent: one refund per charge. */
 export async function refundCharge(workspaceId: string, chargeId: string, db: Pick<typeof prisma, "creditEntry"> = prisma) {
   const charge = await db.creditEntry.findFirst({ where: { workspaceId, refId: chargeId, delta: { lt: 0 } } });

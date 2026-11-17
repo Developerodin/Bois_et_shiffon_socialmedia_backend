@@ -10,7 +10,7 @@ vi.mock("@/server/db/transient", () => ({
   }),
 }));
 
-import { makeChallenge, takeChallenge } from "@/server/reels/clone-challenge";
+import { makeChallenge, readInOrder, takeChallenge } from "@/server/reels/clone-challenge";
 import { CLONE_PASSAGES } from "@/shared";
 
 const scope = { workspaceId: "w1", userId: "u1" };
@@ -18,6 +18,23 @@ const split = (t: string) => t.split(/(?<=[.!?。！？।])\s*/).filter(Boolean
 const countWords = (s: string[]) => s.join(" ").split(/\s+/).filter(Boolean).length;
 
 beforeEach(() => store.clear());
+
+describe("reading in order", () => {
+  it("accepts the challenge read in its order, with a few misheard words", async () => {
+    const c = await makeChallenge(scope, "en");
+    const text = c.sentences.join(" ");
+    const misheard = text.split(" ").map((w, i) => (i % 15 === 0 ? "uh" : w)).join(" ");
+    expect(readInOrder(text, misheard)).toBe(true);
+  });
+
+  it("refuses an old recording: the same words in another order", async () => {
+    const c = await makeChallenge(scope, "en");
+    const original = split(CLONE_PASSAGES.en);
+    const rounds = c.sentences.length / original.length;
+    const replay = Array.from({ length: rounds }, () => CLONE_PASSAGES.en).join(" ");
+    expect(readInOrder(c.sentences.join(" "), replay)).toBe(false);
+  });
+});
 
 describe("clone challenge", () => {
   it("repeats the passage in shuffled rounds to at least 140 words", async () => {

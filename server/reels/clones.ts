@@ -3,10 +3,10 @@ import type { Prisma, Voice } from "@prisma/client";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
-import { takeChallenge } from "@/server/reels/clone-challenge";
+import { readInOrder, takeChallenge } from "@/server/reels/clone-challenge";
 import { audioFormat, saysTheScript, toWav, transcribe } from "@/server/reels/recordings";
 import { wavSeconds } from "@/server/reels/wav";
-import { refundCharge, spendCredits } from "@/server/services/credits";
+import { chargeRefunded, refundCharge, spendCredits } from "@/server/services/credits";
 import { PublishingError } from "@/server/services/publishing";
 import { requirePlan } from "@/server/services/subscriptions";
 import { deleteMedia, putMedia } from "@/server/storage/media";
@@ -58,6 +58,8 @@ export async function createClone(scope: Scope, input: { name: string; bytes: Ui
     const found = await prisma.voice.findUnique({ where: { id: input.requestId } });
     if (found && found.workspaceId !== scope.workspaceId) throw new PublishingError("That request id is already used.", 409, "request.idTaken");
     if (found) return { voice: found, repeated: true };
+    // The first try failed and was refunded (its voice released): spendCredits would return that charge, unpaid.
+    if (await chargeRefunded(scope.workspaceId, input.requestId)) throw new PublishingError("That request was already tried. Start again.", 409, "request.idTaken");
   }
   // Builds from before the challenge read a fixed passage, which a replayed recording could pass.
   if (!input.challengeId) throw new PublishingError("Update the app to clone a voice.", 409, "clone.updateApp");
@@ -67,7 +69,7 @@ export async function createClone(scope: Scope, input: { name: string; bytes: Ui
   const seconds = wavSeconds(wav);
   if (seconds < CLONE_SECONDS.min - 1 || seconds > CLONE_SECONDS.max + 0.25) throw new PublishingError(`Read for ${CLONE_SECONDS.min} to ${CLONE_SECONDS.max} seconds.`, 400);
   const transcript = await transcribe(wav, challenge.lang);
-  if (!saysTheScript(challenge.text, transcript)) throw new PublishingError("Read the sentences on screen, in that order.", 422, "clone.notTheChallenge");
+  if (!saysTheScript(challenge.text, transcript) || !readInOrder(challenge.text, transcript)) throw new PublishingError("Read the sentences on screen, in that order.", 422, "clone.notTheChallenge");
   if (!(await canClone())) throw new PublishingError("Voice cloning isn't available yet.", 503);
 
   // A place is taken by a row being made (no provider id yet) as much as by a live one: two taps can't make a third.

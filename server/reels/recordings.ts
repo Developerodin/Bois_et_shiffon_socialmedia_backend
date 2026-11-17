@@ -36,7 +36,7 @@ export function audioFormat(b: Uint8Array): "mp4" | "matroska" | null {
 }
 
 /** Words for comparing a script with what was heard: lower case, no accents or punctuation. */
-const words = (t: string) =>
+export const words = (t: string) =>
   t.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, " ").split(/\s+/).filter(Boolean);
 
 /** Whether a transcript says the script: at least 80 % of each side's words found in the other. */

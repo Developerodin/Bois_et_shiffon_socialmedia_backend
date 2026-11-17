@@ -4,10 +4,11 @@ const m = vi.hoisted(() => ({
   shoot: { findUnique: vi.fn(), create: vi.fn() },
   spend: vi.fn(),
   refund: vi.fn(),
+  refunded: vi.fn(),
   enqueue: vi.fn(),
 }));
 vi.mock("@/server/db/prisma", () => ({ prisma: { photoShoot: m.shoot } }));
-vi.mock("@/server/services/credits", () => ({ spendCredits: m.spend, refundCharge: m.refund }));
+vi.mock("@/server/services/credits", () => ({ spendCredits: m.spend, refundCharge: m.refund, chargeRefunded: m.refunded }));
 vi.mock("@/server/services/subscriptions", () => ({ requirePlan: vi.fn(async () => {}) }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: m.enqueue }));
 vi.mock("@/server/storage/media", () => ({ mediaKey: vi.fn(), putMedia: vi.fn(), signedMediaUrl: vi.fn() }));
@@ -26,6 +27,7 @@ beforeEach(() => {
   m.spend.mockResolvedValue(RID);
   m.enqueue.mockResolvedValue({});
   m.shoot.findUnique.mockResolvedValue(null);
+  m.refunded.mockResolvedValue(false);
   m.shoot.create.mockImplementation(async ({ data }: { data: object }) => data);
 });
 
@@ -58,6 +60,27 @@ describe("photoshoot request ids", () => {
     const { repeated } = await createShoot(scope, req, RID);
     expect(repeated).toBe(true);
     expect(m.refund).not.toHaveBeenCalled();
+  });
+
+  it("losing a race to another brand in the workspace keeps that brand's charge", async () => {
+    m.shoot.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: RID, workspaceId: "w1", brandId: "b2" });
+    m.shoot.create.mockRejectedValue(p2002);
+    await expect(createShoot(scope, req, RID)).rejects.toMatchObject({ status: 409, code: "request.idTaken" });
+    expect(m.refund).not.toHaveBeenCalled();
+  });
+
+  it("losing a race to another workspace refunds this workspace's own charge", async () => {
+    m.shoot.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: RID, workspaceId: "w2", brandId: "b9" });
+    m.shoot.create.mockRejectedValue(p2002);
+    await expect(createShoot(scope, req, RID)).rejects.toMatchObject({ status: 409 });
+    expect(m.refund).toHaveBeenCalledWith("w1", RID);
+  });
+
+  it("won't reuse a request id whose charge was refunded", async () => {
+    m.refunded.mockResolvedValue(true);
+    await expect(createShoot(scope, req, RID)).rejects.toMatchObject({ status: 409, code: "request.idTaken" });
+    expect(m.refunded).toHaveBeenCalledWith("w1", RID);
+    expect(m.spend).not.toHaveBeenCalled();
   });
 
   it("works as before without a request id", async () => {
