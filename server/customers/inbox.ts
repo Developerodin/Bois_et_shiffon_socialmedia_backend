@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { IntegrationConnection } from "@prisma/client";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
+import { cachedRead, forgetRead, READ_TTL_MS, readKey } from "@/server/db/read-cache";
 import { call, ProviderError } from "@/server/integrations/providers";
 import { accessToken, markReconnect } from "@/server/services/connections";
 import { PublishingError } from "@/server/services/publishing";
@@ -61,8 +62,13 @@ const person = (c: IntegrationConnection, r: Raw) => {
   return { id: p?.id ?? "", name: p?.name ?? (p?.username ? `@${p.username}` : null) };
 };
 
-/** Inbox: each messaging account's state, and the latest conversations across them, newest first. */
-export async function inbox(scope: Scope) {
+/** Inbox: each messaging account's state, and the latest conversations across them, newest first. Cached 45 s per brand. */
+export function inbox(scope: Scope) {
+  return cachedRead(readKey.inbox(scope.brandId), READ_TTL_MS, () => loadInbox(scope));
+}
+
+/** Only a cache miss reaches Meta, so only a miss counts against the brand's read limit. */
+async function loadInbox(scope: Scope) {
   await limit(`inbox:read:${scope.brandId}`, READS_PER_MIN, 60_000, "Messages are being refreshed too often. Wait a minute.");
   const conns = await accounts(scope);
   const results = await Promise.all(
@@ -148,6 +154,7 @@ export async function sendReply(scope: Scope, connectionId: string, conversation
     {},
     { recipient: { id: to }, message: { text }, ...(c.provider === "META" ? { messaging_type: "RESPONSE" } : {}) },
   );
+  await forgetRead(readKey.inbox(scope.brandId)); // the list's last message is this reply now
   await prisma.auditEvent
     .create({
       data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "inbox.reply.sent", entityType: "IntegrationConnection", entityId: c.id, metadata: { conversationId, messageId: sent.message_id ?? null, text } },

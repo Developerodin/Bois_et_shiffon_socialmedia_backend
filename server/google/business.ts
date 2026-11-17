@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { IntegrationConnection } from "@prisma/client";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
+import { cachedRead, forgetRead, READ_TTL_MS, readKey } from "@/server/db/read-cache";
 import { call, ProviderError } from "@/server/integrations/providers";
 import { accessToken, markReconnect } from "@/server/services/connections";
 import { ownMediaKey, PublishingError } from "@/server/services/publishing";
@@ -117,8 +118,12 @@ export function originalReviewText(comment: string) {
   return comment.split(/\n\n\(Translated by Google\)/)[0].trim();
 }
 
-/** Reviews screen: newest first, with the business's reply when there is one, and the shareable review link. */
-export async function businessReviews(scope: Scope) {
+/** Reviews screen: newest first, with the business's reply when there is one, and the shareable review link. Cached 45 s per brand. */
+export function businessReviews(scope: Scope) {
+  return cachedRead(readKey.googleReviews(scope.brandId), READ_TTL_MS, () => loadReviews(scope));
+}
+
+async function loadReviews(scope: Scope) {
   const conn = await businessConnection(scope);
   if (!conn) return { connected: false as const, reviews: [] };
   await limit(scope, "read");
@@ -156,12 +161,17 @@ export async function replyToReview(scope: Scope, reviewId: string, comment: str
   const conn = await requireConnection(scope);
   await limit(scope, "write");
   const r = await google<{ comment: string; updateTime: string }>(conn, `${V4}/${conn.externalAccountId}/reviews/${reviewId}/reply`, { method: "PUT", body: { comment } });
+  await forgetRead(readKey.googleReviews(scope.brandId));
   await audit(scope, conn, "google.review.replied", { reviewId, comment });
   return { comment: r.comment, updatedAt: r.updateTime };
 }
 
-/** Posts tab: what's already on the profile. */
-export async function businessPosts(scope: Scope) {
+/** Posts tab: what's already on the profile. Cached 45 s per brand. */
+export function businessPosts(scope: Scope) {
+  return cachedRead(readKey.googlePosts(scope.brandId), READ_TTL_MS, () => loadPosts(scope));
+}
+
+async function loadPosts(scope: Scope) {
   const conn = await businessConnection(scope);
   if (!conn) return [];
   const r = await google<{ localPosts?: { name: string; summary?: string; state?: string; createTime: string; media?: { googleUrl?: string }[] }[] }>(
@@ -200,5 +210,6 @@ export async function createPost(scope: Scope, input: z.infer<typeof PostRequest
       ...(input.photoKey ? { media: [{ mediaFormat: "PHOTO", sourceUrl: await signedMediaUrl(input.photoKey, 3600) }] } : {}),
     },
   });
+  await forgetRead(readKey.googlePosts(scope.brandId));
   await audit(scope, conn, "google.post.created", { post: post.name, summary: input.summary, photoKey: input.photoKey ?? null });
 }
