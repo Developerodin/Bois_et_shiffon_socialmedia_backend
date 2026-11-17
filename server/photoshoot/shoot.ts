@@ -74,25 +74,53 @@ export function shootPrompt(r: ShootRequest) {
 
 type Scope = { workspaceId: string; brandId: string };
 
-/** F02/F03 "Generate": checks the photo is the brand's, charges the tier, queues the shoot. */
-export async function createShoot(scope: Scope & { userId: string }, request: ShootRequest) {
+/**
+ * A shoot already made under this request id: this brand's is returned (a retried Generate), anyone else's is a 409
+ * that never reveals or touches it.
+ */
+async function shootForRequest(scope: Scope, requestId: string) {
+  const found = await prisma.photoShoot.findUnique({ where: { id: requestId } });
+  if (!found) return null;
+  if (found.workspaceId !== scope.workspaceId || found.brandId !== scope.brandId) throw new PublishingError("That request id is already used.", 409, "request.idTaken");
+  return found;
+}
+
+/**
+ * F02/F03 "Generate": checks the photo is the brand's, charges the tier, queues the shoot. With `requestId` (one per
+ * press of Generate) a retry returns the first shoot instead of charging again; it is the shoot id and the charge ref.
+ */
+export async function createShoot(scope: Scope & { userId: string }, request: ShootRequest, requestId?: string): Promise<{ shoot: PhotoShoot; repeated: boolean }> {
   await requirePlan(scope.workspaceId); // photoshoots need a plan, like reels
   if (!ownMediaKey(scope, request.sourceKey)) throw new PublishingError("Unknown image", 400);
-  const id = randomUUID();
+  if (requestId) {
+    const existing = await shootForRequest(scope, requestId);
+    if (existing) return { shoot: existing, repeated: true };
+  }
+  const id = requestId ?? randomUUID();
   const credits = TIERS[request.tier].credits;
   const chargeId = await spendCredits({ workspaceId: scope.workspaceId, amount: credits, reason: "photoshoot", refId: id, userId: scope.userId });
+  let lostRace: PhotoShoot | null = null;
   const shoot = await prisma.photoShoot
     .create({ data: { id, workspaceId: scope.workspaceId, brandId: scope.brandId, kind: request.kind, tier: request.tier, input: request, credits, chargeId } })
     .catch(async (e: unknown) => {
+      // Two presses at once with one request id: the other made the shoot and owns this same charge (same refId).
+      if (requestId && (e as { code?: string }).code === "P2002") {
+        lostRace = await shootForRequest(scope, requestId).catch(async (taken: unknown) => {
+          await refundCharge(scope.workspaceId, chargeId); // another workspace's id: this charge is ours alone
+          throw taken;
+        });
+        if (lostRace) return null;
+      }
       await refundCharge(scope.workspaceId, chargeId);
       throw e;
     });
+  if (!shoot) return { shoot: lostRace!, repeated: true };
   // Due at once: the worker (or, in dev, the POST's kickRunner) picks it up. Nothing else would ever look at a shoot with no job.
   await enqueueJob({ type: PHOTOSHOOT_JOB, workspaceId: shoot.workspaceId, brandId: shoot.brandId, payload: { shootId: shoot.id }, maxAttempts: attemptsFor(shoot), idempotencyKey: `shoot:${shoot.id}:start` }).catch(async (e: unknown) => {
     await failShoot(shoot.id, e instanceof Error ? e.message : String(e));
     throw e;
   });
-  return shoot;
+  return { shoot, repeated: false };
 }
 
 /**

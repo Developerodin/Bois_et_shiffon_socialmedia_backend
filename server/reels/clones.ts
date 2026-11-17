@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Prisma } from "@prisma/client";
+import type { Prisma, Voice } from "@prisma/client";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
@@ -50,9 +50,15 @@ const audit = (db: Db, workspaceId: string, actorUserId: string | null, action: 
  * Makes a clone: checks the take (same audio checks as recordings, 60–90 s) and our ElevenLabs plan, reserves one of
  * the workspace's two places under a lock, charges, then asks ElevenLabs. A failure gives the place and credits back.
  */
-export async function createClone(scope: Scope, input: { name: string; bytes: Uint8Array; consent: boolean; appVersion?: string; challengeId?: string }) {
+export async function createClone(scope: Scope, input: { name: string; bytes: Uint8Array; consent: boolean; appVersion?: string; challengeId?: string; requestId?: string }): Promise<{ voice: Voice; repeated: boolean }> {
   if (!input.consent) throw new PublishingError("Tick the box to confirm this is your own voice.", 400);
   await requirePlan(scope.workspaceId);
+  // A retried Clone (same request id) gets the first voice back; checked before the challenge, which that try used up.
+  if (input.requestId) {
+    const found = await prisma.voice.findUnique({ where: { id: input.requestId } });
+    if (found && found.workspaceId !== scope.workspaceId) throw new PublishingError("That request id is already used.", 409, "request.idTaken");
+    if (found) return { voice: found, repeated: true };
+  }
   // Builds from before the challenge read a fixed passage, which a replayed recording could pass.
   if (!input.challengeId) throw new PublishingError("Update the app to clone a voice.", 409, "clone.updateApp");
   const challenge = await takeChallenge(scope, input.challengeId);
@@ -70,7 +76,7 @@ export async function createClone(scope: Scope, input: { name: string; bytes: Ui
     const live = await tx.voice.count({ where: { workspaceId: scope.workspaceId, archivedAt: null } });
     if (live >= MAX_CLONES) throw new PublishingError(`A workspace can have ${MAX_CLONES} cloned voices. Delete one first.`, 409);
     const consent = { userId: scope.userId, at: new Date().toISOString(), textVersion: CONSENT_VERSION, appVersion: input.appVersion ?? null, audioSha256: createHash("sha256").update(input.bytes).digest("hex"), challengeId: input.challengeId, transcriptSha256: createHash("sha256").update(transcript).digest("hex") };
-    return tx.voice.create({ data: { workspaceId: scope.workspaceId, ownerUserId: scope.userId, name: input.name, consent } });
+    return tx.voice.create({ data: { ...(input.requestId && { id: input.requestId }), workspaceId: scope.workspaceId, ownerUserId: scope.userId, name: input.name, consent } });
   });
   const release = () => prisma.voice.delete({ where: { id: voice.id } }).catch(() => {});
   let chargeId: string;
@@ -102,7 +108,7 @@ export async function createClone(scope: Scope, input: { name: string; bytes: Ui
     });
     // One sample for the Voices screen, made once now; a failure only means no sample to play.
     await makeSample(made).catch(() => {});
-    return made;
+    return { voice: made, repeated: false };
   } catch (e) {
     // Made at ElevenLabs but not kept here: delete it there too, so no voice (or the person's audio) is left behind.
     if (providerVoiceId) await fetch(`${EL}/voices/${encodeURIComponent(providerVoiceId)}`, { method: "DELETE", headers: { "xi-api-key": key() }, signal: AbortSignal.timeout(15_000) }).catch(() => {});

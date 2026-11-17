@@ -25,8 +25,10 @@ export async function POST(request: Request, context: Params) {
     if (!(file instanceof File) || !name) return invalid("Give the voice a name and record the passage.");
     if (file.size > MAX_CLONE_BYTES) return invalid("That recording is too large.", 413);
     try {
-      const voice = await createClone(scope, { name, bytes: new Uint8Array(await file.arrayBuffer()), consent: form.get("consent") === "1", appVersion: String(form.get("appVersion") ?? "").slice(0, 40) || undefined, challengeId: String(form.get("challengeId") ?? "").slice(0, 64) || undefined });
-      return Response.json({ id: `clone:${voice.id}`, name: voice.name }, { status: 201 });
+      const requestId = String(form.get("requestId") ?? "");
+      if (requestId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) return invalid("requestId must be a UUID.");
+      const { voice, repeated } = await createClone(scope, { requestId: requestId || undefined, name, bytes: new Uint8Array(await file.arrayBuffer()), consent: form.get("consent") === "1", appVersion: String(form.get("appVersion") ?? "").slice(0, 40) || undefined, challengeId: String(form.get("challengeId") ?? "").slice(0, 64) || undefined });
+      return Response.json({ id: `clone:${voice.id}`, name: voice.name }, { status: repeated ? 200 : 201 });
     } catch (e) {
       if (e instanceof InsufficientCreditsError) return Response.json({ insufficientCredits: true, balance: e.balance, needed: e.needed }, { status: 402 });
       if (e instanceof PlanRequiredError) return Response.json({ planRequired: true, title: e.message }, { status: 402 });

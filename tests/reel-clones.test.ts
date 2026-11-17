@@ -123,6 +123,36 @@ describe("the live-reading challenge", () => {
   });
 });
 
+describe("clone request ids", () => {
+  const RID = "6f1c2c1e-6a43-4c1b-9a3e-2f1d5b7c8a90";
+
+  it("returns the first voice on a repeat: one charge, one ElevenLabs call, challenge untouched", async () => {
+    m.prisma.voice.findUnique.mockResolvedValue({ id: RID, workspaceId: "w1", name: "Ma voix" });
+    vi.stubGlobal("fetch", vi.fn());
+    const r = await createClone(scope, { ...input, requestId: RID });
+    expect(r).toMatchObject({ repeated: true, voice: { id: RID } });
+    expect(m.spend).not.toHaveBeenCalled();
+    expect(m.take).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("refuses another workspace's request id without charging", async () => {
+    m.prisma.voice.findUnique.mockResolvedValue({ id: RID, workspaceId: "w2" });
+    await expect(createClone(scope, { ...input, requestId: RID })).rejects.toMatchObject({ status: 409, code: "request.idTaken" });
+    expect(m.spend).not.toHaveBeenCalled();
+  });
+
+  it("makes the voice under the request id and charges with it as the ref", async () => {
+    elevenLabs(Response.json({ voice_id: "el1" }));
+    m.prisma.voice.findUnique.mockResolvedValue(null);
+    m.tx.voice.create.mockImplementation(async ({ data }: { data: { id: string } }) => ({ ...data }));
+    const r = await createClone(scope, { ...input, requestId: RID });
+    expect(r.repeated).toBe(false);
+    expect(m.tx.voice.create.mock.calls[0][0].data.id).toBe(RID);
+    expect(m.spend.mock.calls[0][0]).toMatchObject({ refId: RID });
+  });
+});
+
 describe("clones that go wrong", () => {
   it("gives back a place held over 5 minutes by a request that died, with its credits", async () => {
     elevenLabs(Response.json({ voice_id: "el1" }));
