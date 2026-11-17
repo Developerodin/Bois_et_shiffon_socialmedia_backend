@@ -1,11 +1,12 @@
 import type { Prisma } from "@prisma/client";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { registerManualPost } from "@/server/services/manual-post";
-import { hitRateLimit } from "@/server/auth/rate-limit";
+import { hitRateLimit, limitKey } from "@/server/auth/rate-limit";
 import { startAgentRun } from "@/server/agents/engine";
 import { kickRunner } from "@/server/jobs/runner";
 import { brandKnowledge, productPhotos } from "@/server/content/knowledge";
 import { prisma } from "@/server/db/prisma";
+import { claimTransient, dropTransient } from "@/server/db/transient";
 import { directScenes, type DraftSoFar, type ReelPhoto, writePlan } from "@/server/reels/agents";
 import { planOwnershipProblems } from "@/server/reels/ownership";
 import { aiDisclosureLine, carryStandIns, clearPresenterFlags, needsAiDisclosure, isStudioPlan, planProblems, presenterCuts, ReelPlan, reelPrice, reelSeconds, sceneSeconds, toVersionBody } from "@/server/reels/plan";
@@ -16,6 +17,7 @@ import { templateById } from "@/server/reels/templates";
 import { creditBalance } from "@/server/services/credits";
 import { decide, lock, PublishingError, TX } from "@/server/services/publishing";
 import { signedMediaUrl } from "@/server/storage/media";
+import { PlanRequiredError, requirePlan } from "@/server/services/subscriptions";
 
 /** Mobile Reels studio (R01–R13): create, chat, edit, send, register a manual post. Rendering is render.ts. */
 type Scope = { workspaceId: string; brandId: string; userId: string };
@@ -36,8 +38,8 @@ export function streamPlan(run: (emit: Emit) => Promise<unknown>) {
       try {
         send({ type: "done", result: await run(send) });
       } catch (error) {
-        const problem = (await toReelProblem(error).json().catch(() => ({}))) as { status?: number; detail?: string; title?: string };
-        send({ type: "error", status: problem.status ?? 500, detail: problem.detail ?? problem.title ?? "Something went wrong" });
+        const problem = (await toReelProblem(error).json().catch(() => ({}))) as { status?: number; detail?: string; title?: string; code?: string; planRequired?: boolean };
+        send({ type: "error", status: problem.status ?? 500, detail: problem.detail ?? problem.title ?? "Something went wrong", code: problem.code, planRequired: problem.planRequired });
       } finally {
         controller.close();
       }
@@ -50,6 +52,8 @@ const ACTIVE = ["VOICE", "CLIPS", "JOIN"] as const;
 /** Route error → problem response (shared by the reels routes; route files may only export handlers). */
 export function toReelProblem(error: unknown) {
   if (error instanceof PublishingError) return problemResponse({ type: "https://api.brandpilot/errors/reels", title: error.message, status: error.status, detail: error.message, code: error.code });
+  // Same 402 body the paid routes answer with, plus the problem fields (streamed plans carry it as an error line).
+  if (error instanceof PlanRequiredError) return problemResponse({ type: "https://api.brandpilot/errors/reels", title: error.message, status: 402, detail: error.message, planRequired: true });
   return fromAccessError(error);
 }
 
@@ -109,7 +113,51 @@ export function templateAsk(templateId: string | undefined, message: string | un
   return { ask: template.ask, turn: message ?? template.title, template: template.id };
 }
 
-export async function createReel(scope: Scope, input: { opportunityId?: string; prompt?: string; language?: string; templateId?: string }, emit?: Emit) {
+/**
+ * Before a scriptwriter run (new plan or chat revision): the workspace needs a plan, and a brand gets 20 runs an hour.
+ * Storyboard edits (editPlan) check the plan only, so ordinary editing never meets the cap.
+ */
+async function planGate(scope: Scope) {
+  await requirePlan(scope.workspaceId);
+  if (!(await hitRateLimit(limitKey("reel-plan:brand", scope.brandId), 20, 3_600_000)).allowed) throw new PublishingError("You've planned a lot of reels this hour. Try again later.", 429);
+}
+
+/** A reel already made under this request id: this brand's comes back as created; anyone else's is a 409. */
+async function reelForRequest(scope: Scope, requestId: string) {
+  const found = await prisma.contentItem.findUnique({ where: { id: requestId } });
+  if (!found) return null;
+  if (found.workspaceId !== scope.workspaceId || found.brandId !== scope.brandId || !found.studio) throw new PublishingError("That request id is already used.", 409, "request.idTaken");
+  const { item, latest } = await loadReel(scope, requestId);
+  if (!latest || !isStudioPlan(latest.body)) throw new PublishingError("That request id is already used.", 409, "request.idTaken");
+  const plan = ReelPlan.parse(latest.body);
+  const reply = chatOf(item.brief).findLast((t) => t.role === "assistant")?.text ?? "";
+  return { id: item.id, version: latest.version, plan, price: reelPrice(plan), reply };
+}
+
+/**
+ * R01 "Plan". With `requestId` (one per submit) the reel is made under that id, once: a repeat after it's made gets
+ * it back, and a repeat while the first is still planning (the record is written only at the end) is a 409 the client
+ * answers by polling the reel list for that id.
+ */
+export async function createReel(scope: Scope, input: { opportunityId?: string; prompt?: string; language?: string; templateId?: string; requestId?: string }, emit?: Emit) {
+  if (!input.requestId) {
+    await planGate(scope);
+    return planReel(scope, input, emit);
+  }
+  const made = await reelForRequest(scope, input.requestId);
+  if (made) return made;
+  await planGate(scope);
+  const marker = `reel-plan:${input.requestId}`;
+  // ponytail: 6 min covers the route's 330 s budget; a run that outlives it could be started again by a retry.
+  if (!(await claimTransient(marker, scope, 360_000))) throw new PublishingError("This reel is still being planned.", 409, "reel.stillPlanning");
+  try {
+    return await planReel(scope, input, emit);
+  } finally {
+    await dropTransient(marker).catch(() => {});
+  }
+}
+
+async function planReel(scope: Scope, input: { opportunityId?: string; prompt?: string; language?: string; templateId?: string; requestId?: string }, emit?: Emit) {
   const { ask, turn, template } = templateAsk(input.templateId, input.prompt);
   emit?.({ type: "stage", stage: "reading" });
   const idea = input.opportunityId
@@ -128,6 +176,7 @@ export async function createReel(scope: Scope, input: { opportunityId?: string; 
   const chat: ChatTurn[] = [...(turn ? [{ role: "user" as const, text: turn.slice(0, 2000), at: now }] : []), { role: "assistant", text: reply, at: now }];
   const item = await prisma.contentItem.create({
     data: {
+      ...(input.requestId && { id: input.requestId }),
       workspaceId: scope.workspaceId, brandId: scope.brandId, opportunityId: idea?.id ?? null, title: ready.title, channel: "INSTAGRAM_REEL", studio: true, status: "PLANNED",
       brief: { reelChat: chat } as Prisma.InputJsonValue,
       versions: { create: { version: 1, body: toVersionBody(ready), createdBy: scope.userId } },
@@ -148,6 +197,7 @@ export async function chatPlan(scope: Scope, itemId: string, input: { version: n
   const { ask, turn, template } = picked
     ? { ask: PRESENTER_ASK, turn: input.message ?? (picked.input as { name: string }).name, template: undefined }
     : templateAsk(input.templateId, input.message);
+  await planGate(scope);
   emit?.({ type: "stage", stage: "reading" });
   const { item, latest } = await loadReel(scope, itemId);
   const saved = isStudioPlan(latest?.body) ? ReelPlan.parse(latest!.body) : undefined;
@@ -173,6 +223,7 @@ export async function chatPlan(scope: Scope, itemId: string, input: { version: n
 
 /** R10–R13 / R03 edits. `droppedRecordings`: scene numbers whose recording was dropped (their text changed). */
 export async function editPlan(scope: Scope, itemId: string, input: { version: number; plan: ReelPlan }) {
+  await requirePlan(scope.workspaceId);
   const { latest } = await loadReel(scope, itemId);
   const previous = isStudioPlan(latest?.body) ? ReelPlan.parse(latest!.body) : undefined;
   const { plan, dropped } = await settleRecordings(clearPresenterFlags(input.plan), previous, itemId, false);

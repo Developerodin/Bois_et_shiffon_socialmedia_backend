@@ -20,7 +20,7 @@ export async function GET(request: Request, context: Params) {
 }
 
 const Create = z
-  .object({ opportunityId: z.string().min(1).max(100).optional(), prompt: z.string().min(1).max(2000).optional(), templateId: z.string().min(1).max(60).optional(), language: z.string().regex(/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})?$/).optional() })
+  .object({ opportunityId: z.string().min(1).max(100).optional(), prompt: z.string().min(1).max(2000).optional(), templateId: z.string().min(1).max(60).optional(), language: z.string().regex(/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})?$/).optional(), requestId: z.string().uuid().optional() })
   .refine((b) => b.opportunityId || b.prompt || b.templateId, "Pick an idea or a template, or say what the reel is about");
 
 /** R02 (from an idea) or R04 (from the person's words): a new reel with its first plan. */
