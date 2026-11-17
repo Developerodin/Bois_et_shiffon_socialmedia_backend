@@ -4,7 +4,7 @@ import { effectivePermissions } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
 import { takeChallenge } from "@/server/reels/clone-challenge";
-import { isM4a, saysTheScript, toWav, transcribe } from "@/server/reels/recordings";
+import { audioFormat, saysTheScript, toWav, transcribe } from "@/server/reels/recordings";
 import { wavSeconds } from "@/server/reels/wav";
 import { refundCharge, spendCredits } from "@/server/services/credits";
 import { PublishingError } from "@/server/services/publishing";
@@ -56,7 +56,7 @@ export async function createClone(scope: Scope, input: { name: string; bytes: Ui
   // Builds from before the challenge read a fixed passage, which a replayed recording could pass.
   if (!input.challengeId) throw new PublishingError("Update the app to clone a voice.", 409, "clone.updateApp");
   const challenge = await takeChallenge(scope, input.challengeId);
-  if (input.bytes.length > MAX_CLONE_BYTES || !isM4a(input.bytes)) throw new PublishingError("That recording couldn't be read. Record it again.", 400);
+  if (input.bytes.length > MAX_CLONE_BYTES || !audioFormat(input.bytes)) throw new PublishingError("That recording couldn't be read. Record it again.", 400);
   const wav = await toWav(input.bytes, CLONE_SECONDS.max + 1);
   const seconds = wavSeconds(wav);
   if (seconds < CLONE_SECONDS.min - 1 || seconds > CLONE_SECONDS.max + 0.25) throw new PublishingError(`Read for ${CLONE_SECONDS.min} to ${CLONE_SECONDS.max} seconds.`, 400);

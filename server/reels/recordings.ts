@@ -25,6 +25,16 @@ export function isM4a(b: Uint8Array) {
   return b.length > 12 && text(4, 8) === "ftyp" && /^(M4A |isom|mp42|mp41|iso[2-6]|dash|3gp\d)$/.test(text(8, 12));
 }
 
+/** A WebM (Matroska) container, what browsers record: the EBML magic 1A 45 DF A3. */
+export function isWebm(b: Uint8Array) {
+  return b.length > 4 && b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3;
+}
+
+/** The ffmpeg demuxer for these bytes; ffmpeg is never left to guess the format. */
+export function audioFormat(b: Uint8Array): "mp4" | "matroska" | null {
+  return isM4a(b) ? "mp4" : isWebm(b) ? "matroska" : null;
+}
+
 /** Words for comparing a script with what was heard: lower case, no accents or punctuation. */
 const words = (t: string) =>
   t.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, " ").split(/\s+/).filter(Boolean);
@@ -62,12 +72,14 @@ export async function transcribe(wav: Uint8Array, language?: string) {
  * `maxSeconds` (a second over the limit, so an over-long take is measured and refused, not silently cut).
  */
 export async function toWav(bytes: Uint8Array, maxSeconds = MAX_RECORDING_SECONDS + 1) {
+  const format = audioFormat(bytes);
+  if (!format) throw new PublishingError("That recording couldn't be read. Record it again.", 400);
   const dir = await mkdtemp(path.join(tmpdir(), "rec-"));
   try {
-    const input = path.join(dir, "in.m4a");
+    const input = path.join(dir, format === "mp4" ? "in.m4a" : "in.webm");
     const output = path.join(dir, "out.wav");
     await writeFile(input, bytes);
-    await run(["-nostdin", "-y", "-protocol_whitelist", "file", "-f", "mp4", "-i", input, "-t", String(maxSeconds), "-vn", "-map", "0:a:0", "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", output], 20_000).catch(() => {
+    await run(["-nostdin", "-y", "-protocol_whitelist", "file", "-f", format, "-i", input, "-t", String(maxSeconds), "-vn", "-map", "0:a:0", "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", output], 20_000).catch(() => {
       throw new PublishingError("That recording couldn't be read. Record it again.", 400);
     });
     return new Uint8Array(await readFile(output));
@@ -82,7 +94,7 @@ type Scope = { workspaceId: string; brandId: string; userId: string };
 export async function uploadRecording(scope: Scope, itemId: string, input: { bytes: Uint8Array; text: string; language?: string }) {
   const item = await prisma.contentItem.findFirst({ where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId, studio: true }, select: { id: true } });
   if (!item) throw new PublishingError("Reel not found", 404);
-  if (!isM4a(input.bytes)) throw new PublishingError("That recording couldn't be read. Record it again.", 400);
+  if (!audioFormat(input.bytes)) throw new PublishingError("That recording couldn't be read. Record it again.", 400);
   const wav = await toWav(input.bytes);
   // Rounded up, never down: the render ceils the exact length, and the price must cover what it renders.
   const seconds = Math.ceil(wavSeconds(wav) * 100) / 100;

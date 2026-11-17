@@ -10,7 +10,7 @@ vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()
 vi.mock("@/server/services/subscriptions", () => ({ requirePlan: vi.fn(async () => {}) }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: m.enqueue }));
 vi.mock("@/server/auth/permissions", () => ({ effectivePermissions: m.perms }));
-vi.mock("@/server/reels/recordings", async (orig) => ({ saysTheScript: (await orig<typeof import("@/server/reels/recordings")>()).saysTheScript, isM4a: () => true, toWav: vi.fn(async () => new Uint8Array(8)), transcribe: m.heard }));
+vi.mock("@/server/reels/recordings", async (orig) => ({ saysTheScript: (await orig<typeof import("@/server/reels/recordings")>()).saysTheScript, audioFormat: () => "mp4", toWav: vi.fn(async () => new Uint8Array(8)), transcribe: m.heard }));
 vi.mock("@/server/reels/clone-challenge", () => ({ takeChallenge: m.take }));
 vi.mock("@/server/reels/wav", () => ({ wavSeconds: () => 75 }));
 vi.mock("@/server/storage/media", () => ({ putMedia: vi.fn(), deleteMedia: vi.fn() }));
