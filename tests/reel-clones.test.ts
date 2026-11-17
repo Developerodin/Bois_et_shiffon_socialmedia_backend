@@ -3,14 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => {
   const fn = () => vi.fn();
   const tx = { $executeRaw: vi.fn(async () => 0), voice: { count: fn(), create: fn(), update: fn(), updateMany: fn(), delete: fn(), findFirst: fn(), findMany: fn(), findUnique: fn(), findUniqueOrThrow: fn() }, auditEvent: { create: fn() } };
-  return { tx, prisma: { ...tx, $transaction: vi.fn(async (f: unknown) => (typeof f === "function" ? f(tx) : Promise.all(f as unknown[]))) }, spend: fn(), refund: fn(), enqueue: fn(), perms: fn() };
+  return { tx, prisma: { ...tx, $transaction: vi.fn(async (f: unknown) => (typeof f === "function" ? f(tx) : Promise.all(f as unknown[]))) }, spend: fn(), refund: fn(), enqueue: fn(), perms: fn(), take: fn(), heard: fn() };
 });
 vi.mock("@/server/db/prisma", () => ({ prisma: m.prisma }));
 vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), spendCredits: m.spend, refundCharge: m.refund }));
 vi.mock("@/server/services/subscriptions", () => ({ requirePlan: vi.fn(async () => {}) }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: m.enqueue }));
 vi.mock("@/server/auth/permissions", () => ({ effectivePermissions: m.perms }));
-vi.mock("@/server/reels/recordings", () => ({ isM4a: () => true, toWav: vi.fn(async () => new Uint8Array(8)) }));
+vi.mock("@/server/reels/recordings", async (orig) => ({ saysTheScript: (await orig<typeof import("@/server/reels/recordings")>()).saysTheScript, isM4a: () => true, toWav: vi.fn(async () => new Uint8Array(8)), transcribe: m.heard }));
+vi.mock("@/server/reels/clone-challenge", () => ({ takeChallenge: m.take }));
 vi.mock("@/server/reels/wav", () => ({ wavSeconds: () => 75 }));
 vi.mock("@/server/storage/media", () => ({ putMedia: vi.fn(), deleteMedia: vi.fn() }));
 vi.mock("@/server/reels/voice", () => ({ speak: vi.fn(async () => new Uint8Array(8)), SAMPLE_LINE: "x" }));
@@ -21,7 +22,8 @@ import { needsAiDisclosure, toVersionBody } from "@/server/reels/plan";
 import { postText } from "@/server/services/publishing";
 
 const scope = { workspaceId: "w1", brandId: "b1", userId: "u1" };
-const input = { name: "Ma voix", bytes: new Uint8Array([1, 2, 3]), consent: true, appVersion: "1.4.0" };
+const input = { name: "Ma voix", bytes: new Uint8Array([1, 2, 3]), consent: true, appVersion: "1.4.0", challengeId: "c1" };
+const PASSAGE = "The quick brown fox jumps. Over the lazy dog today.";
 const elevenLabs = (add: Response) =>
   vi.stubGlobal(
     "fetch",
@@ -43,6 +45,8 @@ beforeEach(() => {
   m.tx.voice.findUniqueOrThrow.mockResolvedValue({ id: "v1", workspaceId: "w1" });
   m.tx.voice.delete.mockResolvedValue({});
   m.spend.mockResolvedValue("charge1");
+  m.take.mockResolvedValue({ lang: "en", text: PASSAGE });
+  m.heard.mockResolvedValue(PASSAGE);
   m.enqueue.mockResolvedValue({});
 });
 
@@ -92,6 +96,30 @@ describe("making a clone", () => {
     await expect(createClone(scope, input)).rejects.toThrow(/couldn't be made/);
     expect(m.refund).toHaveBeenCalledWith("w1", "charge1");
     expect(m.tx.voice.delete).toHaveBeenCalledWith({ where: { id: "v1" } });
+  });
+});
+
+describe("the live-reading challenge", () => {
+  it("asks an old app to update before anything is charged", async () => {
+    const { challengeId: _, ...old } = input;
+    await expect(createClone(scope, old)).rejects.toMatchObject({ status: 409, code: "clone.updateApp" });
+    expect(m.take).not.toHaveBeenCalled();
+    expect(m.spend).not.toHaveBeenCalled();
+  });
+
+  it("refuses a reading that isn't the challenge, without charging", async () => {
+    elevenLabs(Response.json({ voice_id: "el1" }));
+    m.heard.mockResolvedValue("Something else entirely was said here instead");
+    await expect(createClone(scope, input)).rejects.toMatchObject({ status: 422, code: "clone.notTheChallenge" });
+    expect(m.take).toHaveBeenCalledWith(scope, "c1");
+    expect(m.heard).toHaveBeenCalledWith(expect.any(Uint8Array), "en");
+    expect(m.spend).not.toHaveBeenCalled();
+  });
+
+  it("keeps the challenge id and a transcript hash in the consent record", async () => {
+    elevenLabs(Response.json({ voice_id: "el1" }));
+    await createClone(scope, input);
+    expect(m.tx.voice.create.mock.calls[0][0].data.consent).toMatchObject({ challengeId: "c1", transcriptSha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
   });
 });
 

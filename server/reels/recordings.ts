@@ -46,7 +46,7 @@ export function saysTheScript(script: string, transcript: string) {
   return Math.min(found(a, b), found(b, a)) >= 0.8;
 }
 
-async function transcribe(wav: Uint8Array, language?: string) {
+export async function transcribe(wav: Uint8Array, language?: string) {
   if (!process.env.OPENAI_API_KEY) throw new Error("Speech-to-text isn't set up on this server (OPENAI_API_KEY is missing).");
   const form = new FormData();
   form.append("model", "gpt-4o-mini-transcribe");
