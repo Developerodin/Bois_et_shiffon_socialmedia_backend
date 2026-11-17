@@ -4,6 +4,51 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Foundations 0b: website plumbing (2026-11-17)
+
+Branch `foundations-0b` in the server, web and mobile repos (not merged). Plan:
+`docs/superpowers/plans/2026-11-17-foundations-0b-web-plumbing.md`. Web commits `663cc50..HEAD`, mobile `dbb5a17..HEAD`.
+
+- **Transport.** Per-call timeouts, `X-Client: web/<version>` on every request, `requestId()`. One `request()` keeps the
+  server's error body, merges headers (a `FormData` upload still sends no `content-type` of ours) and reads NDJSON
+  streams; a stream that breaks mid-answer is `ApiError` status 0.
+- **Paywall.** A recognisable 402 (credits or plan refusal; a gateway page or unknown body does not) opens the paywall
+  event; a per-workspace plan/credits store (an answer lands under the workspace it was asked for) and a stub dialog.
+- **Shared contract check.** `scripts/check-shared.mjs` in web and mobile runs as part of `typecheck`. The hash
+  normalises CRLF to LF; the server's `sync-shared.mjs` does the same. Failures read
+  `check-shared: <dir> was edited by hand.` (the copy differs from its own `.hash`) or
+  `check-shared: <dir> is older than the server's shared/.` Fix for both: `npm run sync:shared --prefix .` in the server
+  repo, then commit in web and mobile. Never edit the copies.
+- **`useJob`** on the shared per-URL cache: one request in flight per URL (panels and StrictMode share it), reload
+  fetches afresh, backoff, 429 waits 60 s, pause in a hidden tab, per-episode cap and "slow". `StoryFrames` and
+  `ReleasePanel` poll through it.
+- **Feature flags** `WEB_FEATURES` and `WEB_FEATURE_WORKSPACES` (`feature:workspaceId`).
+- **Headers.** `X-Frame-Options: DENY`, `frame-ancestors 'none'`, and a report-only CSP with a per-request nonce and
+  `STORAGE_ORIGIN` (cleaned to an http(s) origin, else left out).
+- **Hardening.** `safeHttpUrl` for doc-pane and products-board links, `react/no-danger`, `twilio`, `fflate` and
+  `@elevenlabs/*` banned from the website, and the bundle check fails on secret-looking `NEXT_PUBLIC_*` names.
+
+New web settings: `WEB_FEATURES`, `WEB_FEATURE_WORKSPACES`, `STORAGE_ORIGIN` (see `docs/DEPLOY_EC2.md`).
+
+**Also watch.** Static pages (e.g. `/login`) prerender without the nonce, so the report-only CSP lists their scripts.
+While a story is publishing, the shared `content/:id` poll re-signs frame links every 5 s and the frame pictures reload.
+`ReleasePanel`'s "due within a minute" is time-based and only re-evaluates on a render.
+
+**Report-only to enforcing CSP.** Read the violation reports for a while, then: make the static pages dynamic (so
+their scripts get the nonce; today they do not), confirm scripts carry the nonce on a dynamic page with the Server
+running, and only then switch the header from `Content-Security-Policy-Report-Only` to `Content-Security-Policy`.
+
+**e2e was not run.** The dev database was wiped down to the admin users at the owner's request, so the owner will test
+by hand once the web is built.
+
+**Not checked live yet**
+1. One forced `/credits` + `/subscription` read after a paid start or a 402.
+2. One request per URL across the Overview's panels (DevTools network tab).
+3. Story and release polling in the browser.
+4. Script nonces on a dynamic page with the Server running (required before enforcing the CSP; static pages like
+   `/login` must become dynamic first).
+5. A `javascript:` product URL rendering as plain text.
+
 ## Foundations 0a: server safety (2026-11-17)
 
 Branch `foundations-0a` in the server, web and mobile repos (not merged). Plan:

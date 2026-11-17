@@ -37,8 +37,16 @@ and set `SERVER_URL=http://<internal-alb-dns>` on the web instances. Server-side
 through that ALB, so the Server sees the website's address for them. No rate-limited route is called that way, and the
 admin "viewed" audit rows those calls write record no IP.
 
-`SERVER_URL` is the Web Frontend's only variable. Next reads it at **build time** too, for the dev-only `/api` rewrite;
+`SERVER_URL` is the Web Frontend's only required variable. Next reads it at **build time** too, for the dev-only `/api` rewrite;
 in production the ALB (or nginx) routes `/api/*`, so the website never proxies.
+
+The Web Frontend also reads three optional settings (all at run time):
+
+| Variable | Value |
+|---|---|
+| `WEB_FEATURES` | Comma list of website feature flags switched on for everyone. Unset: none. |
+| `WEB_FEATURE_WORKSPACES` | Comma list of `feature:workspaceId` pairs: a flag on for those workspaces only. |
+| `STORAGE_ORIGIN` | The object storage / media origin (e.g. `https://media.example.com`). It is added to the `img-src`/`media-src` of the report-only content security policy. Anything that is not an http(s) origin is cleaned or left out. |
 
 ## Target groups
 
