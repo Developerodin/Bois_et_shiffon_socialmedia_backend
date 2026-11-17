@@ -1,16 +1,9 @@
 import { NextResponse } from "next/server";
 import { AccessDeniedError, BrandArchivedError } from "@/server/auth/errors";
 
-export type ApiProblem = {
-  type: string;
-  title: string;
-  status: number;
-  detail?: string;
-  code?: string;
-  errors?: Record<string, string[]>;
-  /** Extra machine-readable fields some problems carry (e.g. a story's `expiredFrames`). */
-  [extra: string]: unknown;
-};
+import type { ApiProblem } from "@/shared";
+
+export type { ApiProblem };
 
 export function problemResponse(problem: ApiProblem) {
   return NextResponse.json(problem, { status: problem.status });
