@@ -46,7 +46,16 @@ export async function effectivePermissions(
   userId: string,
   brandId?: string,
 ): Promise<Set<PermissionKey>> {
-  const found = await memberRole(workspaceId, userId);
+  return permissionsOf(await memberRole(workspaceId, userId), workspaceId, userId, brandId);
+}
+
+/** effectivePermissions from a memberRole already read (one query less for a caller that needed the member anyway). */
+export async function permissionsOf(
+  found: Awaited<ReturnType<typeof memberRole>>,
+  workspaceId: string,
+  userId: string,
+  brandId?: string,
+): Promise<Set<PermissionKey>> {
   if (!found?.role) return new Set();
   const perms = new Set(found.role.permissions as PermissionKey[]);
   if (!brandId) return perms;

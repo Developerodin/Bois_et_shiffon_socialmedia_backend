@@ -1,9 +1,9 @@
 import { requestUserId } from "@/server/auth/request-user";
 import { problemResponse } from "@/server/api/http-error";
 import { assertWorkspaceHeaderMatchesPath } from "@/server/api/workspace-headers";
-import { requireBrandAccess } from "@/server/auth/access";
+import { brandAccess } from "@/server/auth/access";
+import { AccessDeniedError } from "@/server/auth/errors";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
-import { requirePermission } from "@/server/auth/permissions";
 
 export type BrandRouteParams = { workspaceId: string; brandId: string };
 
@@ -27,7 +27,7 @@ export async function authorizeBrandRoute(
   }
   const { workspaceId, brandId } = await params;
   assertWorkspaceHeaderMatchesPath(workspaceId, request.headers.get("X-Workspace-Id"));
-  await requireBrandAccess(workspaceId, brandId, userId);
-  await requirePermission(workspaceId, userId, permission, brandId);
+  const { perms } = await brandAccess(workspaceId, brandId, userId);
+  if (!perms.has(permission)) throw new AccessDeniedError(`Missing permission ${permission}`);
   return { userId: userId, workspaceId, brandId };
 }

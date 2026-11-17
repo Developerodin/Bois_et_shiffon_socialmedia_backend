@@ -2,7 +2,7 @@ import "server-only";
 import { BrandStatus } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { AccessDeniedError, BrandArchivedError } from "@/server/auth/errors";
-import { effectivePermissions } from "@/server/auth/permissions";
+import { memberRole, permissionsOf } from "@/server/auth/permissions";
 
 export type BrandAccessOptions = {
   /** Allow read-style access when brand is archived (AT-024 history). */
@@ -37,7 +37,23 @@ export async function requireBrandAccess(
   userId: string,
   options?: BrandAccessOptions,
 ) {
-  await requireWorkspaceMember(workspaceId, userId);
+  return (await brandAccess(workspaceId, brandId, userId, options)).brand;
+}
+
+/**
+ * requireBrandAccess plus the caller's permissions on the brand, worked out once: the role read proves membership,
+ * so a brand route costs the member, the brand and the project grant (3–4 reads) instead of 7–9.
+ */
+export async function brandAccess(
+  workspaceId: string,
+  brandId: string,
+  userId: string,
+  options?: BrandAccessOptions,
+) {
+  const found = await memberRole(workspaceId, userId);
+  if (!found) {
+    throw new AccessDeniedError("Not a workspace member");
+  }
 
   const brand = await prisma.brand.findFirst({ where: { id: brandId, workspaceId } });
   if (!brand) {
@@ -48,9 +64,10 @@ export async function requireBrandAccess(
     throw new BrandArchivedError();
   }
 
-  if (!(await effectivePermissions(workspaceId, userId, brandId)).has("brand.read")) {
+  const perms = await permissionsOf(found, workspaceId, userId, brandId);
+  if (!perms.has("brand.read")) {
     throw new AccessDeniedError("You don't have access to this project");
   }
 
-  return brand;
+  return { brand, perms };
 }

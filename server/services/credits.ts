@@ -26,15 +26,15 @@ export class InsufficientCreditsError extends Error {
   }
 }
 
-async function ensureStarterGrant(workspaceId: string) {
-  await prisma.creditEntry.createMany({
+export async function ensureStarterGrant(workspaceId: string, db: Pick<typeof prisma, "creditEntry"> = prisma) {
+  await db.creditEntry.createMany({
     data: [{ workspaceId, delta: STARTER_CREDITS, reason: "initial-grant", refId: "initial" }],
     skipDuplicates: true, // unique (workspaceId, reason, refId): granted once
   });
 }
 
+/** A read only: the starter grant is written when the workspace is made (and by spendCredits for older ones). */
 export async function creditBalance(workspaceId: string) {
-  await ensureStarterGrant(workspaceId);
   const { _sum } = await prisma.creditEntry.aggregate({ where: { workspaceId }, _sum: { delta: true } });
   return _sum.delta ?? 0;
 }

@@ -8,6 +8,7 @@ import { hitRateLimit, limitKey, resetRateLimit } from "@/server/auth/rate-limit
 import { appUrl, hashToken, MIN_PASSWORD_LENGTH, newToken } from "@/server/auth/tokens";
 import { prisma } from "@/server/db/prisma";
 import { queueEmail } from "@/server/email/outbox";
+import { ensureStarterGrant } from "@/server/services/credits";
 
 /** Invitations + password reset (ported from Cad auth: hashed single-use tokens, rate limits). */
 export class AccountFlowError extends Error {
@@ -219,6 +220,7 @@ export async function ensurePersonalWorkspace(tx: Tx, user: { id: string; email:
   await tx.role.createMany({ data: SYSTEM_ROLES.map((r) => ({ ...r, workspaceId: workspace.id, isSystem: true })) });
   const owner = await tx.role.findUniqueOrThrow({ where: { workspaceId_slug: { workspaceId: workspace.id, slug: "owner" } } });
   await tx.workspaceMember.create({ data: { workspaceId: workspace.id, userId: user.id, role: "OWNER", roleId: owner.id } });
+  await ensureStarterGrant(workspace.id, tx);
   await tx.auditEvent.create({
     data: { workspaceId: workspace.id, actorUserId: user.id, action: "workspace.created", entityType: "Workspace", entityId: workspace.id },
   });
