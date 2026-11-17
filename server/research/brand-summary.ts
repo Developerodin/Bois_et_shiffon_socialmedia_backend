@@ -24,11 +24,8 @@ export const BrandSummary = z.object({
 export type BrandSummary = z.infer<typeof BrandSummary>;
 
 /** Creative tones the app offers (A10). Stored as these English keys; anything else is refused. */
-export const TONES = [
-  "Warm", "Playful", "Bold", "Calm", "Romantic", "Edgy",
-  "Modern", "Minimalist", "Rustic", "Vintage", "Bohemian", "Industrial", "Scandinavian", "Coastal",
-  "Luxurious", "Premium", "Elegant", "Affordable", "Artisanal", "Sustainable", "Natural", "Family-friendly",
-] as const;
+import { TONES } from "@/shared";
+export { TONES };
 export const Preferences = z.object({ tones: z.array(z.enum(TONES)).max(TONES.length) });
 export const CONTENT_LANGUAGES = ["fr", "en"] as const;
 

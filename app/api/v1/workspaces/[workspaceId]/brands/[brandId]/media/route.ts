@@ -1,14 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
+import { LIBRARY_MAX, MEDIA_MAX_BYTES } from "@/shared";
 import { prisma } from "@/server/db/prisma";
 import { imageType, mediaKey, putMedia, signedMediaUrl } from "@/server/storage/media";
-
-// ponytail: a cap so the JSON list stays small; a table if brands need bigger libraries.
-const LIBRARY_MAX = 60;
-
-// Vercel caps request bodies at 4.5 MB; videos stay as links.
-const MAX_BYTES = 4 * 1024 * 1024;
 
 const invalid = (title: string, status = 400) => problemResponse({ type: "https://api.brandpilot/errors/media", title, status, detail: title });
 
@@ -22,12 +17,12 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
   try {
     const scope = await authorizeBrandRoute(request, context.params, "publish.execute");
     if (scope instanceof Response) return scope;
-    if (Number(request.headers.get("content-length") ?? 0) > MAX_BYTES + 64 * 1024) return invalid("Images can be up to 4 MB", 413);
+    if (Number(request.headers.get("content-length") ?? 0) > MEDIA_MAX_BYTES + 64 * 1024) return invalid("Images can be up to 4 MB", 413);
 
     const form = (await request.formData().catch(() => null)) ?? new FormData();
     const file = form.get("file");
     if (!(file instanceof File)) return invalid("Choose an image to upload");
-    if (file.size > MAX_BYTES) return invalid("Images can be up to 4 MB", 413);
+    if (file.size > MEDIA_MAX_BYTES) return invalid("Images can be up to 4 MB", 413);
     const bytes = new Uint8Array(await file.arrayBuffer());
     const kind = imageType(bytes);
     if (!kind) return invalid("Upload a JPG or PNG image");

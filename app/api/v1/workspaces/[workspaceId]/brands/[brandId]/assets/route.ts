@@ -6,6 +6,7 @@ import { prisma } from "@/server/db/prisma";
 import { BrandAssets, saveEditedColors } from "@/server/research/brand-assets";
 import { BrandSummary, CONTENT_LANGUAGES, MAX, oneLine, Preferences, savePreferences, saveSummaryEdit, TONES } from "@/server/research/brand-summary";
 import { PlaceListing } from "@/server/integrations/places";
+import { normalizeHex, type BrandAssetsView } from "@/shared";
 import { signedMediaUrl } from "@/server/storage/media";
 import type { TenantScope } from "@/server/tenant/scope";
 
@@ -43,7 +44,7 @@ async function view(scope: Required<TenantScope>) {
       tones: Preferences.safeParse(brand.profile?.preferences).data?.tones ?? null,
       contentLanguage: CONTENT_LANGUAGES.find((l) => l === locales[0]) ?? null,
     },
-  };
+  } satisfies BrandAssetsView;
 }
 
 /**
@@ -66,10 +67,7 @@ const Hex = z
   .string()
   .trim()
   .regex(/^#?([0-9a-f]{3}|[0-9a-f]{6})$/i, "Colours are hex codes like #7C6754")
-  .transform((h) => {
-    const v = h.replace("#", "").toUpperCase();
-    return `#${v.length === 3 ? [...v].map((c) => c + c).join("") : v}`;
-  });
+  .transform((h) => normalizeHex(h)!);
 const Edit = z
   .object({
     colors: z
