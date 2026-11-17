@@ -134,6 +134,9 @@ works with `--env-file`, compose and dotenv alike.
 | `WORKER_DAILY_SWEEP` | worker | Unset or `true` in production, or the daily sweep (plan renewals, token refreshes, scheduled agents, catalog syncs) never runs; the worker then warns once a day. `false` on any other worker. |
 | `CRON_SECRET` | api | **Unset.** `/api/v1/jobs/run` then refuses every call; the worker replaces the old cron. |
 | `DATABASE_URL`, `DATABASE_URL_UNPOOLED` | api, worker, migrate | Pooled for the app, direct for migrations. |
+| `CSRF_MODE` | api | `log` on the first deploy that has the cross-origin check: cookie writes from another origin are logged (`csrf.crossOrigin`) but let through. Read the logs, add any real origin to `WEB_ORIGINS`, then unset it (refuses with 403). |
+| `WEB_ORIGINS` | api | Extra website origins allowed to make cookie writes (comma list). `AUTH_URL`'s origin is always allowed; usually unset in production. |
+| `PAID_STARTS_OFF_FOR` | api | Unset. `web` pauses paid starts (render, photoshoot, clone, presenter, preview, agent runs) from the website only, with a 503, while the phone keeps working; `paid.start` log lines show what each client starts. |
 | `STORAGE_*` | api, worker | Object storage. Deliberately not `AWS_*`, which would clash with the instance role. The api and the worker refuse to start in production without `STORAGE_ACCESS_KEY_ID` and `STORAGE_SECRET_ACCESS_KEY`. |
 
 Provider callback URLs stay on the website's origin: `<website>/api/auth/callback/google` and
@@ -141,6 +144,9 @@ Provider callback URLs stay on the website's origin: `<website>/api/auth/callbac
 same public address.
 
 ## Deploy order
+
+Run the api in the same AWS region as the database (Neon is in eu-central-1): every API request makes several
+database round trips.
 
 1. **Migrate**: run the migrate image once (`docker compose run --rm migrate`, or a one-off task).
 2. **Workers**: roll the worker group (lifecycle hook above).

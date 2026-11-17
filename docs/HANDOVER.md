@@ -4,6 +4,38 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Foundations 0a: server safety (2026-11-17)
+
+Branch `foundations-0a` in the server, web and mobile repos (not merged). Plan:
+`docs/superpowers/plans/2026-11-17-foundations-0a-server-safety.md`; spec `docs/superpowers/specs/2026-11-17-foundations-design.md` §5.
+
+- **Voice-clone challenge.** `GET …/voices/clones/challenge?lang=xx` returns the clone passage shuffled into rounds
+  (≥140 words); `POST …/voices/clones` needs its `challengeId` and checks the transcript against it
+  (`clone.notTheChallenge` 422, `clone.challengeExpired` 410). The phone reads the challenge.
+- **One charge per submit.** Optional `requestId` (UUID) on `POST /photoshoots`, `/voices/clones` and `/reels`: a
+  repeat returns the first record (200); another workspace's id is 409 `request.idTaken`; a reel still being planned
+  is 409 `reel.stillPlanning`.
+- **Reel planning** needs a plan and is capped at 20 scriptwriter runs per brand per hour; edits only check the plan.
+- **Re-render** of a version that already has a video is 409 `render.alreadyDone` unless the body says `again: true`.
+- **Cross-origin check** for cookie writes in `middleware.ts` (`CSRF_MODE`, `WEB_ORIGINS`); `serverFetch` sends the
+  website's origin (`WEB_ORIGIN` in the web repo).
+- **WebM recordings** accepted next to M4A; ffmpeg is always told the format.
+- **Inbox and Google reads** cached 45 s per brand (`TransientEntry`), cleared on a reply or post.
+- **Brand routes** read the member, the brand and the project grant once; balance reads no longer write the starter
+  grant (made at workspace creation; a migration backfills it).
+- **`X-Client`** tag (`web/…`, `mobile/…`), `PAID_STARTS_OFF_FOR`, and a `paid.start` log line per paid start.
+
+Deliberate breaks: an app build without the challenge gets 409 `clone.updateApp` when cloning; a second render of a
+version that has a video needs `again: true`.
+
+New settings: server `WEB_ORIGINS`, `CSRF_MODE`, `PAID_STARTS_OFF_FOR`; web `WEB_ORIGIN`. First deploy with
+`CSRF_MODE=log`.
+
+Shared code: edit `shared/` in the server repo, then `npm run sync:shared --prefix .` copies it to `../web/shared` and
+`../mobile/src/shared` and writes the same `.hash` into all three; commit in each repo.
+
+Not yet checked live: cloning and a photoshoot double-tap on the emulator (they call paid providers).
+
 ## Server / Web Frontend split (end of day 2026-11-16)
 
 **Merged into `desktop-shell` (`2cbfef1`), not pushed.** The `sma-split` worktree is removed; the
