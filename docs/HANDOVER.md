@@ -4,6 +4,63 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Foundations 0c: website UI kit and accessibility (2026-11-17)
+
+Branch `foundations-0c` in the server and web repos (not merged). Plan:
+`docs/superpowers/plans/2026-11-17-foundations-0c-web-ui-kit.md`. Server commits `e224188..HEAD` (the subscription route
+now also returns each action's price and `freeAgents`; additive), web `7ed2fef..HEAD`.
+
+- **Kit.** `PageHeader`, `PageSection`, `StatusBadge` (one status-to-tone map in `lib/status.ts`), `JobProgress`,
+  `CreditsChip` and `PaywallDialog` (now a real dialog), `PageSkeleton`; all in `docs/DESIGN_SYSTEM.md` §7. Settings,
+  Products, Connections and the other pages use them.
+- **Nav and shell.** Route names and groups from `lib/nav.ts` (`navFor`); page titles derived from it. Below 768 px the
+  sidebar lives in a sheet opened from the Menu button. "Create a business" is a real menu item that opens its dialog.
+  The Overview panel menu (move, hide, collapse, expand) keeps keyboard focus.
+- **Prices.** Paid buttons show their price from the server, including the two run triggers outside the plan's file
+  list ("Get ideas", "re-read it now"). The plan/credits store now queues one follow-up read after an in-flight one.
+- **Audit script** `scripts/audit-ui.ts` (web) also checks every shell route at 320 px and counts content pushed past
+  the right edge.
+
+**Decisions that change what people see**
+- Page titles are `text-3xl` (were smaller).
+- Badge colours come from one map: admin `RUNNING` is now indigo (info); text on tints uses the new `--success-ink` and
+  `--warning-ink` so contrast passes 4.5:1. Admin run/call `ESCALATED` and `FELL_BACK` lost their amber (now muted).
+- Unlimited (test) workspaces show no price: their charges are zero, a price would be false.
+- The Overview feed's icon-only run buttons carry the price in `aria-label`/`title`, so it shows on hover and to a
+  screen reader, not on screen. Ask if it should be visible text.
+- No sidebar below 768 px; use the Menu button.
+- `JobProgress` has no consumer yet; it is not visible until the photoshoot (feature 2).
+- Route names/groups follow plan Decision 12 and sit behind flags that are off by default.
+
+**Audit not run.** It needs the admin login and both servers up. With the server on :3101 and the web built
+(`npm run build --prefix .`) and started (`npm run start --prefix .`) on :3100, from the web repo:
+`SEED_ADMIN_EMAIL=... SEED_ADMIN_PASSWORD=... npm run audit:ui --prefix .`.
+Expect: every `narrow` line shows `overflow: none` and `offscreen: 0`; no `color-contrast` rule on pages with badges;
+`page-has-heading-one` absent for /agents. A nonzero `offscreen` must be read through the names it lists: rows that are
+meant to scroll sideways count too, and overflow can read none while offscreen is above 0 (that is the clipped case).
+Note which routes really rendered (admin may be redirected to /welcome or /admin).
+
+**Not checked live (manual, by hand)**
+1. Credits chip, its popover and the 402 dialog (the dialog was never reached in a manual check).
+2. Priced buttons against a real balance.
+3. Overview panel menu by keyboard: Move and Hide keep focus, Escape and Collapse return focus to "panel options".
+4. The menu sheet at 320, 767 and 768 px.
+5. Wide screens (1280 px and up): horizontal scroll, now that the page-level overflow clip is gone.
+6. "Create a business" by keyboard: Enter opens it, focus lands in the name field, Escape returns to "Select business",
+   and the page is still clickable afterwards. Radix can leave `pointer-events: none` on the page after a menu-to-dialog
+   handoff; judged unreachable today (the menu has no exit animation), but an animate plugin would make it real. Fix then:
+   open the dialog from the menu's `onCloseAutoFocus`.
+7. `JobProgress` until the photoshoot uses it.
+
+**Deferred minors (for a final fix round)**
+- `lib/status.ts`: add `ESCALATED` and `FELL_BACK` to the warn group.
+- `ai-models-tab`: missing `pb-0` when ready (about 32px dead space); check the long `usedBy` badge on a narrow screen.
+- Credits chip and sidebar import `tool` from the top bar (circular import in the chip): move it to a shared file.
+- `JobProgress`: slow/failed notices mount with their content (may be skipped by screen readers); aria-valuenow not
+  clamped; empty steps read "Done".
+- `PageSkeleton` double-reads "Loading"; the page-titles scan has no non-empty guard.
+- Sheet stays open if the viewport widens to md while open; a modifier or middle click on a sheet link also closes it.
+
 ## Foundations 0b: website plumbing (2026-11-17)
 
 Branch `foundations-0b` in the server, web and mobile repos (not merged). Plan:

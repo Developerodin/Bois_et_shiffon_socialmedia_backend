@@ -30,6 +30,8 @@ Source of truth: `apps/web/app/globals.css` (hex, light mode only). The values b
 | `--destructive` | `#b42318` | Errors, reject |
 | `--success` | `#1a7f4b` | Approved, healthy |
 | `--warning` | `#9a5b00` | Warnings |
+| `--success-ink` | `#146b3e` | Status text on tints (success badges); passes 4.5:1 on the tint |
+| `--warning-ink` | `#8a5100` | Status text on tints (warning badges); passes 4.5:1 on the tint |
 
 **Brand note:** In brand-scoped views, product/hero imagery carries color; platform chrome stays neutral so any onboarded brand’s assets dominate.
 
@@ -40,6 +42,7 @@ Source of truth: `apps/web/app/globals.css` (hex, light mode only). The values b
 | Role | Font stack | Size / line |
 |------|------------|-------------|
 | Display (`.font-display`) | `Inter` | `text-2xl` page greetings, `text-lg` panel titles |
+| Page title (`PageHeader`) | `Inter` | `text-3xl font-medium` |
 | UI / body | `Inter`, system-ui | `text-sm` base, `leading-relaxed` |
 | Mono / data | `JetBrains Mono` | SKUs, ids, metrics |
 
@@ -51,7 +54,8 @@ Loaded via `next/font` in `app/layout.tsx`.
 
 - Base unit: 4px (`space-1`); radius token `--radius: 1rem` (`rounded-2xl` for cards and controls)
 - Shell: sidebar `232px`, top bar `72px` (`h-18`), assistant panel on the right from `xl`
-- Non-Overview pages: `p-8` inside the main area
+- Non-Overview pages: `p-4 sm:p-8` inside the main area
+- **`PageSection`** (`components/ui/page-section.tsx`) is the section card on those pages: `rounded-2xl border border-border bg-card shadow-sm`, `px-5` inset, `text-lg` title, optional description and actions; lists inside run edge to edge. A header-only section (no children) sits above an `EmptyState` or error shown outside the card, never a card in a card.
 - **Overview panels** (`components/workspace/panel-layout.tsx`): each panel is a card (`rounded-2xl border bg-card shadow-sm`) on `--background`, `12px` (`gap-3` / `p-3`) between cards. The gap between columns is the resize handle; its line shows only on hover or focus. A column whose panels are all collapsed shrinks to `15rem`.
 - **Inside a panel:** one inset for everything, `px-5`. Sections are separated by spacing (`py-4`), not divider lines; list rows that need edge-to-edge hover use `-mx-2 px-2`.
 - Icon tiles: agent and task icons sit on `bg-accent` tiles (`size-8 rounded-lg` in rows, `size-12 rounded-xl` in the agent grid).
@@ -87,8 +91,12 @@ Customize via CSS variables above in `components.json`.
 | `AppShell` | Sidebar + header + workspace selector + **brand switcher** |
 | `BrandSwitcher` | Lists accessible brands; shows `displayName` + status; blocks navigation actions when none selected (REQ-PLAT-002) |
 | `BrandLabel` | Chip in header: active brand name; portfolio mode shows “Portfolio” badge |
-| `PageHeader` | Title, breadcrumbs, primary action |
-| `StatusBadge` | Maps workflow enums to color + label |
+| `PageHeader` | Title (`h1`, `text-3xl`), description, primary action (`components/ui/page-header.tsx`) |
+| `PageSection` | Titled section card with `px-5` inset (`components/ui/page-section.tsx`) |
+| `StatusBadge` | Maps workflow enums to a tone and label (`components/ui/status-badge.tsx`; the one status-to-tone map is `lib/status.ts`, text on tints uses the `-ink` tokens) |
+| `JobProgress` | Step list and progress bar for a long job, with slow and failed notices (`components/ui/job-progress.tsx`; first consumer is the photoshoot) |
+| `CreditsChip` | Top-bar balance chip with a popover (`components/shell/credits-chip.tsx`); paid buttons show their price from the server, unlimited workspaces show none |
+| `PaywallDialog` | Opens on a recognisable 402 (`components/shell/paywall-dialog.tsx`, state in `lib/paywall.ts`) |
 | `EmptyState` | Illustration-free; clear CTA |
 | `DataTable` | Sortable columns, filter row |
 | `OpportunityCard` | Score, rationale, product chip |
@@ -119,7 +127,7 @@ Customize via CSS variables above in `components.json`.
 
 | Breakpoint | Behavior |
 |------------|----------|
-| `< md` | Collapsible nav sheet; stack filters |
+| `< md` (below 768 px) | No sidebar; it opens in a sheet from the Menu button; stack filters |
 | `md+` | Sidebar visible |
 | `lg+` | Two-column studio (editor + preview) |
 
