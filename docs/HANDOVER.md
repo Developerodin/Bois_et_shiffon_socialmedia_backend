@@ -63,7 +63,6 @@ Note which routes really rendered (admin may be redirected to /welcome or /admin
 - Before relying on the layout, run the UI audit at 320 px and 1280 px in a fresh browser (command above). The Overview's
   layout hint now sits above the panel columns (not in the top bar), which fixed the top bar overflowing at 1024 to
   about 1600 px.
-- `PageSkeleton` double-reads "Loading"; the page-titles scan has no non-empty guard.
 - Sheet stays open if the viewport widens to md while open; a modifier or middle click on a sheet link also closes it.
 
 ## Foundations 0b: website plumbing (2026-11-17)
