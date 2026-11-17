@@ -38,23 +38,7 @@ describe("POST /api/v1/me/context", () => {
     expect(m.set).not.toHaveBeenCalled();
   });
 
-  it("rejects another origin with 403", async () => {
-    const res = await POST(req({ workspaceId: "w1" }, { origin: "https://evil.example" }));
-    expect(res.status).toBe(403);
-    expect(m.set).not.toHaveBeenCalled();
-  });
-
-  it("rejects a request with no Origin header with 403", async () => {
-    const noOrigin = new Request("http://localhost:3100/api/v1/me/context", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workspaceId: "w1" }),
-    });
-    expect(noOrigin.headers.has("origin")).toBe(false);
-    const res = await POST(noOrigin);
-    expect(res.status).toBe(403);
-    expect(m.set).not.toHaveBeenCalled();
-  });
+  // The cross-origin rule for this cookie write is the middleware's (tests/middleware.test.ts).
 
   it("is 404 and sets no cookie for a brand the user may not open", async () => {
     m.brand.mockRejectedValue(new AccessDeniedError());

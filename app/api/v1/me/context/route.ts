@@ -12,16 +12,12 @@ const cookieOptions = { httpOnly: true, sameSite: "lax", path: "/", maxAge: SHEL
 
 /**
  * Pick the active workspace (and brand). The choice lives in cookies, so this is a cookie-authenticated write:
- * it takes JSON only and the Origin must be this app's own (SameSite=lax alone leaves same-site subdomains able to send it).
+ * it takes JSON only, and the middleware refuses it from any other origin (crossOriginWrite).
  */
 export async function POST(request: Request) {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     return problem(415, "Unsupported media type", "Send JSON");
   }
-  const origin = request.headers.get("origin");
-  const allowed = process.env.AUTH_URL ? new URL(process.env.AUTH_URL).origin : null;
-  if (!origin || !allowed || origin !== allowed) return problem(403, "Forbidden", "Cross-origin request");
-
   const userId = await requestUserId(request);
   if (!userId) return problem(401, "Unauthorized", "Sign in required");
 
