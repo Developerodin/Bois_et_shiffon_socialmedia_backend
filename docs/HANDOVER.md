@@ -4,6 +4,44 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Feature 1: brand look and photo library on the web (2026-11-17)
+
+Branch `feature-1-brand-library` in the server, web and mobile repos (not merged). Plan:
+`docs/superpowers/plans/2026-11-17-feature-1-brand-library.md`.
+
+- **What was built.** One `/library` page, labelled "Brand & photos": photo grid with add and remove, brand colours
+  (colour dialog), tones, and a read-only logo. Behind `WEB_FEATURES=library`. `LibraryPicker` (`onUse(photo)`, `children`
+  for feature text) is ready for the photoshoot; `putShared`/`sharedAt` in `use-job.ts` and live regions in `JobProgress`.
+- **Shared contract.** `shared/brand-look.ts` in the server; the web uses it, mobile took only the copy (wording), not
+  the module.
+
+**Defaults taken for the owner questions** (owner said "yes start"; cost if wrong is renaming or moving one page)
+- One page, "Brand & photos". Files over 4 MB are refused in the browser, before any request.
+- Server permissions kept: add photo = `publish.execute`; remove photo, colours and tones = `context.edit`.
+- Logo is read-only; fonts, tagline and audience are not shown.
+- Open for feature 2: may Creators spend the whole workspace's credits?
+
+**Manual checks for the owner**
+- Flag off: `/library` is 404 and there is no nav entry.
+- Add 3 JPEGs. A HEIC file and a 6 MB file are refused with no network request.
+- Remove a photo: focus lands on "Add photos". Refresh makes exactly one GET.
+- Keyboard through the switch, grid, tones and colour dialog.
+- 375 px: no horizontal scroll. Switch business: the page reloads that business's look and photos.
+- A role without `context.edit`: remove, colours and tones are unavailable.
+
+**Not checked live:** the 60-photo 409, signed links after an hour, the picker (until the photoshoot exists).
+
+**Open minors (deferred)**
+- Route `.max(5)` literal vs `MAX_COLORS`; `HUES`/`SHADES` not readonly; `brand-summary` import mid-file; no shade
+  step < 0 test.
+- 50-minute link staleness is only re-checked on render (documented ceiling); extra `pickUploads`/`paletteAfter` edge tests.
+- `busyKey=""` magic value; Lock icon on the no-permission state; 16 px gap from empty live regions; focus moves on a
+  failed remove.
+- Tones Save enabled when re-picked back to the saved set; disabled Save shown to non-edit roles; an unchanged colour
+  save sends a no-op (the phone does the same).
+- Invented empty titles "No photos" / "No uploads" in the picker.
+- Closed: the 0c minor "JobProgress needs a live role" (it now has a consumer path through the library and live regions).
+
 ## Foundations 0c: website UI kit and accessibility (2026-11-17)
 
 Branch `foundations-0c` in the server and web repos (not merged). Plan:

@@ -97,6 +97,8 @@ Customize via CSS variables above in `components.json`.
 | `JobProgress` | Step list and progress bar for a long job, with slow and failed notices (`components/ui/job-progress.tsx`; first consumer is the photoshoot) |
 | `CreditsChip` | Top-bar balance chip with a popover (`components/shell/credits-chip.tsx`); paid buttons show their price from the server, unlimited workspaces show none |
 | `PaywallDialog` | Opens on a recognisable 402 (`components/shell/paywall-dialog.tsx`, state in `lib/paywall.ts`) |
+| `LibraryPicker` | Photo chooser for features that start from the library: `onUse(photo: LibraryPhoto)`, `children` for feature-specific text (`components/library/library-picker.tsx`; first consumer is the photoshoot) |
+| `PhotoGrid` / `SourceSwitch` | Library photo grid with keyboard selection, and the switch between uploads and generated photos (`components/library/photo-grid.tsx`, `library-board.tsx`) |
 | `EmptyState` | Illustration-free; clear CTA |
 | `DataTable` | Sortable columns, filter row |
 | `OpportunityCard` | Score, rationale, product chip |
