@@ -1,0 +1,85 @@
+# One EC2 box (or a laptop): website, Server API, worker and nginx. A scaled setup runs the same images as separate
+# groups behind load balancers instead (docs/DEPLOY_EC2.md).
+#
+# Env files live outside git:
+#   deploy/env/server.env   the Server's variables (used by migrate, server-api, worker). AUTH_URL must be https.
+#   The website needs only SERVER_URL, set below, so it has no env file.
+# Locally, point SERVER_ENV_FILE at a copy of .env with AUTH_URL=https://localhost, and set
+# WORKER_DAILY_SWEEP=false in it (commented out in the template): the images set NODE_ENV=production, which would
+# otherwise let the local worker queue the paid daily sweep against whatever database that file points at.
+#
+# The website image builds from the web repo, checked out next to this one (../web) or wherever WEB_DIR points.
+#
+# Release: docker compose build
+#          docker compose run --rm migrate
+#          docker compose up -d worker server-api web nginx     (migrate -> worker -> api -> web)
+x-server-env: &server-env
+  env_file: ${SERVER_ENV_FILE:-./deploy/env/server.env}
+
+services:
+  migrate:
+    build: { context: ., target: migrate }
+    image: espanda-server-migrate
+    <<: *server-env
+    restart: "no"
+
+  worker:
+    build: { context: ., target: worker }
+    image: espanda-server-worker
+    <<: *server-env
+    init: true
+    restart: unless-stopped
+    # Longer than the longest job plus slack: SIGTERM lets the jobs in flight finish (docs/DEPLOY_EC2.md, Workers).
+    stop_grace_period: 360s
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  server-api:
+    build: { context: ., target: api }
+    image: espanda-server-api
+    <<: *server-env
+    environment:
+      # Heavy work (renders, publishing) runs in the worker, not inside API requests.
+      RUN_JOBS_IN_API: "false"
+    init: true
+    restart: unless-stopped
+    # Lets a chat stream or agent run (up to 300 s) finish on a redeploy; Docker's default is 10 s.
+    stop_grace_period: 330s
+    expose: ["3101"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3101/api/v1/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  web:
+    build: { context: ${WEB_DIR:-../web} }
+    image: espanda-web
+    environment:
+      SERVER_URL: http://server-api:3101
+    init: true
+    restart: unless-stopped
+    expose: ["3100"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      server-api: { condition: service_healthy }
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      # fullchain.pem and privkey.pem (Let's Encrypt, or a self-signed pair for a local run)
+      - ./deploy/certs:/etc/nginx/certs:ro
+    depends_on:
+      server-api: { condition: service_healthy }
+      web: { condition: service_healthy }

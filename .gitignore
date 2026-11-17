@@ -52,3 +52,6 @@ next-env.d.ts
 /scripts/evals/results/
 /.superpowers/
 *.log
+# Single-box deploy: env files and TLS certificates live here, never in git
+/deploy/env/
+/deploy/certs/

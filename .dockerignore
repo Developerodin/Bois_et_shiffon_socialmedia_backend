@@ -1,0 +1,19 @@
+# Build context for the server images. Secrets never enter an image: env is supplied at run time (env files / the
+# instance), so every .env* stays out of the context.
+**/.env*
+**/node_modules
+**/.next
+**/dist
+**/test-results
+**/playwright-report
+**/*.tsbuildinfo
+.git
+.claude
+.agents
+.cursor
+.devin
+.superpowers
+docs
+deploy
+docker-compose.yml
+scripts/evals/results

@@ -8,12 +8,12 @@ groups. `docker-compose.yml` runs everything on one box; this guide covers the s
 
 | Image | Build | Runs | Port |
 |---|---|---|---|
-| Server API | `docker build -f apps/server/Dockerfile --target api .` | `node server.js` | 3101 |
+| Server API | `docker build --target api .` (server repo) | `node server.js` | 3101 |
 | Server worker | `... --target worker .` | `node dist/worker.js` (the job loop and the 05:00 UTC daily sweep) | none |
 | Migrate | `... --target migrate .` | `prisma migrate deploy`, then exits | none |
-| Web Frontend | `docker build -f apps/web/Dockerfile .` | `node server.js` | 3100 |
+| Web Frontend | `docker build .` (web repo) | `node server.js` | 3100 |
 
-Build from the repo root. All are `linux/amd64` on `node:22-bookworm-slim`. **Instances must be x86_64**: `ffprobe-static`
+Build each from its own repo's root (server and web are separate repos). All are `linux/amd64` on `node:22-bookworm-slim`. **Instances must be x86_64**: `ffprobe-static`
 ships no Linux arm64 binary, so Graviton is out until that changes. No env is baked into any image; every variable
 arrives at run time (instance user data, SSM, or an env file).
 
