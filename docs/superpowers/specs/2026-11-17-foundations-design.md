@@ -77,7 +77,8 @@ it names; 0b and 0c in web, plus server where named).
 
 1. **Voice-clone challenge (A1, live today).**
    - The challenge is the existing clone passage with its sentences in a **random order** per attempt, in the person's
-     language. *(Settled from the builder check: the clone needs 60–90 s of speech (`clones.ts:23`) and `saysTheScript`
+     language, repeated in a second (differently shuffled) round so the reading fills 60–90 s (the passages are
+     57–98 words, about 25–40 s spoken). *(Settled from the builder check: the clone needs 60–90 s of speech (`clones.ts:23`) and `saysTheScript`
      matches both ways, so a short challenge inside a long take would fail; a shuffled full passage fills the take,
      keeps the one matcher, and needs no new translations.)* The 24 translated passages move from mobile's i18n
      (`clone.passage`) into `shared/contract/clone-passages.ts`, which the server reads; mobile shows what the server
