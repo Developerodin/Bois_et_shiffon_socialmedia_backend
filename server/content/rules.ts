@@ -1,5 +1,5 @@
 import type { ContentChannel } from "@prisma/client";
-import { CAPTION_LIMITS } from "@espanda/shared";
+import { CAPTION_LIMITS } from "@/shared";
 
 /**
  * Deterministic content checks (no AI): same draft in → same result out.

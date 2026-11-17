@@ -1,4 +1,4 @@
-import { ACTIVITY_SORTS, period, type ActivitySort, type AdminActivityList } from "@espanda/shared";
+import { ACTIVITY_SORTS, period, type ActivitySort, type AdminActivityList } from "@/shared";
 import { adminOnly, nextPage, queryOf, usdInr, wire } from "@/server/api/admin-route";
 import { activityList } from "@/server/services/activity";
 import { pageCount, pageNumber, peopleMatching, pickerOptions } from "@/server/services/platform-admin";

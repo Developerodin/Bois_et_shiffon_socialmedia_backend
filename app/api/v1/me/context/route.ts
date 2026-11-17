@@ -1,5 +1,5 @@
 import { cookies } from "next/headers";
-import { SHELL_COOKIE_BRAND, SHELL_COOKIE_MAX_AGE, SHELL_COOKIE_WORKSPACE, type ContextRequest } from "@espanda/shared";
+import { SHELL_COOKIE_BRAND, SHELL_COOKIE_MAX_AGE, SHELL_COOKIE_WORKSPACE, type ContextRequest } from "@/shared";
 import { problemResponse } from "@/server/api/http-error";
 import { requireBrandAccess, requireWorkspaceMember } from "@/server/auth/access";
 import { AccessDeniedError } from "@/server/auth/errors";

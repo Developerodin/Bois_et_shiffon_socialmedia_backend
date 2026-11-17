@@ -1,4 +1,4 @@
-import type { AdminWorkspaceHeader } from "@espanda/shared";
+import type { AdminWorkspaceHeader } from "@/shared";
 import { adminOnly, notFoundResponse, wire } from "@/server/api/admin-route";
 import { prisma } from "@/server/db/prisma";
 

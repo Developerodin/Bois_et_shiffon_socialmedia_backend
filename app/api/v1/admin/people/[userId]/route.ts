@@ -1,4 +1,4 @@
-import type { AdminPerson } from "@espanda/shared";
+import type { AdminPerson } from "@/shared";
 import { adminOnly, notFoundResponse, wire } from "@/server/api/admin-route";
 import { personDetail, platformLogs } from "@/server/services/platform-admin";
 

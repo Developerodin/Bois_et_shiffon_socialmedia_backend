@@ -2,7 +2,7 @@ import { cookies } from "next/headers";
 import {
   SHELL_COOKIE_BRAND,
   SHELL_COOKIE_WORKSPACE,
-} from "@espanda/shared";
+} from "@/shared";
 import { listAccessibleBrands, listUserWorkspaces } from "@/server/services/brands";
 import { requireBrandAccess } from "@/server/auth/access";
 

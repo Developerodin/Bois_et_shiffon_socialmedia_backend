@@ -12,12 +12,12 @@ const compat = new FlatCompat({
 const SOURCES = "{ts,tsx,js,jsx,mjs}";
 
 // The Server takes nothing from the Web Frontend: no components, and no relative import that climbs out of
-// apps/server (shared code lives in @espanda/shared). One block per folder depth, since how many "../" leave the app
+// apps/server (shared code lives in ./shared, a copy kept in step with the web repo). One block per folder depth, since how many "../" leave the app
 // depends on where the file sits (ESLint keeps only the last matching block's options for a rule). npm workspaces
 // also link the other apps into node_modules by package name ("web-frontend/…" resolves to apps/web), and "@/../" or
 // "./../" climb out as well. no-restricted-imports doesn't see import(), so no-restricted-syntax repeats the escapes
 // for it (esquery regexes can't hold "/", hence \x2F).
-const LEAVES = "Leaves apps/server: import from inside the app, or from @espanda/shared.";
+const LEAVES = "Leaves apps/server: import from inside the app, or from @/shared.";
 const boundary = (depth) => {
   const escapes = [`^(\\./)?(\\.\\./){${depth + 1},}`, "^@/\\.\\.(/|$)", "^(web-frontend|mobile-app)(/|$)"];
   return {

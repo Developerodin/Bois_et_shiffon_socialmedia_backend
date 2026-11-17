@@ -1,6 +1,6 @@
 import type { Product } from "@prisma/client";
 import { z } from "zod";
-import { byExternalId, groupKey, handleOf, productName, REMOVED_PRODUCT_NAME } from "@espanda/shared";
+import { byExternalId, groupKey, handleOf, productName, REMOVED_PRODUCT_NAME } from "@/shared";
 
 export { byExternalId, groupKey, handleOf, productName, REMOVED_PRODUCT_NAME };
 

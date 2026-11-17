@@ -1,4 +1,4 @@
-import type { AdminPeople } from "@espanda/shared";
+import type { AdminPeople } from "@/shared";
 import { adminOnly, nextPage, queryOf, wire } from "@/server/api/admin-route";
 import { listPeople, pageCount, pageNumber } from "@/server/services/platform-admin";
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { socialLinks } from "@/server/research/crawl";
-import { domainOf } from "@espanda/shared";
+import { domainOf } from "@/shared";
 
 describe("competitor helpers", () => {
   it("normalises domains and rejects non-sites", () => {

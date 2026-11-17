@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { z } from "zod";
-import { SHELL_COOKIE_BRAND, SHELL_COOKIE_MAX_AGE, SHELL_COOKIE_WORKSPACE } from "@espanda/shared";
+import { SHELL_COOKIE_BRAND, SHELL_COOKIE_MAX_AGE, SHELL_COOKIE_WORKSPACE } from "@/shared";
 import { fromAccessError } from "@/server/api/http-error";
 import { accountErrorResponse, invalid } from "@/server/api/workspace-route";
 import { acceptInvitation } from "@/server/services/accounts";

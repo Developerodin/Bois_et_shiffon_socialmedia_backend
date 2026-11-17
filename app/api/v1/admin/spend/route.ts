@@ -1,4 +1,4 @@
-import { period, type AdminSpend } from "@espanda/shared";
+import { period, type AdminSpend } from "@/shared";
 import { adminOnly, queryOf, usdInr, wire } from "@/server/api/admin-route";
 import { spendBreakdown } from "@/server/services/platform-admin";
 

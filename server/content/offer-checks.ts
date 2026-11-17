@@ -1,6 +1,6 @@
 import type { Campaign } from "@prisma/client";
 import { z } from "zod";
-import { offerPercents, zoneCity } from "@espanda/shared";
+import { offerPercents, zoneCity } from "@/shared";
 import type { LinkedProduct } from "@/server/content/product-checks";
 
 /**

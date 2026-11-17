@@ -1,4 +1,4 @@
-import { WORKSPACE_SORTS, type AdminWorkspaces, type WorkspaceSort } from "@espanda/shared";
+import { WORKSPACE_SORTS, type AdminWorkspaces, type WorkspaceSort } from "@/shared";
 import { adminOnly, nextPage, queryOf, usdInr, wire } from "@/server/api/admin-route";
 import { listWorkspaces, pageCount, pageNumber } from "@/server/services/platform-admin";
 

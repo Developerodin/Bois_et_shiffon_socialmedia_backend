@@ -1,6 +1,6 @@
 import type { IntegrationConnection, Prisma } from "@prisma/client";
 import { z } from "zod";
-import type { CatalogSync, SyncReason } from "@espanda/shared";
+import type { CatalogSync, SyncReason } from "@/shared";
 import { SHOPIFY_REFUSED, shopifyVariants, type ShopifyVariant } from "@/server/catalog/shopify";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";

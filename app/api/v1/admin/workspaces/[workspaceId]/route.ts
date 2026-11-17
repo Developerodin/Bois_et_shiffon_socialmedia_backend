@@ -1,4 +1,4 @@
-import type { AdminWorkspaceDetail } from "@espanda/shared";
+import type { AdminWorkspaceDetail } from "@/shared";
 import { adminOnly, notFoundResponse, wire } from "@/server/api/admin-route";
 import { workspaceDetail } from "@/server/services/platform-admin";
 

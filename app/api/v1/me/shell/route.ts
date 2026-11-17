@@ -1,4 +1,4 @@
-import type { ShellResponse } from "@espanda/shared";
+import type { ShellResponse } from "@/shared";
 import { problemResponse } from "@/server/api/http-error";
 import { requestUserId } from "@/server/auth/request-user";
 import { effectivePermissions } from "@/server/auth/permissions";

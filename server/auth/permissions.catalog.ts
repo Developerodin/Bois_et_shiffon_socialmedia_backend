@@ -2,7 +2,7 @@
  * Permission catalog — single source of truth for permission keys (ported from
  * Cad `permissions.catalog.ts`). Keys are `resource.action`. Roles store keys.
  */
-import { PERMISSIONS, type PermissionKey } from "@espanda/shared";
+import { PERMISSIONS, type PermissionKey } from "@/shared";
 
 export { PERMISSIONS, type PermissionKey };
 export const PERMISSION_KEYS = PERMISSIONS.map(([key]) => key) as PermissionKey[];

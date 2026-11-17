@@ -1,4 +1,4 @@
-import { NO_WORKSPACE, period, type AdminPersonTimeline } from "@espanda/shared";
+import { NO_WORKSPACE, period, type AdminPersonTimeline } from "@/shared";
 import { adminOnly, notFoundResponse, queryOf, usdInr, wire } from "@/server/api/admin-route";
 import { personSummary, personTimeline } from "@/server/services/activity";
 import { pageCount, parseCursor, pickerOptions } from "@/server/services/platform-admin";

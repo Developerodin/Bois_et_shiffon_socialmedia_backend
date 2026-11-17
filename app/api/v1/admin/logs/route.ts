@@ -1,4 +1,4 @@
-import { period, type AdminLogsResponse, type LogKind } from "@espanda/shared";
+import { period, type AdminLogsResponse, type LogKind } from "@/shared";
 import { adminOnly, queryOf, usdInr, wire } from "@/server/api/admin-route";
 import { LOG_FILTERS, pageCount, parseCursor, peopleMatching, pickerOptions, platformLogs } from "@/server/services/platform-admin";
 

@@ -1,4 +1,4 @@
-import type { AdminOverview } from "@espanda/shared";
+import type { AdminOverview } from "@/shared";
 import { adminOnly, usdInr, wire } from "@/server/api/admin-route";
 import { platformOverview } from "@/server/services/platform-admin";
 

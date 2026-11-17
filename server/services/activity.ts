@@ -1,4 +1,4 @@
-import type { ActivitySort } from "@espanda/shared";
+import type { ActivitySort } from "@/shared";
 import { prisma } from "@/server/db/prisma";
 import { cursorOf, type Cursor, nameLookup, olderThan, PAGE, TEST_WORKSPACE } from "@/server/services/platform-admin";
 

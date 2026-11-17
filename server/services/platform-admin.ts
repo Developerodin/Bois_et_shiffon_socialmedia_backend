@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import { ADMIN_PAGE_SIZE, type LogKind, type MemberPermissions, type WorkspaceSort } from "@espanda/shared";
+import { ADMIN_PAGE_SIZE, type LogKind, type MemberPermissions, type WorkspaceSort } from "@/shared";
 import { LEGACY_ROLE_SLUG, PERMISSIONS, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { prisma } from "@/server/db/prisma";
 
