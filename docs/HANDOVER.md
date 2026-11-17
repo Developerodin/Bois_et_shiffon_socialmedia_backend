@@ -44,7 +44,8 @@ Note which routes really rendered (admin may be redirected to /welcome or /admin
 1. Credits chip, its popover and the 402 dialog (the dialog was never reached in a manual check).
 2. Priced buttons against a real balance.
 3. Overview panel menu by keyboard: Move and Hide keep focus, Escape and Collapse return focus to "panel options".
-4. The menu sheet at 320, 767 and 768 px.
+4. The menu sheet at 320, 767 and 768 px; also the Settings members table at 768 to 1280 px: a wide table scrolls inside
+   its card instead of spilling out.
 5. Wide screens (1280 px and up): horizontal scroll, now that the page-level overflow clip is gone.
 6. "Create a business" by keyboard: Enter opens it, focus lands in the name field, Escape returns to "Select business",
    and the page is still clickable afterwards. Radix can leave `pointer-events: none` on the page after a menu-to-dialog
@@ -54,7 +55,6 @@ Note which routes really rendered (admin may be redirected to /welcome or /admin
 
 **Deferred minors (for a final fix round)**
 - `ai-models-tab`: missing `pb-0` when ready (about 32px dead space); check the long `usedBy` badge on a narrow screen.
-- Credits chip and sidebar import `tool` from the top bar (circular import in the chip): move it to a shared file.
 - `JobProgress`: the slow/failed notices need a live role (the failed line has none; they mount with their content, so
   screen readers may skip them). Fix before feature 2 renders it. Also aria-valuenow is not clamped and empty steps read
   "Done".
