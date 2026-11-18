@@ -249,8 +249,10 @@ async function openaiShots(sourceKey: string, prompt: string, ratio: ShootRatio,
 /**
  * What the app shows: the request, the source and finished shots as signed links (1 h). `download` also signs a
  * save-as link per shot; only the single read asks, so a list of 50 shoots doesn't sign hundreds of extra links.
+ * `coverOnly` (the list) signs the source and the first shot only, the one image a card shows; the other shots come
+ * with their key and no `url`, so the apps still count them.
  */
-export async function shootView(s: PhotoShoot, { download = false }: { download?: boolean } = {}) {
+export async function shootView(s: PhotoShoot, { download = false, coverOnly = false }: { download?: boolean; coverOnly?: boolean } = {}) {
   const input = { ...(s.input as ShootRequest & { imageUrl?: string }) };
   delete input.imageUrl; // the signed link kept for Higgsfield resends
   return {
@@ -267,7 +269,7 @@ export async function shootView(s: PhotoShoot, { download = false }: { download?
     shots: await Promise.all(
       s.outputKeys.map(async (key, i) => ({
         key,
-        url: await signedMediaUrl(key),
+        ...((!coverOnly || i === 0) && { url: await signedMediaUrl(key) }),
         ...(download && { downloadUrl: await signedMediaUrl(key, 3600, `photoshoot-${s.id.slice(0, 8)}-${i + 1}.jpg`) }),
       })),
     ),
@@ -277,7 +279,7 @@ export async function shootView(s: PhotoShoot, { download = false }: { download?
 export async function listShoots(scope: Scope) {
   // ponytail: the latest 50; page when a brand has more.
   const rows = await prisma.photoShoot.findMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, orderBy: { createdAt: "desc" }, take: 50 });
-  return Promise.all(rows.map((r) => shootView(r)));
+  return Promise.all(rows.map((r) => shootView(r, { coverOnly: true })));
 }
 
 export async function getShoot(scope: Scope, id: string) {

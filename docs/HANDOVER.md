@@ -18,7 +18,9 @@ Branch `feature-2-photoshoot` in the server, web and mobile repos (not merged). 
   brief limit (600). The server's zod schema and the web read it; the phone's `SHOOT_TIERS` is built from it.
 - **Server changes** (additive, except the first). Media upload now needs `content.create` instead of `publish.execute`.
   Each shot of a single shoot read carries a `downloadUrl` that saves as `photoshoot-<first 8 characters of the id>-<n>.jpg`; the list and the
-  create answer do not sign download links. Uploads are limited to 60 an hour per user.
+  create answer do not sign download links. The list signs only the source and the first shot of each shoot (what a
+  card shows); the other shots come with their key and no `url` (`Shoot.shots[].url` is optional in the shared type).
+  The single read and the create answer sign every shot. Uploads are limited to 60 an hour per user.
 - **Kit.** `SegmentedRadios` (the pill radio group; the library's `SourceSwitch` now wraps it) and `ChoiceCards` (see
   `docs/DESIGN_SYSTEM.md` section 7). `JobProgress` and `LibraryPicker` now have their consumer. `useJob` gained `stopOn`
   and `status`; `SIGNED_LINK_STALE_MS` (`lib/signed-links.ts`) is the one rule for when signed links are re-read.

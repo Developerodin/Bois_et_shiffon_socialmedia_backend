@@ -42,6 +42,15 @@ describe("photoshoot contract", () => {
     expect(view.shots).toEqual([{ key: "k1", url: "https://s/k1" }]);
     expect(signedMediaUrl).not.toHaveBeenCalledWith("k1", 3600, expect.anything());
   });
+
+  it("signs only the source and the first shot for the list, which shows one image per shoot", async () => {
+    vi.mocked(signedMediaUrl).mockClear();
+    const row = { id: "abcdef12-3456", kind: "product", tier: "base", status: "DONE", input: { sourceKey: "src" }, credits: 4, createdAt: new Date(0), outputKeys: ["k1", "k2", "k3"] } as unknown as PhotoShoot;
+    const view = await shootView(row, { coverOnly: true });
+    expect(view.sourceUrl).toBe("https://s/src");
+    expect(view.shots).toEqual([{ key: "k1", url: "https://s/k1" }, { key: "k2" }, { key: "k3" }]);
+    expect(signedMediaUrl).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("press request ids", () => {
