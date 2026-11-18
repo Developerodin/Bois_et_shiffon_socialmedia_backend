@@ -31,17 +31,29 @@ type Emit = (event: PlanEvent) => void;
  */
 export function streamPlan(run: (emit: Emit) => Promise<unknown>) {
   const encoder = new TextEncoder();
+  // Set once the reader is gone (cancel, or an enqueue that throws). The run still finishes and saves; nobody is sent lines.
+  let gone = false;
   return new Response(new ReadableStream({
     async start(controller) {
-      const send = (line: object) => controller.enqueue(encoder.encode(`${JSON.stringify(line)}\n`));
+      const send = (line: object) => {
+        if (gone) return;
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(line)}\n`));
+        } catch {
+          gone = true;
+        }
+      };
       try {
         send({ type: "done", result: await run(send) });
       } catch (error) {
         const problem = (await toReelProblem(error).json().catch(() => ({}))) as { status?: number; detail?: string; title?: string; code?: string; planRequired?: boolean };
         send({ type: "error", status: problem.status ?? 500, detail: problem.detail ?? problem.title ?? "Something went wrong", code: problem.code, planRequired: problem.planRequired });
       } finally {
-        controller.close();
+        if (!gone) controller.close();
       }
+    },
+    cancel() {
+      gone = true;
     },
   }), { headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-store" } });
 }
@@ -317,6 +329,7 @@ export async function recheckQuality(scope: Omit<Scope, "userId">, itemId: strin
 /** After a manual post: the link the person pasted back, so the reel's results can be followed. */
 export const registerPostLink = (scope: Scope, itemId: string, url: string) => registerManualPost(scope, itemId, url, "reel");
 
+// ponytail: scans the brand's content items (no studio index); add @@index([workspaceId, brandId, studio, createdAt]) if a brand passes a few thousand.
 export async function listReels(scope: Omit<Scope, "userId">) {
   const items = await prisma.contentItem.findMany({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId, studio: true },
