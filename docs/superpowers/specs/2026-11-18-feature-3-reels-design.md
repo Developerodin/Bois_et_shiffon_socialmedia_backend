@@ -1,7 +1,7 @@
 # Feature 3 · Reels studio on the website — design
 
-Date: 2026-11-18. Status: draft for the owner. The open questions are in §9. Each one has a recommended answer, and
-the slices in §7 assume those answers.
+Date: 2026-11-18. Status: approved by the owner on 2026-11-18. The owner's answers to §9 are recorded there: the
+recommended answer for Q1–Q5, and for Q6 an audio upload for scene takes is in feature 3 (slice 3b, §5.6).
 Repos (side by side): `apps/server`, `apps/web`, `apps/mobile`. Parent spec:
 `docs/superpowers/specs/2026-11-17-foundations-design.md` (Step 0, merged). Model: feature 2
 (`2026-11-18-feature-2-photoshoot-design.md`, merged). Finding ids (C-4, I-2, MC1, Mi2…) refer to
@@ -355,6 +355,14 @@ Both use one `AudioRecorder` part (design-ux 6.11).
     you recorded. Record scene N again."
   - Errors: 413/400 shown as the server words them ("Keep it under 15 seconds.", "That recording is empty."); 429
     "Too many recordings for now."
+  - **Upload a file instead** (Q6, owner 2026-11-18): a native file input in the same dialog,
+    `accept=".m4a,.mp4,.webm,audio/mp4,audio/x-m4a,audio/webm"`. Files over `MAX_RECORDING_BYTES` are refused before
+    upload ("Keep the file under 1 MB."). The file goes through the same call, timeout, check and result as a take
+    (`POST /recordings` sniffs the bytes, measures the length and transcribes), so the 15 s cap, the transcript match
+    and the rate limits are the server's, not the browser's. A wrong format comes back as the server's 400. No
+    server change. It needs no microphone, so it shows even when the microphone is refused or missing. *(Ceiling:
+    an upload can carry anyone's voice, as a take played from a speaker could; the transcript must still match the
+    script. Clones still never take files.)*
 - **Clone a voice** (dialog, `voices.manage` only):
   - The reading language (Q5), then `GET /voices/clones/challenge?lang=`, and the sentences shown as one passage.
   - A name (≤40).
@@ -419,7 +427,8 @@ and as the owner settled for the photoshoot (A7). Cloning stays admin-only (`voi
   `aria-pressed`.
 - Photo moves: Move earlier / Move later buttons; after a move, focus stays on the moved photo and "Photo moved to
   scene 2 of 4" is announced. Scene thumbnails use the scene's shot as alt text. Transitions are text.
-- Recorder: the rules in §5.6. "Recording started", "10 seconds left" and "Stopped" are announced once each. "Checking
+- Recorder: the rules in §5.6. The file input is the route for people who can't use a microphone; it has a visible
+  label ("Or upload an audio file, up to 15 seconds"). "Recording started", "10 seconds left" and "Stopped" are announced once each. "Checking
   what we heard…" and the result go in a live region. The transcript is text.
 - Video: native `<video controls>`, no autoplay, and the transcript beside it (1.2.1 / 1.2.3). **Captions: see Q2.**
   With Q2(a) yes, the preview carries `<track kind="captions" default>` from S8's cues whenever the reel has a
@@ -495,7 +504,7 @@ and as the owner settled for the photoshoot (A7). Cloning stays admin-only (`voi
 - **3b · Presenter, photos, script, voice, record, clone.**
   - Server: S9.
   - Web: Presenter step and Make a presenter, template Preview, Photos (picker per scene, moves), Script & voice
-    (per-scene text, Voices sheet with library), `AudioRecorder`, scene takes, Clone a voice. Three paid buttons with
+    (per-scene text, Voices sheet with library), `AudioRecorder`, scene takes (recorded or uploaded, Q6), Clone a voice. Three paid buttons with
     §5.4 rules.
   - Alone: everything before rendering is possible on the web.
 - **3c · Render, review and publish.**
@@ -531,6 +540,9 @@ and as the owner settled for the photoshoot (A7). Cloning stays admin-only (`voi
 - Creators may spend credits on reels, as the owner settled for the photoshoot (A7); cloning stays admin-only.
 
 ## 9. Open questions for the owner (recommended answer first)
+
+Answered by the owner on 2026-11-18: Q1–Q5 as recommended (Q2: (a) yes, (b) not in feature 3). **Q6: add the
+upload now** (§5.6, slice 3b).
 
 1. **Where does the planning chat live?** *Recommended:* inside the reel page's Plan step (centre column); on
    `/reels/*` the global assistant panel starts collapsed. *Alternative (design-ux I3):* the global assistant panel
@@ -586,6 +598,8 @@ and as the owner settled for the photoshoot (A7). Cloning stays admin-only (`voi
   - Close the tab mid-plan, reopen: the reel is there, with one reel only.
   - A phone and a tab send a message at once: one is told to wait.
   - Record a take in Chrome, Firefox and Safari: accepted.
+  - Upload an M4A and a WebM take: accepted; an Ogg or MP3 file: the server's 400; a 20 s file: "Keep it under 15
+    seconds."
   - Clone: consent text matches the server's; no upload button.
   - A 402 opens the paywall.
   - Keyboard through the rail, every radio group, the recorder and the player.
