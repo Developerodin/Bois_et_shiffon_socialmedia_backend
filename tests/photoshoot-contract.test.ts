@@ -27,11 +27,19 @@ describe("photoshoot contract", () => {
 
   it("gives each shot a download link named after the shoot", async () => {
     const row = { id: "abcdef12-3456", kind: "product", tier: "base", status: "DONE", input: { sourceKey: "src" }, credits: 4, createdAt: new Date(0), outputKeys: ["k1", "k2"] } as unknown as PhotoShoot;
-    const view = await shootView(row);
+    const view = await shootView(row, { download: true });
     expect(view.shots).toEqual([
       { key: "k1", url: "https://s/k1", downloadUrl: "https://s/k1?dl=photoshoot-abcdef12-1.jpg" },
       { key: "k2", url: "https://s/k2", downloadUrl: "https://s/k2?dl=photoshoot-abcdef12-2.jpg" },
     ]);
     expect(signedMediaUrl).toHaveBeenCalledWith("k1", 3600, "photoshoot-abcdef12-1.jpg");
+  });
+
+  it("leaves the download links off unless asked, as in the list", async () => {
+    vi.mocked(signedMediaUrl).mockClear();
+    const row = { id: "abcdef12-3456", kind: "product", tier: "base", status: "DONE", input: { sourceKey: "src" }, credits: 4, createdAt: new Date(0), outputKeys: ["k1"] } as unknown as PhotoShoot;
+    const view = await shootView(row);
+    expect(view.shots).toEqual([{ key: "k1", url: "https://s/k1" }]);
+    expect(signedMediaUrl).not.toHaveBeenCalledWith("k1", 3600, expect.anything());
   });
 });

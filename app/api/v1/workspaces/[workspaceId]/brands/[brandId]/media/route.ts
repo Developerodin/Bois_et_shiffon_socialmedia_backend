@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { LIBRARY_MAX, MEDIA_MAX_BYTES } from "@/shared";
+import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
 import { imageType, mediaKey, putMedia, signedMediaUrl } from "@/server/storage/media";
 
@@ -18,6 +19,8 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     // Creators upload the photo they shoot (owner, 2026-11-18); every role with publish.execute also has content.create.
     const scope = await authorizeBrandRoute(request, context.params, "content.create");
     if (scope instanceof Response) return scope;
+    // ponytail: 60 an hour per user, shared by the web and the phone; each upload writes a file nobody may ever publish.
+    if (!(await hitRateLimit(`media-upload:${scope.userId}`, 60, 3_600_000)).allowed) return invalid("Too many uploads. Try again in a while.", 429);
     if (Number(request.headers.get("content-length") ?? 0) > MEDIA_MAX_BYTES + 64 * 1024) return invalid("Images can be up to 4 MB", 413);
 
     const form = (await request.formData().catch(() => null)) ?? new FormData();

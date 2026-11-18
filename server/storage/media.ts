@@ -67,6 +67,8 @@ export async function putMedia(
 
 /** Short-lived read URL, e.g. for Meta to fetch media at publish time. With `downloadAs` the browser saves it under that name. */
 export function signedMediaUrl(key: string, expiresInSeconds = 3600, downloadAs?: string) {
+  // The name goes inside a quoted header value: only plain file names, never a quote or line break.
+  if (downloadAs !== undefined && !FILE_NAME.test(downloadAs)) throw new Error("Invalid download file name");
   return getSignedUrl(
     s3,
     new GetObjectCommand({
