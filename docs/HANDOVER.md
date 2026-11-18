@@ -17,11 +17,14 @@ Branch `feature-2-photoshoot` in the server, web and mobile repos (not merged). 
 - **Shared contract.** `shared/photoshoot.ts` in the server holds the request shape, tiers, credit prices, ratios and the
   brief limit (600). The server's zod schema and the web read it; the phone's `SHOOT_TIERS` is built from it.
 - **Server changes** (additive, except the first). Media upload now needs `content.create` instead of `publish.execute`.
-  Each shot of a single shoot read carries a `downloadUrl` that saves as `photoshoot-<id>-<n>.jpg`; the list and the
+  Each shot of a single shoot read carries a `downloadUrl` that saves as `photoshoot-<first 8 characters of the id>-<n>.jpg`; the list and the
   create answer do not sign download links. Uploads are limited to 60 an hour per user.
 - **Kit.** `SegmentedRadios` (the pill radio group; the library's `SourceSwitch` now wraps it) and `ChoiceCards` (see
   `docs/DESIGN_SYSTEM.md` section 7). `JobProgress` and `LibraryPicker` now have their consumer. `useJob` gained `stopOn`
-  and `status`; `SIGNED_LINK_STALE_MS` is the one rule for when signed links are re-read.
+  and `status`; `SIGNED_LINK_STALE_MS` (`lib/signed-links.ts`) is the one rule for when signed links are re-read.
+- **Double-press guard.** Generate and Try again ignore the second click of a double-click and stay off for 1.5 s
+  (`PRESS_COOLDOWN_MS` in `components/photoshoot/press.ts`) after a shoot starts, so a held Enter can't start a second,
+  charged shoot. Variation stays off after it succeeds until the studio replaces the page.
 
 **Calls made in the spec** (cost if wrong is one string or one condition each)
 - Creators may spend credits on a shoot, same as the phone (owner answer to the feature 1 question).
@@ -71,8 +74,9 @@ generation (no provider credits); the 402 dialog; the 60-an-hour upload 429 (and
 - Small things left: "Open full size" (a shot with no download link) may be blocked as a popup; Download gives no
   feedback while a stale shoot is re-read; a 403 on a shoot shows "Couldn't load" with Try again; a missing shoot returns
   HTTP 200 with the not-found page; the empty filter reads "No photoshoots yet."; focus is not moved to "This shoot" after
-  Generate; the brief field lacks `aria-required`; each shoot read signs its links twice (2N presigns); the media route's
-  download file name is not escaped (only the fixed-pattern caller exists).
+  Generate; the brief field lacks `aria-required`; each shoot read signs its links twice (2N presigns).
+- The website copies the phone's English wording by hand (`components/photoshoot/labels.ts`, `shoot.ts`, from the
+  phone's `photoshoot.json`); nothing checks the two match, so keep them in step.
 
 ## Feature 1: brand look and photo library on the web (2026-11-17)
 
@@ -89,7 +93,7 @@ Branch `feature-1-brand-library` in the server, web and mobile repos (not merged
 - One page, "Brand & photos". Files over 4 MB are refused in the browser, before any request.
 - Server permissions: add photo = `publish.execute` (feature 2 changed it to `content.create`, so Creators can upload); remove photo, colours and tones = `context.edit`.
 - Logo is read-only; fonts, tagline and audience are not shown.
-- Open for feature 2: may Creators spend the whole workspace's credits?
+- Answered 2026-11-18: Creators may spend the workspace's credits on a photoshoot, as on the phone.
 
 **Manual checks for the owner**
 - Flag off: `/library` is 404 and there is no nav entry.

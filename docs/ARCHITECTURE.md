@@ -453,7 +453,7 @@ How to read the columns:
 | 73 | POST | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/content` | session or Bearer | `content.create` | New post or story (writer + quality check) | phone | `maxDuration` 300; paid story once per `requestId`; `kickRunner`. |
 | 74 | GET | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/[contentId]` | session or Bearer | `brand.read` | Approval and publish history, destinations, story frames | both | `maxDuration` 300 on file. |
 | 75 | POST | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/[contentId]` | session or Bearer | by `action`: `content.create` (edit, editStory, rewrite, duplicate, delete); `content.approve` (decide); `publish.execute` (publish, cancel, posted, not-posted, postRest, markDone, settleFrame, byHand, postedByHand) | Every post action | both | `kickRunner` on several actions. |
-| 76 | POST | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/media` | session or Bearer | `publish.execute` | Upload one image (multipart); `library=1` adds to photo library | both | **Upload**, 4 MB max (comment cites Vercel's 4.5 MB body cap); library max 60. |
+| 76 | POST | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/media` | session or Bearer | `content.create` | Upload one image (multipart); `library=1` adds to photo library | both | **Upload**, 4 MB max (comment cites Vercel's 4.5 MB body cap); library max 60; 60 an hour per user (429). |
 
 ### 3.11 Stories (5)
 
@@ -491,9 +491,9 @@ How to read the columns:
 
 | # | Method | Path | Auth | Permission | Purpose | Called by | Notes |
 |---|---|---|---|---|---|---|---|
-| 98 | GET | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/photoshoots` | session or Bearer | `brand.read` | Photoshoots, newest first | phone | `maxDuration` 300; `kickIfDue`. |
-| 99 | POST | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/photoshoots` | session or Bearer | `content.create` | New shoot on a tier | phone | `kickRunner` (an OpenAI shoot takes minutes). |
-| 100 | GET | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/photoshoots/[shootId]` | session or Bearer | `brand.read` | One shoot (polled) | phone | `kickIfDue`. |
+| 98 | GET | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/photoshoots` | session or Bearer | `brand.read` | Photoshoots, newest first | both | `maxDuration` 300; `kickIfDue`. No `downloadUrl`. |
+| 99 | POST | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/photoshoots` | session or Bearer | `content.create` | New shoot on a tier | both | `kickRunner` (an OpenAI shoot takes minutes). |
+| 100 | GET | `/api/v1/workspaces/[workspaceId]/brands/[brandId]/photoshoots/[shootId]` | session or Bearer | `brand.read` | One shoot (polled) | both | `kickIfDue`. The only read that carries each shot's `downloadUrl` (an attachment link named `photoshoot-<first 8 of id>-<n>.jpg`). |
 
 ### 3.14 Products and campaigns (11)
 
