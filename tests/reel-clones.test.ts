@@ -124,17 +124,45 @@ describe("the live-reading challenge", () => {
   });
 });
 
+describe("the consent version", () => {
+  it("refuses consent given to older wording, before the challenge is taken", async () => {
+    await expect(createClone(scope, { ...input, consentVersion: "2000-01-01" })).rejects.toMatchObject({ status: 409, code: "clone.consentChanged", message: "The consent text changed. Read it again, then tick the box." });
+    expect(m.take).not.toHaveBeenCalled();
+    expect(m.spend).not.toHaveBeenCalled();
+  });
+
+  it("accepts the current version, and none at all (the phone doesn't send it)", async () => {
+    elevenLabs(Response.json({ voice_id: "el1" }));
+    await expect(createClone(scope, { ...input, consentVersion: CONSENT_VERSION })).resolves.toMatchObject({ repeated: false });
+    await expect(createClone(scope, input)).resolves.toMatchObject({ repeated: false });
+  });
+});
+
 describe("clone request ids", () => {
   const RID = "6f1c2c1e-6a43-4c1b-9a3e-2f1d5b7c8a90";
 
   it("returns the first voice on a repeat: one charge, one ElevenLabs call, challenge untouched", async () => {
-    m.prisma.voice.findUnique.mockResolvedValue({ id: RID, workspaceId: "w1", name: "Ma voix" });
+    m.prisma.voice.findUnique.mockResolvedValue({ id: RID, workspaceId: "w1", name: "Ma voix", providerVoiceId: "el1", archivedAt: null });
     vi.stubGlobal("fetch", vi.fn());
     const r = await createClone(scope, { ...input, requestId: RID });
     expect(r).toMatchObject({ repeated: true, voice: { id: RID } });
     expect(m.spend).not.toHaveBeenCalled();
     expect(m.take).not.toHaveBeenCalled();
     expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("won't reuse the request id of a voice that was deleted or given back", async () => {
+    m.prisma.voice.findUnique.mockResolvedValue({ id: RID, workspaceId: "w1", name: "Ma voix", providerVoiceId: "el1", archivedAt: new Date() });
+    await expect(createClone(scope, { ...input, requestId: RID })).rejects.toMatchObject({ status: 409, code: "request.idTaken" });
+    expect(m.take).not.toHaveBeenCalled();
+    expect(m.spend).not.toHaveBeenCalled();
+  });
+
+  it("says a repeat whose voice is still being made is still being made", async () => {
+    m.prisma.voice.findUnique.mockResolvedValue({ id: RID, workspaceId: "w1", name: "Ma voix", providerVoiceId: null, archivedAt: null });
+    await expect(createClone(scope, { ...input, requestId: RID })).rejects.toMatchObject({ status: 409, code: "clone.stillMaking", message: "This voice is still being made. Check back in a minute." });
+    expect(m.take).not.toHaveBeenCalled();
+    expect(m.spend).not.toHaveBeenCalled();
   });
 
   it("won't reuse a request id whose charge was refunded (the first try failed)", async () => {

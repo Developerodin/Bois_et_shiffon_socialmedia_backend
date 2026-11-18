@@ -51,17 +51,23 @@ const audit = (db: Db, workspaceId: string, actorUserId: string | null, action: 
  * Makes a clone: checks the take (same audio checks as recordings, 60–90 s) and our ElevenLabs plan, reserves one of
  * the workspace's two places under a lock, charges, then asks ElevenLabs. A failure gives the place and credits back.
  */
-export async function createClone(scope: Scope, input: { name: string; bytes: Uint8Array; consent: boolean; appVersion?: string; challengeId?: string; requestId?: string }): Promise<{ voice: Voice; repeated: boolean }> {
+export async function createClone(scope: Scope, input: { name: string; bytes: Uint8Array; consent: boolean; consentVersion?: string; appVersion?: string; challengeId?: string; requestId?: string }): Promise<{ voice: Voice; repeated: boolean }> {
   if (!input.consent) throw new PublishingError("Tick the box to confirm this is your own voice.", 400);
   await requirePlan(scope.workspaceId);
   // A retried Clone (same request id) gets the first voice back; checked before the challenge, which that try used up.
   if (input.requestId) {
     const found = await prisma.voice.findUnique({ where: { id: input.requestId } });
     if (found && found.workspaceId !== scope.workspaceId) throw new PublishingError("That request id is already used.", 409, "request.idTaken");
+    // Deleted, withdrawn or given back as abandoned: that id is spent.
+    if (found?.archivedAt) throw new PublishingError("That request id is already used.", 409, "request.idTaken");
+    // The first try is still at ElevenLabs (no provider id yet): its own answer says how it went.
+    if (found && !found.providerVoiceId) throw new PublishingError("This voice is still being made. Check back in a minute.", 409, "clone.stillMaking");
     if (found) return { voice: found, repeated: true };
     // The first try failed and was refunded (its voice released): spendCredits would return that charge, unpaid.
     if (await chargeRefunded(scope.workspaceId, input.requestId)) throw new PublishingError("That request was already tried. Start again.", 409, "request.idTaken");
   }
+  // The web sends the version of the consent text it showed; the phone sends none.
+  if (input.consentVersion !== undefined && input.consentVersion !== CONSENT_VERSION) throw new PublishingError("The consent text changed. Read it again, then tick the box.", 409, "clone.consentChanged");
   // Builds from before the challenge read a fixed passage, which a replayed recording could pass.
   if (!input.challengeId) throw new PublishingError("Update the app to clone a voice.", 409, "clone.updateApp");
   const challenge = await takeChallenge(scope, input.challengeId);

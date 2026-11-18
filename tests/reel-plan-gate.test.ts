@@ -152,7 +152,7 @@ describe("reel planning gate", () => {
 
   it("chat: a stale version is refused before the scriptwriter", async () => {
     m.item.findFirst.mockResolvedValue({ id: "i1", brief: {}, versions: [{ version: 5, body: {} }] });
-    await expect(chatPlan(scope, "i1", { version: 4, message: "x" })).rejects.toMatchObject({ status: 409 });
+    await expect(chatPlan(scope, "i1", { version: 4, message: "x" })).rejects.toMatchObject({ status: 409, code: "reel.changed", message: "This plan changed in the meantime. Reload and try again." });
     expect(m.limit).not.toHaveBeenCalled();
     expect(m.write).not.toHaveBeenCalled();
   });
@@ -204,6 +204,16 @@ describe("reel planning gate", () => {
     m.tx.mockRejectedValue(new PublishingError("This plan changed in the meantime. Reload and try again."));
     const r = await chatPlan(scope, "i1", { version: 1, message: "x", requestId: RID });
     expect(r).toMatchObject({ version: 2, reply: "Done", plan: { title: "Bunting" } });
+  });
+
+  it("edit: a save that finds a newer version is a 409 the app can name", async () => {
+    m.item.findFirst.mockResolvedValue({ id: "i1", brief: {}, versions: [{ version: 1, body }] });
+    m.settle.mockImplementation(async (plan: unknown) => ({ plan, notices: [], dropped: [] }));
+    m.direct.mockImplementation(async (_s: unknown, plan: unknown) => plan);
+    // Another save landed between the read and the lock: the reel is at version 2 under the lock.
+    const tx = { $executeRaw: vi.fn(async () => 0), contentItem: { findFirst: vi.fn(async () => ({ id: "i1", status: "DRAFT_REVIEW", versions: [{ version: 2, body }] })) } };
+    m.tx.mockImplementationOnce(async (f: (t: typeof tx) => unknown) => f(tx));
+    await expect(editPlan(scope, "i1", { version: 1, plan: body as never })).rejects.toMatchObject({ status: 409, code: "reel.changed", message: "This plan changed in the meantime. Reload and try again." });
   });
 
   it("chat: a version race without a saved turn is still a 409", async () => {

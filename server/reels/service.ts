@@ -102,7 +102,7 @@ async function savePlan(scope: Scope, itemId: string, version: number, plan: Ree
   return prisma.$transaction(async (tx) => {
     await lock(tx, itemId);
     const { item, latest } = await loadReel(scope, itemId, tx);
-    if ((latest?.version ?? 0) !== version) throw new PublishingError("This plan changed in the meantime. Reload and try again.");
+    if ((latest?.version ?? 0) !== version) throw new PublishingError("This plan changed in the meantime. Reload and try again.", 409, "reel.changed");
     if (await tx.reelRender.findFirst({ where: { contentItemId: itemId, step: { in: [...ACTIVE] } } })) throw new PublishingError("A video is being made from this plan. Wait for it to finish.", 409);
     if (["SCHEDULED", "PUBLISHED"].includes(item.status)) throw new PublishingError("This reel is already scheduled or posted.", 409);
     const v = await tx.contentVersion.create({ data: { contentItemId: itemId, version: version + 1, body: toVersionBody(plan), createdBy: scope.userId } });
@@ -252,7 +252,7 @@ async function planTurn(scope: Scope, itemId: string, input: ChatInput, emit?: E
     const repeat = savedTurn(item, latest, input.requestId); // the other run committed between the first check and the claim
     if (repeat) return repeat;
   }
-  if ((latest?.version ?? 0) !== input.version) throw new PublishingError("This plan changed in the meantime. Reload and try again.");
+  if ((latest?.version ?? 0) !== input.version) throw new PublishingError("This plan changed in the meantime. Reload and try again.", 409, "reel.changed");
   const picked = input.presenterId ? await donePresenter(scope, input.presenterId) : null;
   if (input.presenterId && !picked) throw new PublishingError("Presenter not found", 404);
   const { ask, turn, template } = picked

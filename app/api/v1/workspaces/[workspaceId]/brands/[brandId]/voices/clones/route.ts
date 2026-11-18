@@ -29,7 +29,7 @@ export async function POST(request: Request, context: Params) {
     if (requestId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) return invalid("requestId must be a UUID.");
     return paidStart(request, { feature: "voice-clone", workspaceId: scope.workspaceId, refId: requestId || null }, async () => {
       try {
-        const { voice, repeated } = await createClone(scope, { requestId: requestId || undefined, name, bytes: new Uint8Array(await file.arrayBuffer()), consent: form.get("consent") === "1", appVersion: String(form.get("appVersion") ?? "").slice(0, 40) || undefined, challengeId: String(form.get("challengeId") ?? "").slice(0, 64) || undefined });
+        const { voice, repeated } = await createClone(scope, { requestId: requestId || undefined, name, bytes: new Uint8Array(await file.arrayBuffer()), consent: form.get("consent") === "1", consentVersion: String(form.get("consentVersion") ?? "").slice(0, 40) || undefined, appVersion: String(form.get("appVersion") ?? "").slice(0, 40) || undefined, challengeId: String(form.get("challengeId") ?? "").slice(0, 64) || undefined });
         return Response.json({ id: `clone:${voice.id}`, name: voice.name }, { status: repeated ? 200 : 201 });
       } catch (e) {
         if (e instanceof InsufficientCreditsError) return Response.json({ insufficientCredits: true, balance: e.balance, needed: e.needed }, { status: 402 });
