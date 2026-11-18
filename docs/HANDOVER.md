@@ -4,6 +4,65 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Feature 3a: reels plan and storyboard on the web (2026-11-18)
+
+Branch `feature-3a-reels` in the server, web and mobile repos (not merged). Plan:
+`docs/superpowers/plans/2026-11-18-feature-3a-reels-plan-storyboard.md`; spec `docs/superpowers/specs/2026-11-18-feature-3-reels-design.md`.
+
+- **What was built.** `/reels` (the home: plan a new reel from a prompt, an idea or a template; the brand's presenters
+  and templates; "Your reels") and `/reels/{id}` (one reel: a steps rail, the plan chat, the storyboard with a preview
+  and scene by scene view). Behind `WEB_FEATURES=reels`. The assistant on `/reels` is a drawer; on other pages it stays docked.
+- **Shared contract.** `shared/reels.ts` in the server holds the reel idea shape, the chat message limit, the reel stage
+  rule and the video model names. The web uses it; the phone mirrors it by hand (comments in `review.tsx` and `storyboard.tsx`).
+- **Server changes** (additive). Planning and chat are safe to repeat: a message carries a request id, and a repeat
+  gets the first answer back. A second message on a reel still being planned gets 409 `reel.stillPlanning`. The reel
+  list and the single read carry what the web needs to build the rail.
+- **Web kit.** `StepsRail` and `PreviewFrame` (see `docs/DESIGN_SYSTEM.md` section 7). The signed link cache and the
+  "don't charge or send twice" press logic were lifted out of the photoshoot into shared files (`lib/presser.ts`);
+  photoshoot behaves as before.
+- **Planning on the web.** Plan creates one reel, and closing the tab mid-plan and reopening finds that one reel, not
+  two. A message sent while the network dies keeps its request id, so sending again is one turn.
+
+**Calls made**
+- The in-flight marker lasts 150 s, not the spec's 6 minutes (owner approved 2026-11-18).
+- Revise pressers live at module level per business, brand and reel, as in photoshoot, so a kept id survives leaving the page.
+- Ideas are read once when the dialog opens, not on every page load.
+
+**Copy written without a source, for the owner to approve**
+- The ideas dialog description: "Pick one and the plan starts from it."
+- The two reels gate lines in `app/(shell)/reels/page.tsx`: "Reels belong to a business. Create or pick one from the
+  sidebar, then its reels show here." and "Your role cannot see this business's reels. Ask a workspace admin for access."
+- The template title fallback in `components/reels/home.tsx`: a template with no label shows its id as the title.
+
+**Manual checks for the owner**
+- [ ] Flag off: `/reels` and `/reels/{id}` are 404 and there is no nav entry.
+- [ ] Plan from a prompt, from an idea and from a template.
+- [ ] Open a phone-made reel on the web.
+- [ ] Close the tab mid-plan and reopen: there is one reel.
+- [ ] A phone and a tab send a message on one reel at once: one is told to wait, both see the reply, and the waiting tab keeps its text.
+- [ ] Send, kill the network mid-stream, send again: one turn.
+- [ ] Press Plan while offline: the offline line shows, no wait.
+- [ ] A Viewer sees the list and the reel with no composer.
+- [ ] No plan: a banner shows, and Plan opens the paywall.
+- [ ] Keyboard through the rail, the chips and the templates.
+- [ ] 375 px: no horizontal scroll.
+- [ ] Switch business on `/reels/{id}`: "Couldn't load this reel", no loop.
+- [ ] At 1440 px on `/reels` the assistant is a drawer: Tab never reaches it while closed; once open, its Close button, the scrim and Escape close it and focus returns to the toggle; it is docked on other pages.
+
+**Not checked live:** nothing in 3a was seen in a browser or on the emulator (build, typecheck, lint and unit tests
+only). No live plan was run (no provider credits). The drawer, the 375 px layout, the offline and two-tab cases, the
+paywall banner and the slide animation between docked and undocked pages at wide widths are all unseen.
+
+**Known limits**
+- `/reels/{id}` has no `scripts/audit-ui.ts` entry because no fixture reel exists. Run the audit by hand against a real reel id.
+- The rendered reel video carries no on-screen text, only the "Made with AI" mark. The web preview hides its text
+  overlay while the video plays, so what the owner sees on the photo is not in the finished video.
+- The in-flight marker is 150 s, a deviation from the spec's 6 minutes. A plan that runs longer than that can be
+  started again by a second press.
+- `listReels` has no studio index, so it gets slower as a brand's reel count grows. Add an index for it before a brand has thousands of reels.
+- The signed link cache never evicts. One entry per reel seen in a tab; a tab left open for days grows slowly. Evict by age if it ever matters.
+- The library page's inline gate is not moved onto `featureAccess`; only the reels pages use it. Move it when the library is next touched.
+
 ## Feature 2: photoshoot on the web (2026-11-18)
 
 Branch `feature-2-photoshoot` in the server, web and mobile repos (not merged). Plan:
