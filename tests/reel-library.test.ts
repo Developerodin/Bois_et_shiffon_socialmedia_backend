@@ -25,6 +25,16 @@ describe("the ElevenLabs voice library", () => {
     expect(r).toEqual({ more: true, voices: [{ id: "library:SptHT9PQ49isQvxFm28t", name: "Agathe", gender: "female", age: "young", accent: "standard", language: "fr", useCase: "social_media", previewUrl: "https://storage.googleapis.com/x.mp3" }] });
   });
 
+  it("drops a preview that isn't an https link", async () => {
+    fetchMock.mockResolvedValue(Response.json({ voices: [
+      { voice_id: "SptHT9PQ49isQvxFm28a", name: "A", preview_url: "http://storage.googleapis.com/x.mp3" },
+      { voice_id: "SptHT9PQ49isQvxFm28b", name: "B", preview_url: "javascript:alert(1)" },
+      { voice_id: "SptHT9PQ49isQvxFm28c", name: "C", preview_url: "not a url" },
+    ] }));
+    const r = await searchLibrary(LibraryQuery.parse({ search: "https-only" }));
+    expect(r.voices.map((v) => v.previewUrl)).toEqual([null, null, null]);
+  });
+
   it("refuses filters it doesn't know", () => {
     expect(LibraryQuery.safeParse({ gender: "robot" }).success).toBe(false);
     expect(LibraryQuery.safeParse({ language: "french" }).success).toBe(false);

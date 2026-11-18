@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { MODEL_IDS, SCENE_KINDS, TRANSITIONS } from "@/server/reels/router";
 import { CREDIT_COSTS } from "@/server/services/credits";
-import { MAX_SCENE_WORDS, REEL_SCENES, type ReelPlan as SharedReelPlan, VOICE_TEXT_MAX } from "@/shared";
+import { MAX_SCENE_WORDS, REEL_SCENES, type ReelPlan as SharedReelPlan, VOICE_TEXT_MAX, wordCount, WORDS_PER_SECOND } from "@/shared";
 
 /**
  * A studio reel's plan (mobile R03/R04/R10–R13), stored as the content version body.
@@ -47,9 +47,6 @@ export type ReelPlan = z.infer<typeof ReelPlan>;
 const _fits = (p: ReelPlan): SharedReelPlan => p;
 void _fits;
 
-const WORDS_PER_SECOND = 2; // R11: "38 words · ~19 sec"
-
-const wordCount = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
 export const speechSeconds = (text: string) => wordCount(text) / WORDS_PER_SECOND;
 export const clipSeconds = (voiceSeconds: number) => Math.min(15, Math.max(3, Math.ceil(voiceSeconds)));
 /** The presenter model's shortest clip (Seedance): a presenter scene is never shorter, and is priced for it. */

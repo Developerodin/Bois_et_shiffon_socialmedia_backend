@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
+import { LIBRARY_FILTERS, type LibraryVoice } from "@/shared";
 
 /**
  * ElevenLabs' public Voice Library (mobile Voices → Library): thousands of voices people can filter by language,
@@ -14,16 +15,14 @@ const VOICE_ID = /^[A-Za-z0-9]{20}$/;
 
 export const LibraryQuery = z.object({
   language: z.string().regex(/^[a-z]{2}$/).optional(),
-  gender: z.enum(["female", "male", "neutral"]).optional(),
-  age: z.enum(["young", "middle_aged", "old"]).optional(),
+  gender: z.enum(LIBRARY_FILTERS.gender).optional(),
+  age: z.enum(LIBRARY_FILTERS.age).optional(),
   accent: z.string().trim().max(40).optional(),
-  useCase: z.enum(["social_media", "narrative_story", "advertisement", "conversational", "informative_educational", "characters_animation"]).optional(),
+  useCase: z.enum(LIBRARY_FILTERS.useCase).optional(),
   search: z.string().trim().max(60).optional(),
   page: z.coerce.number().int().min(0).max(50).default(0),
 });
 export type LibraryQuery = z.infer<typeof LibraryQuery>;
-
-export type LibraryVoice = { id: string; name: string; gender: string | null; age: string | null; accent: string | null; language: string | null; useCase: string | null; previewUrl: string | null };
 
 // ponytail: the library changes slowly: a page is kept 10 minutes per query, in this process only.
 const cache = new Map<string, { at: number; value: { voices: LibraryVoice[]; more: boolean } }>();
@@ -44,9 +43,18 @@ export async function searchLibrary(q: LibraryQuery) {
   if (!res.ok) throw new Error(`ElevenLabs ${res.status}: the voice library didn't answer`);
   const data = (await res.json()) as { voices?: Record<string, unknown>[]; has_more?: boolean };
   const text = (v: unknown) => (typeof v === "string" && v ? v : null);
+  // The preview is played in the web page: only an https link is passed on.
+  const https = (v: unknown) => {
+    const s = text(v);
+    try {
+      return s && new URL(s).protocol === "https:" ? s : null;
+    } catch {
+      return null;
+    }
+  };
   const voices = (data.voices ?? [])
     .filter((v) => typeof v.voice_id === "string" && VOICE_ID.test(v.voice_id))
-    .map((v) => ({ id: `library:${v.voice_id}`, name: text(v.name) ?? "Voice", gender: text(v.gender), age: text(v.age), accent: text(v.accent), language: text(v.language), useCase: text(v.use_case), previewUrl: text(v.preview_url) }));
+    .map((v) => ({ id: `library:${v.voice_id}`, name: text(v.name) ?? "Voice", gender: text(v.gender), age: text(v.age), accent: text(v.accent), language: text(v.language), useCase: text(v.use_case), previewUrl: https(v.preview_url) }));
   const value = { voices, more: !!data.has_more };
   cache.set(key, { at: Date.now(), value });
   if (cache.size > 500) cache.delete(cache.keys().next().value!);

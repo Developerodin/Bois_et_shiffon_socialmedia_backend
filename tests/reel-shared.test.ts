@@ -26,6 +26,7 @@ import { qualityAgent } from "@/server/agents/definitions/quality";
 import { checkDraft } from "@/server/content/rules";
 import { spendCredits } from "@/server/services/credits";
 import { decide, saveDraft, schedulePublication } from "@/server/services/publishing";
+import { wordCount } from "@/shared";
 
 const scope = { workspaceId: "w1", brandId: "b1" };
 const item = (over: object = {}) => ({ id: "i1", ...scope, channel: "INSTAGRAM_REEL", status: "AWAITING_APPROVAL", studio: true, ...over });
@@ -148,5 +149,12 @@ describe("reel checks and agents", () => {
     db.tx.contentItem.findMany.mockResolvedValue([]);
     await qualityAgent.run({ ...(ctx as object), input: { itemId: "i1" } } as never, { itemId: "i1" }).catch(() => null);
     expect(db.tx.contentItem.findMany.mock.calls[0][0].where).toMatchObject({ id: "i1" });
+  });
+});
+
+describe("shared word count", () => {
+  it("counts words across spaces and new lines, and none in an empty text", () => {
+    expect(wordCount("  a  b\nc ")).toBe(3);
+    expect(wordCount("")).toBe(0);
   });
 });
