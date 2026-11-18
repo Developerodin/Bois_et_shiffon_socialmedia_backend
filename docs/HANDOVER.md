@@ -37,8 +37,10 @@ Branch `feature-2-photoshoot` in the server, web and mobile repos (not merged). 
 - A press that never got an answer (network or server down) re-sends with the same request id, so a double click or a
   retry is one shoot and one charge. A changed request, or any answer from the server, starts a new id.
 - Variation runs the same setup again and charges again; it is not offered on running or failed shoots.
-- The list and the shoot page poll while a shoot runs (about twice the read load of one). Fine at this size.
-- A shoot the server never finishes is failed by the server after an hour; until then the list keeps polling.
+- While "This shoot" runs, only it polls (5 s for 2 minutes, 10 s to 10 minutes, then 30 s); the list polls (10 s)
+  only for other running shoots, and reads once more when "This shoot" ends so its card updates. The shoot page polls
+  on the same steps.
+- A shoot the server never finishes is failed by the server after an hour; until then its poll keeps going.
 - Switching business on `/photoshoot?shoot=...` shows an empty "This shoot", never a loop (404 and 403 stop polling).
 
 **Manual checks for the owner**
