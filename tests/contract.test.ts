@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { CLONE_PASSAGES, clonePassage, HUES, isInsufficientCredits, isPlanRequired, libraryPhotos, nearestHue, normalizeHex, shade, siteLabel, TONE_GROUPS, TONES, type BrandAssetsView } from "@/shared";
+import { CLONE_PASSAGES, clonePassage } from "@/shared/contract/clone-passages";
+import { HUES, isInsufficientCredits, isPlanRequired, libraryPhotos, nearestHue, normalizeHex, shade, siteLabel, TONE_GROUPS, TONES, type BrandAssetsView } from "@/shared";
 
 describe("shared contract", () => {
   it("tells the two paywall refusals apart", () => {

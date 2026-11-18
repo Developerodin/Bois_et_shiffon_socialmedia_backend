@@ -11,7 +11,7 @@ vi.mock("@/server/db/transient", () => ({
 }));
 
 import { makeChallenge, readInOrder, takeChallenge } from "@/server/reels/clone-challenge";
-import { CLONE_PASSAGES } from "@/shared";
+import { CLONE_PASSAGES } from "@/shared/contract/clone-passages";
 
 const scope = { workspaceId: "w1", userId: "u1" };
 const split = (t: string) => t.split(/(?<=[.!?。！？।])\s*/).filter(Boolean);

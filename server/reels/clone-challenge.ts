@@ -2,7 +2,7 @@ import { randomInt, randomUUID } from "node:crypto";
 import { putTransient, takeTransient } from "@/server/db/transient";
 import { words as wordsOf } from "@/server/reels/recordings";
 import { PublishingError } from "@/server/services/publishing";
-import { clonePassage } from "@/shared";
+import { clonePassage } from "@/shared/contract/clone-passages";
 
 /**
  * The voice-clone challenge: the clone passage in the person's language, its sentences shuffled afresh per attempt and
