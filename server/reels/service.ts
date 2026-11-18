@@ -18,7 +18,7 @@ import { creditBalance } from "@/server/services/credits";
 import { decide, lock, PublishingError, TX } from "@/server/services/publishing";
 import { signedMediaUrl } from "@/server/storage/media";
 import { PlanRequiredError, requirePlan } from "@/server/services/subscriptions";
-import { CHAT_MESSAGE_MAX, type ChatTurn, type PlanEvent } from "@/shared";
+import { answeredTurn, CHAT_MESSAGE_MAX, type ChatTurn, type PlanEvent } from "@/shared";
 
 /** Mobile Reels studio (R01–R13): create, chat, edit, send, register a manual post. Rendering is render.ts. */
 type Scope = { workspaceId: string; brandId: string; userId: string };
@@ -121,6 +121,20 @@ async function planGate(scope: Scope) {
   if (!(await hitRateLimit(limitKey("reel-plan:brand", scope.brandId), 20, 3_600_000)).allowed) throw new PublishingError("You've planned a lot of reels this hour. Try again later.", 429);
 }
 
+/**
+ * Claims `marker`, runs `run`, and always awaits the drop (so a reply never reaches the client while the marker is held).
+ * A held marker is a 409 reel.stillPlanning with `message`; nothing is counted against the hourly cap for it.
+ * ponytail: route maxDuration 120 s + 30 s; a run killed before its finally frees the reel after this.
+ */
+async function onePlanAtATime<T>(marker: string, scope: Scope, message: string, run: () => Promise<T>): Promise<T> {
+  if (!(await claimTransient(marker, scope, 150_000))) throw new PublishingError(message, 409, "reel.stillPlanning");
+  try {
+    return await run();
+  } finally {
+    await dropTransient(marker).catch(() => {});
+  }
+}
+
 /** A reel already made under this request id: this brand's comes back as created; anyone else's is a 409. */
 async function reelForRequest(scope: Scope, requestId: string) {
   const found = await prisma.contentItem.findUnique({ where: { id: requestId } });
@@ -143,17 +157,16 @@ export async function createReel(scope: Scope, input: { opportunityId?: string; 
     await planGate(scope);
     return planReel(scope, input, emit);
   }
-  const made = await reelForRequest(scope, input.requestId);
+  const requestId = input.requestId;
+  const made = await reelForRequest(scope, requestId);
   if (made) return made;
-  await planGate(scope);
-  const marker = `reel-plan:${input.requestId}`;
-  // ponytail: 6 min covers the route's 330 s budget; a run that outlives it could be started again by a retry.
-  if (!(await claimTransient(marker, scope, 360_000))) throw new PublishingError("This reel is still being planned.", 409, "reel.stillPlanning");
-  try {
-    return await planReel(scope, input, emit);
-  } finally {
-    await dropTransient(marker).catch(() => {});
-  }
+  // Claim before counting: a repeat that finds the marker held must not use up one of the 20 an hour.
+  return onePlanAtATime(`reel-plan:${requestId}`, scope, "This reel is still being planned.", async () => {
+    const again = await reelForRequest(scope, requestId); // the other run may have finished between the check and the claim
+    if (again) return again;
+    await planGate(scope);
+    return planReel(scope, input, emit);
+  });
 }
 
 async function planReel(scope: Scope, input: { opportunityId?: string; prompt?: string; language?: string; templateId?: string; requestId?: string }, emit?: Emit) {
@@ -190,7 +203,36 @@ const PRESENTER_ASK = "The brand's presenter now appears in this reel: pick the 
  * R04: the person says what they want (or what's wrong with the video); the scriptwriter revises the plan.
  * A template (R12) or a presenter (R10) is sent the same way, with `message` its name in the app's language.
  */
-export async function chatPlan(scope: Scope, itemId: string, input: { version: number; message?: string; language?: string; templateId?: string; presenterId?: string }, emit?: Emit) {
+export async function chatPlan(scope: Scope, itemId: string, input: ChatInput, emit?: Emit) {
+  // Tenant check first: a foreign id and a missing id both 404 here, before anything is claimed or counted.
+  const owned0 = await prisma.contentItem.findFirst({ where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId, studio: true }, select: { brief: true } });
+  if (!owned0) throw new PublishingError("Reel not found", 404);
+  const { requestId } = input;
+  if (requestId && typeof answeredTurn(chatOf(owned0.brief), requestId) === "string") {
+    const { item, latest } = await loadReel(scope, itemId);
+    const repeat = savedTurn(item, latest, requestId);
+    if (repeat) return repeat;
+  }
+  return onePlanAtATime(`reel-chat:${itemId}`, scope, "This reel is still being planned. Wait for the reply.", () => planTurn(scope, itemId, input, emit));
+}
+
+type ChatInput = { version: number; message?: string; language?: string; templateId?: string; presenterId?: string; requestId?: string };
+
+/** The reply already saved for a chat message sent with `requestId`, as chatPlan would have returned it. */
+function savedTurn(item: { brief: unknown }, latest: { version: number; body: unknown } | null, requestId: string) {
+  const reply = answeredTurn(chatOf(item.brief), requestId);
+  if (typeof reply !== "string" || !latest || !isStudioPlan(latest.body)) return null;
+  const plan = ReelPlan.parse(latest.body);
+  return { version: latest.version, plan, price: reelPrice(plan), reply, droppedRecordings: [] as number[] };
+}
+
+async function planTurn(scope: Scope, itemId: string, input: ChatInput, emit?: Emit) {
+  const { item, latest } = await loadReel(scope, itemId);
+  if (input.requestId) {
+    const repeat = savedTurn(item, latest, input.requestId); // the other run committed between the first check and the claim
+    if (repeat) return repeat;
+  }
+  if ((latest?.version ?? 0) !== input.version) throw new PublishingError("This plan changed in the meantime. Reload and try again.");
   const picked = input.presenterId ? await donePresenter(scope, input.presenterId) : null;
   if (input.presenterId && !picked) throw new PublishingError("Presenter not found", 404);
   const { ask, turn, template } = picked
@@ -198,7 +240,6 @@ export async function chatPlan(scope: Scope, itemId: string, input: { version: n
     : templateAsk(input.templateId, input.message);
   await planGate(scope);
   emit?.({ type: "stage", stage: "reading" });
-  const { item, latest } = await loadReel(scope, itemId);
   const saved = isStudioPlan(latest?.body) ? ReelPlan.parse(latest!.body) : undefined;
   if (picked && !saved) throw new PublishingError("Plan the reel first, then add a presenter.", 400);
   const current = saved && picked ? { ...saved, presenter: picked.id } : saved;
@@ -216,7 +257,7 @@ export async function chatPlan(scope: Scope, itemId: string, input: { version: n
   const now = new Date().toISOString();
   // A recording the revision dropped is said in the reply, where the person reads the chat.
   const said = [reply, ...settled.notices].join("\n");
-  const v = await savePlan(scope, itemId, input.version, ready, [...chat, { role: "user", text: (turn ?? "").slice(0, CHAT_MESSAGE_MAX), at: now }, { role: "assistant", text: said, at: now }]);
+  const v = await savePlan(scope, itemId, input.version, ready, [...chat, { role: "user", text: (turn ?? "").slice(0, CHAT_MESSAGE_MAX), at: now, ...(input.requestId && { requestId: input.requestId }) }, { role: "assistant", text: said, at: now }]);
   return { version: v.version, plan: ready, price: reelPrice(ready), reply, droppedRecordings: settled.dropped };
 }
 
