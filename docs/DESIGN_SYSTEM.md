@@ -94,11 +94,13 @@ Customize via CSS variables above in `components.json`.
 | `PageHeader` | Title (`h1`, `text-3xl`), description, primary action (`components/ui/page-header.tsx`) |
 | `PageSection` | Titled section card with `px-5` inset (`components/ui/page-section.tsx`) |
 | `StatusBadge` | Maps workflow enums to a tone and label (`components/ui/status-badge.tsx`; the one status-to-tone map is `lib/status.ts`, text on tints uses the `-ink` tokens) |
-| `JobProgress` | Step list and progress bar for a long job, with slow and failed notices (`components/ui/job-progress.tsx`; first consumer is the photoshoot) |
+| `JobProgress` | Step list and progress bar for a long job, with slow and failed notices (`components/ui/job-progress.tsx`; used by the photoshoot, which keeps it mounted after the job ends so the end is announced) |
 | `CreditsChip` | Top-bar balance chip with a popover (`components/shell/credits-chip.tsx`); paid buttons show their price from the server, unlimited workspaces show none |
 | `PaywallDialog` | Opens on a recognisable 402 (`components/shell/paywall-dialog.tsx`, state in `lib/paywall.ts`) |
-| `LibraryPicker` | Photo chooser for features that start from the library: `onUse(photo: LibraryPhoto)`, `children` for feature-specific text (`components/library/library-picker.tsx`; first consumer is the photoshoot) |
-| `PhotoGrid` / `SourceSwitch` | Library photo grid with keyboard selection, and the switch between uploads and generated photos (`components/library/photo-grid.tsx`, `library-board.tsx`) |
+| `LibraryPicker` | Photo chooser for features that start from the library: `onUse(photo: LibraryPhoto)`, `children` for feature-specific text (`components/library/library-picker.tsx`; used by the photoshoot's source and garment rows) |
+| `PhotoGrid` / `SourceSwitch` | Library photo grid with keyboard selection, and the switch between uploads and generated photos (`components/library/photo-grid.tsx`, `library-board.tsx`); `SourceSwitch` is a thin wrapper over `SegmentedRadios` |
+| `SegmentedRadios` | Pill radio group in a fieldset with a screen-reader legend: `label`, `name`, `value`, `onChange`, `options` (`value`, `label`, optional `count`). Native radios, so arrows and space work; the chosen pill is filled and keyboard focus draws an offset ring (`components/ui/segmented-radios.tsx`). The admin `Segmented` (`components/admin/ui.tsx`) is the link version for page-level tabs and is separate |
+| `ChoiceCards` | Radio group shown as cards: visible `legend`, `columns` 2, 3 or 4, options with `title`, `description`, `meta`. The chosen card has a primary border, a tint and a check icon; keyboard focus is a separate `ring-2 ring-ring` so the two never share a colour (`components/ui/choice-cards.tsx`). Looks like the `PhotoGrid` pick tiles but shares no code with them (the tiles show photos); a change to one look should be checked against the other |
 | `EmptyState` | Illustration-free; clear CTA |
 | `DataTable` | Sortable columns, filter row |
 | `OpportunityCard` | Score, rationale, product chip |
@@ -106,6 +108,17 @@ Customize via CSS variables above in `components.json`.
 | `ApprovalBanner` | Version id, approver, blocking checks |
 | `IntegrationHealthPill` | Connected / degraded / error |
 | `LoadingSkeleton` | List and card placeholders |
+
+---
+
+### Photoshoot data rules (web)
+
+- `useJob` (`components/workspace/use-job.ts`) takes an optional `stopOn` list of HTTP statuses (the photoshoot passes
+  403 and 404 so a missing shoot is not polled) and returns `status`, the last error's HTTP status or `null`.
+- Signed image links expire after an hour. `SIGNED_LINK_STALE_MS` (50 minutes) and `stale(fetchedAt)` in `use-job.ts` are
+  the one rule: nothing renders an image from an answer older than that, and the list and shoot page re-read before then.
+- A paid button shows its price from the server: `shootPrice(sub, tier)` in `lib/plan-credits.ts` (no price for
+  unlimited workspaces), and `shootPriceBlocker` holds the press until the plan has been read.
 
 ---
 

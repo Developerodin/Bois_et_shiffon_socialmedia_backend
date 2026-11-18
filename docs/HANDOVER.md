@@ -4,6 +4,76 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Feature 2: photoshoot on the web (2026-11-18)
+
+Branch `feature-2-photoshoot` in the server, web and mobile repos (not merged). Plan:
+`docs/superpowers/plans/2026-11-18-feature-2-photoshoot.md`; spec `docs/superpowers/specs/2026-11-18-feature-2-photoshoot-design.md`.
+
+- **What was built.** `/photoshoot` (the studio: product or fashion setup, one Generate button with its price, the
+  shoot in progress, and "Past photoshoots" with an All / Product / Fashion filter) and `/photoshoot/[id]` (one shoot:
+  large photo, four thumbnails, Compare original, Download, the staging summary, and Variation on finished shoots only).
+  Behind `WEB_FEATURES=photoshoot`. The photo is chosen in the feature 1 `LibraryPicker`. The shoot's id is in the
+  address (`/photoshoot?shoot=<id>&b=<business>`), so a reload keeps the card.
+- **Shared contract.** `shared/photoshoot.ts` in the server holds the request shape, tiers, credit prices, ratios and the
+  brief limit (600). The server's zod schema and the web read it; the phone's `SHOOT_TIERS` is built from it.
+- **Server changes** (additive, except the first). Media upload now needs `content.create` instead of `publish.execute`.
+  Each shot of a single shoot read carries a `downloadUrl` that saves as `photoshoot-<id>-<n>.jpg`; the list and the
+  create answer do not sign download links. Uploads are limited to 60 an hour per user.
+- **Kit.** `SegmentedRadios` (the pill radio group; the library's `SourceSwitch` now wraps it) and `ChoiceCards` (see
+  `docs/DESIGN_SYSTEM.md` section 7). `JobProgress` and `LibraryPicker` now have their consumer. `useJob` gained `stopOn`
+  and `status`; `SIGNED_LINK_STALE_MS` is the one rule for when signed links are re-read.
+
+**Calls made in the spec** (cost if wrong is one string or one condition each)
+- Creators may spend credits on a shoot, same as the phone (owner answer to the feature 1 question).
+- Failed shoots read "Your N credits are back. Try again, or pick another quality." (the phone's wording).
+- Unlimited (test) workspaces show no price on Generate or Variation, as elsewhere.
+- Generate, Try again and Variation stay disabled until the plan's prices have been read, so the price is on the button
+  that spends it. If that read fails, the reason shows and "Read prices again" appears.
+- A press that never got an answer (network or server down) re-sends with the same request id, so a double click or a
+  retry is one shoot and one charge. A changed request, or any answer from the server, starts a new id.
+- Variation runs the same setup again and charges again; it is not offered on running or failed shoots.
+- The list and the shoot page poll while a shoot runs (about twice the read load of one). Fine at this size.
+- A shoot the server never finishes is failed by the server after an hour; until then the list keeps polling.
+- Switching business on `/photoshoot?shoot=...` shows an empty "This shoot", never a loop (404 and 403 stop polling).
+
+**Manual checks for the owner**
+- Flag off: `/photoshoot` is 404 and there is no nav entry.
+- Double-click Generate: one shoot, one charge. The credits chip drops after Generate and rises after a refund.
+- A 402 opens the paywall dialog.
+- Custom scene with a blank brief: Generate is blocked, with text saying why.
+- A Creator can upload in the picker. A Viewer sees a read-only studio.
+- Keyboard through every radio group (arrows move, space selects). Enter on a radio card does not start a shoot.
+- 375 px: no horizontal scroll, on the studio and on a shoot page.
+- Switch business mid-shoot: no 404 loop. On `/photoshoot?shoot=...`, switching shows an empty "This shoot".
+- Download saves a file (not opens a tab). Reload with `?shoot=` keeps the card.
+- A new shoot appears in "Past photoshoots" at once.
+- A page left open over an hour still shows its photos and downloads (links are re-read after 50 minutes).
+
+**Not checked live:** no browser or emulator run of either page (build, typecheck, lint and unit tests only); a real
+generation (no provider credits); the 402 dialog; the 60-an-hour upload 429 (and whether the phone handles an upload
+429 well); the 60-photo 409; signed links after an hour; the feature 1 picker against real photos.
+
+**Known limits**
+- `/photoshoot/[id]` has no `scripts/audit-ui.ts` entry because no fixture shoot exists; the studio does (320 px and
+  1280 px). Run the audit by hand against a real shoot id.
+- Custom roles need `content.create` to upload photos. A custom role with `publish.execute` but not `content.create`
+  now gets 403 on upload. The dev DB has no custom roles (wiped to admins on 2026-11-17); an admin adds the permission.
+- Creators can fill the brand library (60 photos), and only `context.edit` can empty it.
+- The upload limit (60 an hour per user) counts refused files too.
+- The "don't charge twice" press rule lives in two places: web `components/photoshoot/press.ts` and the phone's
+  `src/ui/photoshoot/start.ts`. Each has a comment pointing at the other; keep them in step. It treats a JSON 502 or 504
+  as an answer (new id on retry); a non-JSON 5xx counts as "server down" and keeps the id.
+- The phone's option lists (`src/ui/photoshoot/options.ts`) are only type-checked against the shared contract, not
+  built from it: a new shared value will not show on the phone by itself.
+- Signed links last an hour; the web re-reads at 50 minutes. The source thumbnail in the setup is not re-read (preview only).
+- Bundle: first-load JS is about 152 kB for `/photoshoot` and 148 kB for `/photoshoot/[id]` (shared 102 kB). Nothing
+  checks bundle size; `check:bundle` only looks for secrets and Prisma in the output.
+- Small things left: "Open full size" (a shot with no download link) may be blocked as a popup; Download gives no
+  feedback while a stale shoot is re-read; a 403 on a shoot shows "Couldn't load" with Try again; a missing shoot returns
+  HTTP 200 with the not-found page; the empty filter reads "No photoshoots yet."; focus is not moved to "This shoot" after
+  Generate; the brief field lacks `aria-required`; each shoot read signs its links twice (2N presigns); the media route's
+  download file name is not escaped (only the fixed-pattern caller exists).
+
 ## Feature 1: brand look and photo library on the web (2026-11-17)
 
 Branch `feature-1-brand-library` in the server, web and mobile repos (not merged). Plan:
@@ -11,13 +81,13 @@ Branch `feature-1-brand-library` in the server, web and mobile repos (not merged
 
 - **What was built.** One `/library` page, labelled "Brand & photos": photo grid with add and remove, brand colours
   (colour dialog), tones, and a read-only logo. Behind `WEB_FEATURES=library`. `LibraryPicker` (`onUse(photo)`, `children`
-  for feature text) is ready for the photoshoot; `putShared`/`sharedAt` in `use-job.ts` and live regions in `JobProgress`.
+  for feature text) is used by the photoshoot (feature 2); `putShared`/`sharedAt` in `use-job.ts` and live regions in `JobProgress`.
 - **Shared contract.** `shared/brand-look.ts` in the server; the web uses it, mobile took only the copy (wording), not
   the module.
 
 **Defaults taken for the owner questions** (owner said "yes start"; cost if wrong is renaming or moving one page)
 - One page, "Brand & photos". Files over 4 MB are refused in the browser, before any request.
-- Server permissions kept: add photo = `publish.execute`; remove photo, colours and tones = `context.edit`.
+- Server permissions: add photo = `publish.execute` (feature 2 changed it to `content.create`, so Creators can upload); remove photo, colours and tones = `context.edit`.
 - Logo is read-only; fonts, tagline and audience are not shown.
 - Open for feature 2: may Creators spend the whole workspace's credits?
 
@@ -40,7 +110,7 @@ Branch `feature-1-brand-library` in the server, web and mobile repos (not merged
 - Tones Save enabled when re-picked back to the saved set; disabled Save shown to non-edit roles; an unchanged colour
   save sends a no-op (the phone does the same).
 - Invented empty titles "No photos" / "No uploads" in the picker.
-- Closed: the 0c minor "JobProgress needs a live role" (it now has a consumer path through the library and live regions).
+- Closed: the 0c minor "JobProgress needs a live role" (it has live regions; the photoshoot now renders it).
 
 ## Foundations 0c: website UI kit and accessibility (2026-11-17)
 
@@ -67,7 +137,7 @@ now also returns each action's price and `freeAgents`; additive), web `7ed2fef..
 - The Overview feed's icon-only run buttons carry the price in `aria-label`/`title`, so it shows on hover and to a
   screen reader, not on screen. Ask if it should be visible text.
 - No sidebar below 768 px; use the Menu button.
-- `JobProgress` has no consumer yet; it is not visible until the photoshoot (feature 2).
+- `JobProgress` was built here; the photoshoot (feature 2) is its consumer.
 - Route names/groups follow plan Decision 12 and sit behind flags that are off by default.
 
 **Audit not run.** It needs the admin login and both servers up. With the server on :3101 and the web built
@@ -89,12 +159,12 @@ Note which routes really rendered (admin may be redirected to /welcome or /admin
    and the page is still clickable afterwards. Radix can leave `pointer-events: none` on the page after a menu-to-dialog
    handoff; judged unreachable today (the menu has no exit animation), but an animate plugin would make it real. Fix then:
    open the dialog from the menu's `onCloseAutoFocus`.
-7. `JobProgress` until the photoshoot uses it.
+7. `JobProgress`: now used by the photoshoot; see feature 2's manual checks.
 
 **Deferred minors (for a final fix round)**
 - `ai-models-tab`: missing `pb-0` when ready (about 32px dead space); check the long `usedBy` badge on a narrow screen.
 - `JobProgress`: the slow/failed notices need a live role (the failed line has none; they mount with their content, so
-  screen readers may skip them). Fix before feature 2 renders it. Also aria-valuenow is not clamped and empty steps read
+  screen readers may skip them). Fixed before feature 2 rendered it. Also aria-valuenow is not clamped and empty steps read
   "Done".
 - Credits chip: "Couldn't read the balance" shows when only the /subscription read failed; reword so it says what failed.
 - Open owner question: the Overview feed's run-button price is only in hover and screen-reader text (see above).
