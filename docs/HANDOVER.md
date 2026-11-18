@@ -34,11 +34,12 @@ Branch `feature-2-photoshoot` in the server, web and mobile repos (not merged). 
 - Unlimited (test) workspaces show no price on Generate or Variation, as elsewhere.
 - Generate, Try again and Variation stay disabled until the plan's prices have been read, so the price is on the button
   that spends it. If that read fails, the reason shows and "Read prices again" appears.
-- A press that never got an answer (network or server down) re-sends with the same request id, so a double click or a
-  retry is one shoot and one charge. A changed request, or any answer from the server, starts a new id.
+- A press whose outcome is unknown re-sends with the same request id, so a double click or a retry is one shoot and one
+  charge. No answer or any 5xx keeps the id; a 4xx or a success starts a new one, and so does a changed request.
 - Variation runs the same setup again and charges again; it is not offered on running or failed shoots.
 - While "This shoot" runs, only it polls (5 s for 2 minutes, 10 s to 10 minutes, then 30 s); the list polls (10 s)
-  only for other running shoots, and reads once more when "This shoot" ends so its card updates. The shoot page polls
+  only for other running shoots, and reads once more when "This shoot" ends so its card updates (once again 5 s later
+  if that read fails). The shoot page polls
   on the same steps.
 - A shoot the server never finishes is failed by the server after an hour; until then its poll keeps going.
 - Switching business on `/photoshoot?shoot=...` shows an empty "This shoot", never a loop (404 and 403 stop polling).
@@ -72,17 +73,21 @@ generation (no provider credits); the 402 dialog; the 60-an-hour upload 429 (and
 - The "don't charge twice" press rule lives in two places: web `components/photoshoot/press.ts` and the phone's
   `src/ui/photoshoot/start.ts`. Each has a comment pointing at the other; keep them in step. Both use the shared
   `shouldKeepRequestId` and `shootRequestKey` (`shared/photoshoot.ts`): no answer or any 5xx (JSON or a gateway page)
-  keeps the id, a 4xx clears it. After a press that kept its id the web reads the list and the balance again; the
+  keeps the id, a 4xx clears it. A 409 `request.idTaken` (the kept id's try was already refunded) is retried once,
+  silently, with a new id, so the press after a refunded 500 works. After a press that kept its id the web reads the
+  list and the balance again, and once more 15 s later (one timer per tab: a later unknown press replaces it); the
   phone does not (its results list reads again each time it is opened).
 - The phone's option lists (`src/ui/photoshoot/options.ts`) are only type-checked against the shared contract, not
   built from it: a new shared value will not show on the phone by itself.
 - Signed links last an hour; the web re-reads at 50 minutes. The source thumbnail in the setup is not re-read (preview only).
-- Bundle: first-load JS is about 152 kB for `/photoshoot` and 148 kB for `/photoshoot/[id]` (shared 102 kB). Nothing
+- Bundle: first-load JS is about 153 kB for `/photoshoot` and 148 kB for `/photoshoot/[id]` (shared 102 kB). Nothing
   checks bundle size; `check:bundle` only looks for secrets and Prisma in the output.
 - Small things left: "Open full size" (a shot with no download link) may be blocked as a popup; Download gives no
   feedback while a stale shoot is re-read; a 403 on a shoot shows "Couldn't load" with Try again; a missing shoot returns
   HTTP 200 with the not-found page; the empty filter reads "No photoshoots yet."; focus is not moved to "This shoot" after
   Generate; the brief field lacks `aria-required`; each shoot read signs its links twice (2N presigns).
+- Opening `/photoshoot?shoot=<finished id>` reads the list twice on load.
+- A missing or flag-off page shows the 404 page with HTTP 200 (a soft 404). This was already the case before.
 - The website copies the phone's English wording by hand (`components/photoshoot/labels.ts`, `shoot.ts`, from the
   phone's `photoshoot.json`); nothing checks the two match, so keep them in step.
 
