@@ -28,12 +28,13 @@ export async function GET(request: Request, context: Params) {
 /** F02/F03 "Generate": a new shoot on the picked tier. */
 export async function POST(request: Request, context: Params) {
   try {
+    const scope = await authorizeBrandRoute(request, context.params, "content.create");
+    if (scope instanceof Response) return scope;
+    // Authorize first: an unknown caller gets no validation detail and makes the server buffer nothing.
     const body = await request.json().catch(() => null);
     const parsed = ShootRequest.safeParse(body);
     const requestId = z.string().uuid().optional().safeParse((body as { requestId?: unknown } | null)?.requestId);
     if (!parsed.success || !requestId.success) return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 400, detail: parsed.error?.issues[0]?.message ?? "requestId must be a UUID" });
-    const scope = await authorizeBrandRoute(request, context.params, "content.create");
-    if (scope instanceof Response) return scope;
     return paidStart(request, { feature: "photoshoot", workspaceId: scope.workspaceId, refId: requestId.data }, async () => {
       try {
         const { shoot, repeated } = await createShoot(scope, parsed.data, requestId.data);

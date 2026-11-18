@@ -21,7 +21,11 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     if (scope instanceof Response) return scope;
     // ponytail: 60 an hour per user, shared by the web and the phone; each upload writes a file nobody may ever publish.
     if (!(await hitRateLimit(`media-upload:${scope.userId}`, 60, 3_600_000)).allowed) return invalid("Too many uploads. Try again in a while.", 429);
-    if (Number(request.headers.get("content-length") ?? 0) > MEDIA_MAX_BYTES + 64 * 1024) return invalid("Images can be up to 4 MB", 413);
+    // A chunked request has no Content-Length and formData() would buffer all of it before file.size is checked.
+    // fetch with a FormData body (the web and the phone) always sends one.
+    const length = request.headers.get("content-length");
+    if (length === null) return invalid("Send the image with a Content-Length", 411);
+    if (Number(length) > MEDIA_MAX_BYTES + 64 * 1024) return invalid("Images can be up to 4 MB", 413);
 
     const form = (await request.formData().catch(() => null)) ?? new FormData();
     const file = form.get("file");

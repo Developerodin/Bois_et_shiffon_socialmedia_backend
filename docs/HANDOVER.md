@@ -63,6 +63,8 @@ generation (no provider credits); the 402 dialog; the 60-an-hour upload 429 (and
   now gets 403 on upload. The dev DB has no custom roles (wiped to admins on 2026-11-17); an admin adds the permission.
 - Creators can fill the brand library (60 photos), and only `context.edit` can empty it.
 - The upload limit (60 an hour per user) counts refused files too.
+- An upload with no Content-Length (a chunked body) gets 411; over 4 MB gets 413. fetch with a FormData body sends the
+  length, so the web and the phone are unaffected. The photoshoot start checks permission before it reads the body.
 - The "don't charge twice" press rule lives in two places: web `components/photoshoot/press.ts` and the phone's
   `src/ui/photoshoot/start.ts`. Each has a comment pointing at the other; keep them in step. Both use the shared
   `shouldKeepRequestId` and `shootRequestKey` (`shared/photoshoot.ts`): no answer or any 5xx (JSON or a gateway page)
