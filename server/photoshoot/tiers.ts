@@ -7,13 +7,15 @@
  * ponytail: costUsd are estimates per shoot of SHOTS images (provider price pages, 2026-11); check them against the
  * invoices and move the table to the database next to AiTier if prices change often.
  */
+import { SHOOT_CREDITS, SHOOT_TIER_IDS, type ShootTier } from "@/shared";
+
 export const SHOTS = 4;
 /** What a credit sells for (the cheapest plan's price per credit). */
 export const CREDIT_USD = 0.145;
 export const MARGIN_FLOOR = 0.7;
 
-export const SHOOT_TIERS = ["base", "moderate", "higher", "ultra"] as const;
-export type ShootTier = (typeof SHOOT_TIERS)[number];
+export const SHOOT_TIERS = SHOOT_TIER_IDS;
+export type { ShootTier };
 export type ShootKind = "product" | "fashion";
 export type ShootRatio = "1:1" | "4:5" | "9:16";
 
@@ -30,12 +32,12 @@ const flare = (resolution: "2k" | "4k") => (i: HfInput) => ({ prompt: i.prompt, 
 
 export const TIERS: Record<ShootTier, { credits: number; product: Engine; fashion: Engine }> = {
   base: {
-    credits: 4,
+    credits: SHOOT_CREDITS.base,
     product: { provider: "openai", quality: "low", costUsd: 0.06 },
     fashion: { provider: "higgsfield", path: "/higgsfield-ai/soul/v2/image-to-image", body: soul("720p"), costUsd: 0.05 },
   },
   moderate: {
-    credits: 6,
+    credits: SHOOT_CREDITS.moderate,
     product: {
       provider: "higgsfield",
       path: "/alibaba/qwen-image-3/edit",
@@ -45,12 +47,12 @@ export const TIERS: Record<ShootTier, { credits: number; product: Engine; fashio
     fashion: { provider: "higgsfield", path: "/higgsfield-ai/soul/v2/image-to-image", body: soul("1080p"), costUsd: 0.17 },
   },
   higher: {
-    credits: 12,
+    credits: SHOOT_CREDITS.higher,
     product: { provider: "openai", quality: "medium", costUsd: 0.26 },
     fashion: { provider: "higgsfield", path: "/marketing-studio/image/flare", body: flare("2k"), costUsd: 0.36 },
   },
   ultra: {
-    credits: 24,
+    credits: SHOOT_CREDITS.ultra,
     product: { provider: "openai", quality: "high", costUsd: 1.0 },
     fashion: { provider: "higgsfield", path: "/marketing-studio/image/flare", body: flare("4k"), costUsd: 1.0 },
   },

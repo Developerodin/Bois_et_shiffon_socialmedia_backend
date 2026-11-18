@@ -4,7 +4,8 @@ import sharp from "sharp";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
-import { SHOOT_TIERS, SHOTS, type ShootRatio, TIERS } from "@/server/photoshoot/tiers";
+import { BACKGROUNDS, BRIEF_MAX, FASHION_RATIOS, MODELS, POSES, PRODUCT_RATIOS, SCENES, type Shoot, SHOOT_TIER_IDS } from "@/shared";
+import { SHOTS, type ShootRatio, TIERS } from "@/server/photoshoot/tiers";
 import { fetchResult, higgsfield } from "@/server/reels/higgsfield";
 import { chargeRefunded, refundCharge, spendCredits } from "@/server/services/credits";
 import { ownMediaKey, PublishingError } from "@/server/services/publishing";
@@ -22,26 +23,26 @@ const POLL_MS = 15_000;
 const GIVE_UP_MS = 60 * 60_000;
 
 const sourceKey = z.string().min(1).max(300);
-const tier = z.enum(SHOOT_TIERS);
+const tier = z.enum(SHOOT_TIER_IDS);
 export const ShootRequest = z.discriminatedUnion("kind", [
   z
     .object({
       kind: z.literal("product"),
       tier,
       sourceKey,
-      ratio: z.enum(["1:1", "4:5", "9:16"]),
-      scene: z.enum(["studio", "interior", "custom"]),
-      brief: z.string().trim().max(600).default(""),
+      ratio: z.enum(PRODUCT_RATIOS),
+      scene: z.enum(SCENES),
+      brief: z.string().trim().max(BRIEF_MAX).default(""),
     })
     .refine((b) => b.scene !== "custom" || b.brief, "Describe the scene you want"),
   z.object({
     kind: z.literal("fashion"),
     tier,
     sourceKey,
-    ratio: z.enum(["4:5", "9:16"]),
-    model: z.enum(["natural", "editorial", "casual"]).optional(),
-    pose: z.enum(["fullBody", "threeQuarter", "closeUp"]),
-    background: z.enum(["studioMinimal", "urbanStreet", "naturalInterior"]),
+    ratio: z.enum(FASHION_RATIOS),
+    model: z.enum(MODELS).optional(),
+    pose: z.enum(POSES),
+    background: z.enum(BACKGROUNDS),
   }),
 ]);
 export type ShootRequest = z.infer<typeof ShootRequest>;
@@ -251,9 +252,9 @@ export async function shootView(s: PhotoShoot) {
   delete input.imageUrl; // the signed link kept for Higgsfield resends
   return {
     id: s.id,
-    kind: s.kind,
-    tier: s.tier,
-    status: s.status,
+    kind: s.kind as Shoot["kind"],
+    tier: s.tier as Shoot["tier"],
+    status: s.status as Shoot["status"],
     input,
     credits: s.credits,
     // Provider errors ("Higgsfield 403: not_enough_credits") stay on the row; the app only says it didn't work.
@@ -261,7 +262,7 @@ export async function shootView(s: PhotoShoot) {
     createdAt: s.createdAt.toISOString(),
     sourceUrl: await signedMediaUrl(input.sourceKey),
     shots: await Promise.all(s.outputKeys.map(async (key) => ({ key, url: await signedMediaUrl(key) }))),
-  };
+  } satisfies Shoot;
 }
 
 export async function listShoots(scope: Scope) {
