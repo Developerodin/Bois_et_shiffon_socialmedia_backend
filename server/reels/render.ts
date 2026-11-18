@@ -491,10 +491,10 @@ export function renderFailure(r: Pick<ReelRender, "step" | "error" | "requests" 
 }
 
 /** For the app: each version's latest render. */
-export async function renderView(itemId: string) {
+export async function renderView(itemId: string, workspaceId: string) {
   const renders = await prisma.reelRender.findMany({ where: { contentItemId: itemId }, orderBy: { createdAt: "desc" }, take: 20 });
   // What each attempt was charged (its charge entry; 0 in a workspace with unlimited credits).
-  const charges = await prisma.creditEntry.findMany({ where: { refId: { in: renders.map((r) => r.chargeId) }, delta: { lte: 0 } }, select: { refId: true, delta: true } });
+  const charges = await prisma.creditEntry.findMany({ where: { workspaceId, reason: "reel-render", refId: { in: renders.map((r) => r.chargeId) }, delta: { lte: 0 } }, select: { refId: true, delta: true } });
   const charged = (r: ReelRender) => {
     const c = charges.find((e) => e.refId === r.chargeId);
     return c ? -c.delta : null;

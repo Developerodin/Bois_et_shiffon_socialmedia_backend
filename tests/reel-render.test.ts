@@ -6,9 +6,9 @@ const m = vi.hoisted(() => {
   const tx = {
     $executeRaw: vi.fn(async () => 0),
     contentItem: { findFirst: fn(), update: fn(), findUnique: fn() },
-    creditEntry: { findFirst: fn() },
+    creditEntry: { findFirst: fn(), findMany: fn() },
     contentVersion: { create: fn(), findFirst: fn() },
-    reelRender: { create: fn(), findFirst: fn(), update: fn(), updateMany: fn(), findUnique: fn(), findUniqueOrThrow: fn(), aggregate: fn() },
+    reelRender: { create: fn(), findFirst: fn(), update: fn(), updateMany: fn(), findUnique: fn(), findUniqueOrThrow: fn(), aggregate: fn(), findMany: fn() },
     auditEvent: { create: fn() },
   };
   return {
@@ -38,7 +38,7 @@ vi.mock("@/server/reels/agents", () => ({ checkSeam: m.seam }));
 vi.mock("@/server/notifications/push", () => ({ notifyReelFinished: m.notify }));
 vi.mock("node:fs/promises", async (orig) => ({ ...(await orig<object>()), readFile: vi.fn(async () => Buffer.alloc(8)) }));
 
-import { advanceRender, nextStep, renderFailure, startRender } from "@/server/reels/render";
+import { advanceRender, nextStep, renderFailure, renderView, startRender } from "@/server/reels/render";
 
 const scope = { workspaceId: "w1", brandId: "b1" };
 const photo = "w1/b1/0b4b2c1e-6a1d-4f7e-9a40-0c6f2d8e1a11.jpg";
@@ -379,5 +379,14 @@ describe("seam check", () => {
       { after: 2, planned: "cut", used: "cut", fits: true, note: "same sideboard" },
     ]);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("renderView", () => {
+  it("reads charges within the workspace", async () => {
+    m.prisma.reelRender.findMany.mockResolvedValue([{ id: "r1", chargeId: "c1", outputs: null, createdAt: new Date() }]);
+    m.prisma.creditEntry.findMany.mockResolvedValue([{ refId: "c1", delta: -5 }]);
+    await renderView("i1", "w1");
+    expect(m.prisma.creditEntry.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ workspaceId: "w1", reason: "reel-render" }) }));
   });
 });

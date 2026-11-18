@@ -361,7 +361,7 @@ export async function reelDetail(scope: Omit<Scope, "userId">, itemId: string) {
   const latest = item.versions[0];
   const body = latest?.body as { videoKey?: string } | undefined;
   const plan = ReelPlan.safeParse(latest?.body);
-  const [videoUrl, renders, credits] = await Promise.all([body?.videoKey ? signedMediaUrl(body.videoKey, 3600) : null, renderView(item.id), creditBalance(scope.workspaceId)]);
+  const [videoUrl, renders, credits] = await Promise.all([body?.videoKey ? signedMediaUrl(body.videoKey, 3600) : null, renderView(item.id, scope.workspaceId), creditBalance(scope.workspaceId)]);
   return {
     item: { id: item.id, title: item.title, status: item.status, postUrl: item.postUrl, scheduledFor: item.scheduledFor },
     version: latest?.version ?? 0,
