@@ -8,6 +8,7 @@ const reelLanguage = (code: string) => (/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(
 import { promptProblems } from "@/server/reels/prompt-check";
 import { routeScene, SCENE_KINDS, TRANSITIONS } from "@/server/reels/router";
 import { REEL_VOICES } from "@/server/reels/voice";
+import type { DraftSoFar } from "@/shared";
 
 /**
  * The two AI steps behind a studio reel:
@@ -71,7 +72,6 @@ const Direction = z.object({ scenes: z.array(z.object({ kind: z.enum(SCENE_KINDS
 export type ReelPhoto = { key: string; title: string; product?: string };
 
 /** What the scriptwriter has written so far (R04 streams it): the reply, the title and each scene's shot and voiceover. */
-export type DraftSoFar = { reply: string; title: string; scenes: { shot: string; voiceText: string }[] };
 export function partialDraft(soFar: string): DraftSoFar | null {
   const d = parsePartialJson(soFar) as { reply?: unknown; title?: unknown; scenes?: unknown } | null;
   if (!d || typeof d !== "object" || typeof d.reply !== "string") return null;

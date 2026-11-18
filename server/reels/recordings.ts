@@ -8,6 +8,7 @@ import type { ReelPlan } from "@/server/reels/plan";
 import { wavSeconds } from "@/server/reels/wav";
 import { PublishingError } from "@/server/services/publishing";
 import { deleteMedia, mediaKey, putMedia } from "@/server/storage/media";
+import { MAX_RECORDING_SECONDS } from "@/shared";
 
 /**
  * Voiceovers the person records for reel scenes (mobile R11). The phone uploads an M4A; the server checks its bytes,
@@ -15,8 +16,7 @@ import { deleteMedia, mediaKey, putMedia } from "@/server/storage/media";
  * speech-to-text hear it, and keeps a ReelRecording row. A scene then names the row (recordingId); its length is the
  * row's, written into the plan by the server (the phone's value is never trusted).
  */
-export const MAX_RECORDING_BYTES = 1024 * 1024; // 15 s of AAC at 128 kbps is ~250 KB
-export const MAX_RECORDING_SECONDS = 15;
+export { MAX_RECORDING_BYTES, MAX_RECORDING_SECONDS } from "@/shared";
 const RETENTION_DAYS = 30;
 
 /** An MP4/M4A container: "ftyp" at offset 4 and an audio-capable brand. */

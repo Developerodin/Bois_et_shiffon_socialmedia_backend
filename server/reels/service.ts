@@ -7,7 +7,7 @@ import { kickRunner } from "@/server/jobs/runner";
 import { brandKnowledge, productPhotos } from "@/server/content/knowledge";
 import { prisma } from "@/server/db/prisma";
 import { claimTransient, dropTransient } from "@/server/db/transient";
-import { directScenes, type DraftSoFar, type ReelPhoto, writePlan } from "@/server/reels/agents";
+import { directScenes, type ReelPhoto, writePlan } from "@/server/reels/agents";
 import { planOwnershipProblems } from "@/server/reels/ownership";
 import { aiDisclosureLine, carryStandIns, clearPresenterFlags, needsAiDisclosure, isStudioPlan, planProblems, presenterCuts, ReelPlan, reelPrice, reelSeconds, sceneSeconds, toVersionBody } from "@/server/reels/plan";
 import { donePresenter } from "@/server/reels/presenters";
@@ -18,12 +18,11 @@ import { creditBalance } from "@/server/services/credits";
 import { decide, lock, PublishingError, TX } from "@/server/services/publishing";
 import { signedMediaUrl } from "@/server/storage/media";
 import { PlanRequiredError, requirePlan } from "@/server/services/subscriptions";
+import { CHAT_MESSAGE_MAX, type ChatTurn, type PlanEvent } from "@/shared";
 
 /** Mobile Reels studio (R01–R13): create, chat, edit, send, register a manual post. Rendering is render.ts. */
 type Scope = { workspaceId: string; brandId: string; userId: string };
-type ChatTurn = { role: "user" | "assistant"; text: string; at: string };
 /** Progress while a plan is written (R04 streams it): the reply so far, then the director's step. */
-export type PlanEvent = { type: "stage"; stage: "reading" | "writing" | "directing" } | ({ type: "draft" } & DraftSoFar);
 type Emit = (event: PlanEvent) => void;
 
 /**
@@ -173,7 +172,7 @@ async function planReel(scope: Scope, input: { opportunityId?: string; prompt?: 
   const plan = template ? { ...written.plan, template } : written.plan;
   const ready = await directed(scope, plan, undefined, emit); // a new plan has no presenter
   const now = new Date().toISOString();
-  const chat: ChatTurn[] = [...(turn ? [{ role: "user" as const, text: turn.slice(0, 2000), at: now }] : []), { role: "assistant", text: reply, at: now }];
+  const chat: ChatTurn[] = [...(turn ? [{ role: "user" as const, text: turn.slice(0, CHAT_MESSAGE_MAX), at: now }] : []), { role: "assistant", text: reply, at: now }];
   const item = await prisma.contentItem.create({
     data: {
       ...(input.requestId && { id: input.requestId }),
@@ -217,7 +216,7 @@ export async function chatPlan(scope: Scope, itemId: string, input: { version: n
   const now = new Date().toISOString();
   // A recording the revision dropped is said in the reply, where the person reads the chat.
   const said = [reply, ...settled.notices].join("\n");
-  const v = await savePlan(scope, itemId, input.version, ready, [...chat, { role: "user", text: (turn ?? "").slice(0, 2000), at: now }, { role: "assistant", text: said, at: now }]);
+  const v = await savePlan(scope, itemId, input.version, ready, [...chat, { role: "user", text: (turn ?? "").slice(0, CHAT_MESSAGE_MAX), at: now }, { role: "assistant", text: said, at: now }]);
   return { version: v.version, plan: ready, price: reelPrice(ready), reply, droppedRecordings: settled.dropped };
 }
 

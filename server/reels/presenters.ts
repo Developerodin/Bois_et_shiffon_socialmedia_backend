@@ -8,6 +8,7 @@ import { CREDIT_USD, MARGIN_FLOOR } from "@/server/photoshoot/tiers";
 import { CREDIT_COSTS } from "@/server/services/credits";
 import { PublishingError } from "@/server/services/publishing";
 import { deleteMedia, mediaKey, putMedia, signedMediaUrl } from "@/server/storage/media";
+import { NAME_MAX } from "@/shared";
 
 /**
  * Brand presenters (mobile R10): a character sheet made by Higgsfield AI Influencer from a few traits, later shown
@@ -38,7 +39,7 @@ export const PRESENTER_TRAITS = [
 
 const traitIds = new Map<string, readonly string[]>(PRESENTER_TRAITS.map((g) => [g.id, Object.keys(g.options)]));
 export const PresenterRequest = z.object({
-  name: z.string().trim().min(1).max(40),
+  name: z.string().trim().min(1).max(NAME_MAX),
   traits: z.record(z.string(), z.string()).refine((t) => Object.entries(t).every(([g, o]) => traitIds.get(g)?.includes(o)), "Unknown trait"),
 });
 export type PresenterRequest = z.infer<typeof PresenterRequest>;

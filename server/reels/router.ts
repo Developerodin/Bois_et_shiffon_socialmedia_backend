@@ -5,15 +5,9 @@
  * Seedance 2.5 "the default for serious motion, cinematic" briefs, MiniMax Hailuo "cheap with strong physics".
  * ponytail: a code table; move it to the database next to AiTier if admins need to change it without a deploy.
  */
-export type SceneKind = "detail" | "room" | "physics";
-/**
- * How a scene hands over to the next (the director picks; the seam check can soften it):
- * match = it ends on the framing the next starts from (a cut that feels continuous), cut = a deliberate cut on the
- * voice's beat between views of the same subject, dissolve = a soft blend where place, light or distance changes.
- */
-export const TRANSITIONS = ["cut", "match", "dissolve"] as const;
-export type Transition = (typeof TRANSITIONS)[number];
-export const SCENE_KINDS = ["detail", "room", "physics"] as const satisfies readonly SceneKind[];
+// The scene kinds and transitions (and what each transition means) live in shared/reels.ts.
+import type { SceneKind, Transition } from "@/shared";
+export { SCENE_KINDS, TRANSITIONS, type SceneKind, type Transition } from "@/shared";
 
 /** imageUrls/audioUrl: the presenter model's references (presenter sheet, product photo) and the scene's voice. */
 type ClipInput = { photoUrl: string; prompt: string; seconds: number; imageUrls?: string[]; audioUrl?: string };

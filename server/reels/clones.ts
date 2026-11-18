@@ -10,6 +10,7 @@ import { chargeRefunded, refundCharge, spendCredits } from "@/server/services/cr
 import { PublishingError } from "@/server/services/publishing";
 import { requirePlan } from "@/server/services/subscriptions";
 import { deleteMedia, putMedia } from "@/server/storage/media";
+import { MAX_CLONE_BYTES } from "@/shared";
 
 /**
  * Cloned voices (mobile Voices → Clone a voice): a workspace member with voices.manage reads a passage, ticks the
@@ -20,7 +21,7 @@ import { deleteMedia, putMedia } from "@/server/storage/media";
  */
 export const CLONE_CREDITS = 10; // ponytail: placeholder price until ElevenLabs Starter's real cost per clone is known
 export const MAX_CLONES = 2;
-export const MAX_CLONE_BYTES = 4 * 1024 * 1024;
+export { MAX_CLONE_BYTES } from "@/shared";
 export const CLONE_SECONDS = { min: 60, max: 90 };
 export const CONSENT_VERSION = "2026-11-12";
 export const CONSENT_TEXT =
