@@ -37,6 +37,11 @@ export async function takeTransient<T>(key: string): Promise<T | null> {
   return rows[0]?.value ?? null;
 }
 
-export async function dropTransient(key: string): Promise<void> {
-  await prisma.transientEntry.deleteMany({ where: { key } });
+/** Deletes the entry; with `owner`, only while it still holds that value (a claim taken over after expiry is left alone). */
+export async function dropTransient(key: string, owner?: unknown): Promise<void> {
+  if (owner === undefined) {
+    await prisma.transientEntry.deleteMany({ where: { key } });
+    return;
+  }
+  await prisma.$executeRaw`DELETE FROM "TransientEntry" WHERE "key" = ${key} AND "value" = ${json(owner)}::jsonb`;
 }

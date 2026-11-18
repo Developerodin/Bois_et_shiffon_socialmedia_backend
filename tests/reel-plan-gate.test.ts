@@ -6,20 +6,24 @@ const m = vi.hoisted(() => ({
   claim: vi.fn(),
   drop: vi.fn(),
   write: vi.fn(),
+  direct: vi.fn(),
+  settle: vi.fn(),
+  tx: vi.fn(),
   item: { findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn() },
 }));
 vi.mock("@/server/services/subscriptions", async (orig) => ({ ...(await orig<object>()), requirePlan: m.requirePlan }));
 vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>()), hitRateLimit: m.limit }));
 vi.mock("@/server/db/transient", () => ({ claimTransient: m.claim, dropTransient: m.drop }));
-vi.mock("@/server/reels/agents", () => ({ writePlan: m.write, directScenes: vi.fn() }));
+vi.mock("@/server/reels/agents", () => ({ writePlan: m.write, directScenes: m.direct }));
 vi.mock("@/server/content/knowledge", () => ({ brandKnowledge: vi.fn(async () => ({ text: "" })), productPhotos: vi.fn(async () => [{ key: "w1/b1/p.jpg", title: "P" }]) }));
-vi.mock("@/server/db/prisma", () => ({ prisma: { contentItem: m.item, opportunity: { findFirst: vi.fn() } } }));
+vi.mock("@/server/db/prisma", () => ({ prisma: { contentItem: m.item, $transaction: m.tx, opportunity: { findFirst: vi.fn() } } }));
 vi.mock("@/server/reels/presenters", () => ({ donePresenter: vi.fn() }));
 vi.mock("@/server/reels/ownership", () => ({ planOwnershipProblems: vi.fn(async () => []) }));
-vi.mock("@/server/reels/recordings", () => ({ settleRecordings: vi.fn() }));
+vi.mock("@/server/reels/recordings", () => ({ settleRecordings: m.settle }));
 vi.mock("@/server/reels/render", async (orig) => ({ ...(await orig<object>()), renderView: vi.fn(), renderFailure: vi.fn() }));
 
 import { chatPlan, createReel, editPlan } from "@/server/reels/service";
+import { PublishingError } from "@/server/services/publishing";
 import { PlanRequiredError } from "@/server/services/subscriptions";
 
 const scope = { workspaceId: "w1", brandId: "b1", userId: "u1" };
@@ -68,7 +72,7 @@ describe("reel planning gate", () => {
     await expect(second).rejects.toMatchObject({ status: 409, code: "reel.stillPlanning" });
     expect(m.write).toHaveBeenCalledTimes(1);
     expect(m.claim.mock.calls[0]).toEqual([`reel-plan:${RID}`, expect.anything(), 150_000]);
-    expect(m.drop).toHaveBeenCalledWith(`reel-plan:${RID}`);
+    expect(m.drop).toHaveBeenCalledWith(`reel-plan:${RID}`, m.claim.mock.calls[0][1]);
   });
 
   it("returns the stored plan for a finished request id, without the scriptwriter", async () => {
@@ -134,7 +138,7 @@ describe("reel planning gate", () => {
     expect(r).toMatchObject({ version: 4, reply: "Done" });
     expect(m.limit).not.toHaveBeenCalled();
     expect(m.write).not.toHaveBeenCalled();
-    expect(m.drop).toHaveBeenCalledWith("reel-chat:i1");
+    expect(m.drop).toHaveBeenCalledWith("reel-chat:i1", m.claim.mock.calls[0][1]);
   });
 
   it("create: a repeat that claims after the first finished returns the reel", async () => {
@@ -158,11 +162,56 @@ describe("reel planning gate", () => {
     m.drop.mockReturnValue(new Promise<void>((r) => { release = r; }));
     let settled = false;
     const run = chatPlan(scope, "i1", { version: 1, message: "x" }).catch(() => {}).then(() => { settled = true; });
-    await vi.waitFor(() => expect(m.drop).toHaveBeenCalledWith("reel-chat:i1"));
+    await vi.waitFor(() => expect(m.drop).toHaveBeenCalledWith("reel-chat:i1", expect.any(String)));
     await new Promise((r) => setTimeout(r, 20));
     expect(settled).toBe(false);
     release();
     await run;
     expect(settled).toBe(true);
+  });
+  it("chat: a run that outlives its marker doesn't drop the next run's marker", async () => {
+    // The marker expired while the first turn was still writing, so a second send took it over.
+    const store = new Map<string, unknown>();
+    m.claim.mockImplementation(async (k: string, v: unknown) => { store.set(k, v); return true; });
+    m.drop.mockImplementation(async (k: string, owner?: unknown) => { if (owner === undefined || store.get(k) === owner) store.delete(k); });
+    let finishFirst!: () => void;
+    let finishSecond!: () => void;
+    m.write
+      .mockReturnValueOnce(new Promise((_, reject) => { finishFirst = () => reject(WROTE); }))
+      .mockReturnValueOnce(new Promise((_, reject) => { finishSecond = () => reject(WROTE); }));
+    const first = chatPlan(scope, "i1", { version: 1, message: "x" }).catch(() => {});
+    await vi.waitFor(() => expect(m.write).toHaveBeenCalledTimes(1));
+    const second = chatPlan(scope, "i1", { version: 1, message: "y" }).catch(() => {});
+    await vi.waitFor(() => expect(m.write).toHaveBeenCalledTimes(2));
+    const secondsMarker = store.get("reel-chat:i1");
+    finishFirst();
+    await first;
+    expect(store.get("reel-chat:i1")).toBe(secondsMarker);
+    finishSecond();
+    await second;
+    expect(store.has("reel-chat:i1")).toBe(false);
+  });
+
+  it("chat: a repeat that loses the version race returns the saved turn, not a 409", async () => {
+    // The first run (whose marker expired) saved this request id's turn while the repeat was writing.
+    m.item.findFirst
+      .mockResolvedValueOnce({ id: "i1", brief: {}, versions: [{ version: 1, body }] })
+      .mockResolvedValueOnce({ id: "i1", brief: {}, versions: [{ version: 1, body }] })
+      .mockResolvedValueOnce({ id: "i1", brief: answered, versions: [{ version: 2, body }] });
+    m.write.mockResolvedValue({ plan: body, reply: "Again" });
+    m.settle.mockImplementation(async (plan: unknown) => ({ plan, notices: [], dropped: [] }));
+    m.direct.mockImplementation(async (_s: unknown, plan: unknown) => plan);
+    m.tx.mockRejectedValue(new PublishingError("This plan changed in the meantime. Reload and try again."));
+    const r = await chatPlan(scope, "i1", { version: 1, message: "x", requestId: RID });
+    expect(r).toMatchObject({ version: 2, reply: "Done", plan: { title: "Bunting" } });
+  });
+
+  it("chat: a version race without a saved turn is still a 409", async () => {
+    m.item.findFirst.mockResolvedValue({ id: "i1", brief: {}, versions: [{ version: 1, body }] });
+    m.write.mockResolvedValue({ plan: body, reply: "Again" });
+    m.settle.mockImplementation(async (plan: unknown) => ({ plan, notices: [], dropped: [] }));
+    m.direct.mockImplementation(async (_s: unknown, plan: unknown) => plan);
+    m.tx.mockRejectedValue(new PublishingError("This plan changed in the meantime. Reload and try again."));
+    await expect(chatPlan(scope, "i1", { version: 1, message: "x", requestId: RID })).rejects.toMatchObject({ status: 409 });
   });
 });

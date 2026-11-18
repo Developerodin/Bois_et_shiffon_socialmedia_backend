@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { registerManualPost } from "@/server/services/manual-post";
@@ -134,16 +135,23 @@ async function planGate(scope: Scope) {
 }
 
 /**
- * Claims `marker`, runs `run`, and always awaits the drop (so a reply never reaches the client while the marker is held).
- * A held marker is a 409 reel.stillPlanning with `message`; nothing is counted against the hourly cap for it.
- * ponytail: route maxDuration 120 s + 30 s; a run killed before its finally frees the reel after this.
+ * Claims `marker` with a token of its own, runs `run`, and always awaits the drop (so a reply never reaches the client
+ * while the marker is held). A held marker is a 409 reel.stillPlanning with `message`; nothing is counted against the
+ * hourly cap for it.
+ * ponytail: the 150 s ttl is the owner's choice, so a reel frees up quickly after a killed run. Route maxDuration is
+ * not enforced on the self-hosted api (node server.js), and a live turn (scriptwriter, a retry, director; 150 s per
+ * OpenAI call) can outlive the marker, so a second send can then run alongside it. That overlap is safe: the drop only
+ * deletes this run's own token, and a repeat that loses the version race returns the turn already saved under its
+ * request id (planTurn). Its cost is at most one extra scriptwriter run, counted against the hourly cap, never a
+ * duplicate turn. A longer ttl trades that for a slower recovery after a killed run.
  */
-async function onePlanAtATime<T>(marker: string, scope: Scope, message: string, run: () => Promise<T>): Promise<T> {
-  if (!(await claimTransient(marker, scope, 150_000))) throw new PublishingError(message, 409, "reel.stillPlanning");
+async function onePlanAtATime<T>(marker: string, message: string, run: () => Promise<T>): Promise<T> {
+  const token = randomUUID();
+  if (!(await claimTransient(marker, token, 150_000))) throw new PublishingError(message, 409, "reel.stillPlanning");
   try {
     return await run();
   } finally {
-    await dropTransient(marker).catch(() => {});
+    await dropTransient(marker, token).catch(() => {});
   }
 }
 
@@ -173,7 +181,7 @@ export async function createReel(scope: Scope, input: { opportunityId?: string; 
   const made = await reelForRequest(scope, requestId);
   if (made) return made;
   // Claim before counting: a repeat that finds the marker held must not use up one of the 20 an hour.
-  return onePlanAtATime(`reel-plan:${requestId}`, scope, "This reel is still being planned.", async () => {
+  return onePlanAtATime(`reel-plan:${requestId}`, "This reel is still being planned.", async () => {
     const again = await reelForRequest(scope, requestId); // the other run may have finished between the check and the claim
     if (again) return again;
     await planGate(scope);
@@ -225,7 +233,7 @@ export async function chatPlan(scope: Scope, itemId: string, input: ChatInput, e
     const repeat = savedTurn(item, latest, requestId);
     if (repeat) return repeat;
   }
-  return onePlanAtATime(`reel-chat:${itemId}`, scope, "This reel is still being planned. Wait for the reply.", () => planTurn(scope, itemId, input, emit));
+  return onePlanAtATime(`reel-chat:${itemId}`, "This reel is still being planned. Wait for the reply.", () => planTurn(scope, itemId, input, emit));
 }
 
 type ChatInput = { version: number; message?: string; language?: string; templateId?: string; presenterId?: string; requestId?: string };
@@ -269,7 +277,17 @@ async function planTurn(scope: Scope, itemId: string, input: ChatInput, emit?: E
   const now = new Date().toISOString();
   // A recording the revision dropped is said in the reply, where the person reads the chat.
   const said = [reply, ...settled.notices].join("\n");
-  const v = await savePlan(scope, itemId, input.version, ready, [...chat, { role: "user", text: (turn ?? "").slice(0, CHAT_MESSAGE_MAX), at: now, ...(input.requestId && { requestId: input.requestId }) }, { role: "assistant", text: said, at: now }]);
+  const turns: ChatTurn[] = [...chat, { role: "user", text: (turn ?? "").slice(0, CHAT_MESSAGE_MAX), at: now, ...(input.requestId && { requestId: input.requestId }) }, { role: "assistant", text: said, at: now }];
+  const v = await savePlan(scope, itemId, input.version, ready, turns).catch(async (error: unknown) => {
+    // A run whose marker expired may have saved this request id's turn meanwhile: answer with that, not a 409.
+    if (input.requestId && error instanceof PublishingError && error.status === 409) {
+      const again = await loadReel(scope, itemId);
+      const repeat = savedTurn(again.item, again.latest, input.requestId);
+      if (repeat) return { repeat };
+    }
+    throw error;
+  });
+  if ("repeat" in v) return v.repeat;
   return { version: v.version, plan: ready, price: reelPrice(ready), reply, droppedRecordings: settled.dropped };
 }
 

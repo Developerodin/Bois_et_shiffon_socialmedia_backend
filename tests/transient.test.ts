@@ -3,12 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => ({
   prisma: {
     $queryRaw: vi.fn(),
+    $executeRaw: vi.fn(),
     transientEntry: { findUnique: vi.fn(), upsert: vi.fn(), deleteMany: vi.fn() },
   },
 }));
 vi.mock("@/server/db/prisma", () => ({ prisma: m.prisma }));
 
-import { claimTransient, getTransient, putTransient, takeTransient } from "@/server/db/transient";
+import { claimTransient, dropTransient, getTransient, putTransient, takeTransient } from "@/server/db/transient";
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -40,5 +41,14 @@ describe("transient entries", () => {
     const arg = m.prisma.transientEntry.upsert.mock.calls[0][0];
     expect(arg.where).toEqual({ key: "k" });
     expect(arg.create.expiresAt.getTime()).toBeGreaterThan(Date.now() + 4000);
+  });
+  it("drops by key alone, or only while it still holds the owner's value", async () => {
+    await dropTransient("k");
+    expect(m.prisma.transientEntry.deleteMany).toHaveBeenCalledWith({ where: { key: "k" } });
+    await dropTransient("k", "tok");
+    expect(m.prisma.transientEntry.deleteMany).toHaveBeenCalledTimes(1);
+    const [sql, ...values] = m.prisma.$executeRaw.mock.calls[0];
+    expect((sql as string[]).join("?")).toMatch(/DELETE FROM "TransientEntry" WHERE "key" = \? AND "value" = \?::jsonb/);
+    expect(values).toEqual(["k", JSON.stringify("tok")]);
   });
 });
