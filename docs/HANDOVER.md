@@ -13,7 +13,8 @@ Branch `feature-3a-reels` in the server, web and mobile repos (not merged). Plan
   and templates; "Your reels") and `/reels/{id}` (one reel: a steps rail, the plan chat, the storyboard with a preview
   and scene by scene view). Behind `WEB_FEATURES=reels`. The assistant on `/reels` is a drawer; on other pages it stays docked.
 - **Shared contract.** `shared/reels.ts` in the server holds the reel idea shape, the chat message limit, the reel stage
-  rule and the video model names. The web uses it; the phone mirrors it by hand (comments in `review.tsx` and `storyboard.tsx`).
+  rule and the video model names. The web uses it; the phone mirrors it by hand (comments in `index.tsx`, `review.tsx`
+  and `storyboard.tsx` under `src/app/reels/`).
 - **Server changes** (additive). Planning and chat are safe to repeat: a message carries a request id, and a repeat
   gets the first answer back. A second message on a reel still being planned gets 409 `reel.stillPlanning`. The reel
   list and the single read carry what the web needs to build the rail.
@@ -24,13 +25,18 @@ Branch `feature-3a-reels` in the server, web and mobile repos (not merged). Plan
   two. A message sent while the network dies keeps its request id, so sending again is one turn.
 
 **Calls made**
-- The in-flight marker lasts 150 s, not the spec's 6 minutes (owner approved 2026-11-18).
+- The in-flight marker lasts 150 s, not the spec's 6 minutes (owner approved 2026-11-18, for a quick recovery after a
+  killed run). Route `maxDuration` is not enforced on the self-hosted api (`node server.js`), and a live turn
+  (scriptwriter, a retry, director) can outlive the marker, so a second send can then run alongside it. That overlap is
+  safe: each run drops only its own marker, and a repeat that loses the version race gets the turn already saved under
+  its request id. It costs at most one extra scriptwriter run, counted against the 20 an hour, never a duplicate turn.
+  The owner may want to revisit the ttl.
 - Revise pressers live at module level per business, brand and reel, as in photoshoot, so a kept id survives leaving the page.
-- Ideas are read once when the dialog opens, not on every page load.
+- Ideas are read once when the reels home mounts (and again after an idea is planned), not each time the dialog opens.
 
 **Copy written without a source, for the owner to approve**
 - The ideas dialog description: "Pick one and the plan starts from it."
-- The two reels gate lines in `app/(shell)/reels/page.tsx`: "Reels belong to a business. Create or pick one from the
+- The two reels gate lines, shown on both reels pages (`components/reels/access.tsx`): "Reels belong to a business. Create or pick one from the
   sidebar, then its reels show here." and "Your role cannot see this business's reels. Ask a workspace admin for access."
 - The template title fallback in `components/reels/home.tsx`: a template with no label shows its id as the title.
 
@@ -57,8 +63,6 @@ paywall banner and the slide animation between docked and undocked pages at wide
 - `/reels/{id}` has no `scripts/audit-ui.ts` entry because no fixture reel exists. Run the audit by hand against a real reel id.
 - The rendered reel video carries no on-screen text, only the "Made with AI" mark. The web preview hides its text
   overlay while the video plays, so what the owner sees on the photo is not in the finished video.
-- The in-flight marker is 150 s, a deviation from the spec's 6 minutes. A plan that runs longer than that can be
-  started again by a second press.
 - `listReels` has no studio index, so it gets slower as a brand's reel count grows. Add an index for it before a brand has thousands of reels.
 - The signed link cache never evicts. One entry per reel seen in a tab; a tab left open for days grows slowly. Evict by age if it ever matters.
 - The library page's inline gate is not moved onto `featureAccess`; only the reels pages use it. Move it when the library is next touched.
