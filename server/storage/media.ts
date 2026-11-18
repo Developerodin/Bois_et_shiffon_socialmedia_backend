@@ -65,11 +65,15 @@ export async function putMedia(
   );
 }
 
-/** Short-lived read URL, e.g. for Meta to fetch media at publish time. */
-export function signedMediaUrl(key: string, expiresInSeconds = 3600) {
+/** Short-lived read URL, e.g. for Meta to fetch media at publish time. With `downloadAs` the browser saves it under that name. */
+export function signedMediaUrl(key: string, expiresInSeconds = 3600, downloadAs?: string) {
   return getSignedUrl(
     s3,
-    new GetObjectCommand({ Bucket: MEDIA_BUCKET, Key: key }),
+    new GetObjectCommand({
+      Bucket: MEDIA_BUCKET,
+      Key: key,
+      ...(downloadAs && { ResponseContentDisposition: `attachment; filename="${downloadAs}"` }),
+    }),
     { expiresIn: expiresInSeconds },
   );
 }

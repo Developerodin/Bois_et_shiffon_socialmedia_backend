@@ -261,7 +261,7 @@ export async function shootView(s: PhotoShoot) {
     failed: s.status === "FAILED",
     createdAt: s.createdAt.toISOString(),
     sourceUrl: await signedMediaUrl(input.sourceKey),
-    shots: await Promise.all(s.outputKeys.map(async (key) => ({ key, url: await signedMediaUrl(key) }))),
+    shots: await Promise.all(s.outputKeys.map(async (key, i) => ({ key, url: await signedMediaUrl(key), downloadUrl: await signedMediaUrl(key, 3600, `photoshoot-${s.id.slice(0, 8)}-${i + 1}.jpg`) }))),
   } satisfies Shoot;
 }
 

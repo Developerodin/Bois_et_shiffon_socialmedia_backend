@@ -15,7 +15,8 @@ const invalid = (title: string, status = 400) => problemResponse({ type: "https:
  */
 export async function POST(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
-    const scope = await authorizeBrandRoute(request, context.params, "publish.execute");
+    // Creators upload the photo they shoot (owner, 2026-11-18); every role with publish.execute also has content.create.
+    const scope = await authorizeBrandRoute(request, context.params, "content.create");
     if (scope instanceof Response) return scope;
     if (Number(request.headers.get("content-length") ?? 0) > MEDIA_MAX_BYTES + 64 * 1024) return invalid("Images can be up to 4 MB", 413);
 
