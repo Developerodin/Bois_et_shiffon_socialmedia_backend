@@ -4,7 +4,7 @@ import type { z } from "zod";
 import { ShootRequest, shootView } from "@/server/photoshoot/shoot";
 import { signedMediaUrl } from "@/server/storage/media";
 import { TIERS } from "@/server/photoshoot/tiers";
-import { SHOOT_CREDITS, SHOOT_TIER_IDS, type ShootRequest as SharedShootRequest } from "@/shared";
+import { SHOOT_CREDITS, SHOOT_TIER_IDS, shootRequestKey, shouldKeepRequestId, type ShootRequest as SharedShootRequest } from "@/shared";
 
 vi.mock("@/server/storage/media", async (orig) => ({
   ...(await orig<object>()),
@@ -41,5 +41,19 @@ describe("photoshoot contract", () => {
     const view = await shootView(row);
     expect(view.shots).toEqual([{ key: "k1", url: "https://s/k1" }]);
     expect(signedMediaUrl).not.toHaveBeenCalledWith("k1", 3600, expect.anything());
+  });
+});
+
+describe("press request ids", () => {
+  it("keeps the id when the outcome is unknown: no answer (0) or a server error", () => {
+    for (const status of [0, 500, 502, 503, 504]) expect(shouldKeepRequestId(status)).toBe(true);
+    for (const status of [400, 402, 404, 409, 429]) expect(shouldKeepRequestId(status)).toBe(false);
+  });
+
+  it("keys a request the same whatever order its fields come in", () => {
+    const built: SharedShootRequest = { kind: "product", tier: "base", sourceKey: "k", ratio: "1:1", scene: "studio", brief: "" };
+    const stored = JSON.parse('{"brief":"","ratio":"1:1","scene":"studio","tier":"base","kind":"product","sourceKey":"k"}') as SharedShootRequest;
+    expect(shootRequestKey(stored)).toBe(shootRequestKey(built));
+    expect(shootRequestKey({ ...built, scene: "interior" })).not.toBe(shootRequestKey(built));
   });
 });

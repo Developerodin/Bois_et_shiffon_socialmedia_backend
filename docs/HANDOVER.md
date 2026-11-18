@@ -64,8 +64,10 @@ generation (no provider credits); the 402 dialog; the 60-an-hour upload 429 (and
 - Creators can fill the brand library (60 photos), and only `context.edit` can empty it.
 - The upload limit (60 an hour per user) counts refused files too.
 - The "don't charge twice" press rule lives in two places: web `components/photoshoot/press.ts` and the phone's
-  `src/ui/photoshoot/start.ts`. Each has a comment pointing at the other; keep them in step. It treats a JSON 502 or 504
-  as an answer (new id on retry); a non-JSON 5xx counts as "server down" and keeps the id.
+  `src/ui/photoshoot/start.ts`. Each has a comment pointing at the other; keep them in step. Both use the shared
+  `shouldKeepRequestId` and `shootRequestKey` (`shared/photoshoot.ts`): no answer or any 5xx (JSON or a gateway page)
+  keeps the id, a 4xx clears it. After a press that kept its id the web reads the list and the balance again; the
+  phone does not (its results list reads again each time it is opened).
 - The phone's option lists (`src/ui/photoshoot/options.ts`) are only type-checked against the shared contract, not
   built from it: a new shared value will not show on the phone by itself.
 - Signed links last an hour; the web re-reads at 50 minutes. The source thumbnail in the setup is not re-read (preview only).
