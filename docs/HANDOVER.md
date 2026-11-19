@@ -62,7 +62,7 @@ Branch `feature-3b-reels` in the server and web repos (not merged). Spec
 - [ ] Keyboard through every radio group, the recorder and the photo moves.
 - [ ] Arrow through voices: nothing saves until **Use this voice**.
 - [ ] 375 px: no horizontal scroll on each new step.
-- [ ] Mic denied: "Upload a file instead" still works.
+- [ ] Mic denied: the sentence says "Your browser blocked the microphone…", and "Or upload an audio file, up to 15 seconds" still works. No microphone: "…or upload a file instead."
 - [ ] Close the record dialog during the permission prompt and mid-recording: the mic indicator goes off and no take is sent.
 - [ ] A take on a web-made reel works.
 
