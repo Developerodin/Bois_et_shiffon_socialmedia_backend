@@ -10,7 +10,8 @@ import { prisma } from "@/server/db/prisma";
 import { claimTransient, dropTransient } from "@/server/db/transient";
 import { directScenes, type ReelPhoto, writePlan } from "@/server/reels/agents";
 import { planOwnershipProblems } from "@/server/reels/ownership";
-import { aiDisclosureLine, carryStandIns, clearPresenterFlags, needsAiDisclosure, isStudioPlan, planProblems, presenterCuts, ReelPlan, reelPrice, reelSeconds, sceneSeconds, toVersionBody } from "@/server/reels/plan";
+import { aiDisclosureLine, carryStandIns, clearPresenterFlags, needsAiDisclosure, isStudioPlan, planProblems, presenterCuts, ReelPlan, reelPrice, reelSeconds, sceneSeconds, toVersionBody, joinSeconds } from "@/server/reels/plan";
+import { captionCues } from "@/server/reels/captions";
 import { donePresenter } from "@/server/reels/presenters";
 import { settleRecordings } from "@/server/reels/recordings";
 import { renderFailure, renderView } from "@/server/reels/render";
@@ -19,7 +20,7 @@ import { creditBalance } from "@/server/services/credits";
 import { decide, lock, PublishingError, TX } from "@/server/services/publishing";
 import { signedMediaUrl } from "@/server/storage/media";
 import { PlanRequiredError, requirePlan } from "@/server/services/subscriptions";
-import { answeredTurn, CHAT_MESSAGE_MAX, type ChatTurn, type PlanEvent } from "@/shared";
+import { answeredTurn, CHAT_MESSAGE_MAX, type ChatTurn, type PlanEvent, type ReelDetail } from "@/shared";
 
 /** Mobile Reels studio (R01–R13): create, chat, edit, send, register a manual post. Rendering is render.ts. */
 type Scope = { workspaceId: string; brandId: string; userId: string };
@@ -379,7 +380,15 @@ export async function reelDetail(scope: Omit<Scope, "userId">, itemId: string) {
   const latest = item.versions[0];
   const body = latest?.body as { videoKey?: string } | undefined;
   const plan = ReelPlan.safeParse(latest?.body);
-  const [videoUrl, renders, credits] = await Promise.all([body?.videoKey ? signedMediaUrl(body.videoKey, 3600) : null, renderView(item.id, scope.workspaceId), creditBalance(scope.workspaceId)]);
+  // A caption edit's version copies the videoKey, so the render that made the video still gives its timings.
+  const [videoUrl, renders, credits, made] = await Promise.all([
+    body?.videoKey ? signedMediaUrl(body.videoKey, 3600) : null,
+    renderView(item.id, scope.workspaceId),
+    creditBalance(scope.workspaceId),
+    body?.videoKey ? prisma.reelRender.findFirst({ where: { contentItemId: item.id, videoKey: body.videoKey, step: "DONE" }, select: { outputs: true } }) : null,
+  ]);
+  const out = made?.outputs as { voiceSeconds?: number[]; models?: string[]; clipSeconds?: number[] } | null | undefined;
+  const timed = plan.success && Array.isArray(out?.voiceSeconds) && Array.isArray(out?.models) && Array.isArray(out?.clipSeconds);
   return {
     item: { id: item.id, title: item.title, status: item.status, postUrl: item.postUrl, scheduledFor: item.scheduledFor },
     version: latest?.version ?? 0,
@@ -394,11 +403,13 @@ export async function reelDetail(scope: Omit<Scope, "userId">, itemId: string) {
     videoUrl,
     // The video on screen, as a story frame's source (stories/sources.ts resolves a reel by its videoKey).
     videoKey: body?.videoKey ?? null,
+    // One cue per scene, wrapped by the browser. Ceiling: a 30-word scene is one 15 s cue; split by sentence if people ask.
+    captions: timed ? captionCues(plan.data.scenes, joinSeconds(out as { voiceSeconds: number[]; models: string[]; clipSeconds: number[] })) : null,
     checks: latest?.checks[0] ? { overall: latest.checks[0].overall, results: latest.checks[0].results } : null,
     renders,
     chat: chatOf(item.brief),
     credits,
     // Scene photos are private storage keys; the app shows them through short-lived links.
     photoUrls: plan.success ? Object.fromEntries(await Promise.all([...new Set(plan.data.scenes.map((x) => x.photoKey))].map(async (k) => [k, await signedMediaUrl(k, 3600)] as const))) : {},
-  };
+  } satisfies Omit<ReelDetail, "item" | "checks" | "renders"> & Record<"item" | "checks" | "renders", unknown>; // those three hold Dates and Json that only become the shared shape once serialized
 }

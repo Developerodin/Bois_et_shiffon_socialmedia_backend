@@ -6,19 +6,21 @@ const m = vi.hoisted(() => {
     $executeRaw: vi.fn(async () => 0),
     contentItem: { findFirst: fn(), update: fn() },
     auditEvent: { create: fn() },
-    reelRender: { findUnique: fn() },
+    reelRender: { findUnique: fn(), findFirst: fn() },
   };
   return { tx, prisma: { ...tx, $transaction: vi.fn(async (f: (t: typeof tx) => unknown) => f(tx)) }, decide: fn(), enqueueTick: fn(), kick: fn() };
 });
 vi.mock("@/server/db/prisma", () => ({ prisma: m.prisma }));
 vi.mock("@/server/services/publishing", async (orig) => ({ ...(await orig<object>()), decide: m.decide }));
 vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), signedMediaUrl: vi.fn(async (k: string, _e?: number, name?: string) => `https://s3/${k}${name ? `#${name}` : ""}`) }));
-vi.mock("@/server/reels/render", () => ({ enqueueTick: m.enqueueTick, renderView: vi.fn() }));
+vi.mock("@/server/reels/render", () => ({ enqueueTick: m.enqueueTick, renderView: vi.fn(async () => []) }));
+vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), creditBalance: vi.fn(async () => 0) }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: m.kick }));
 vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>()), hitRateLimit: vi.fn(async () => ({ allowed: true, count: 1 })) }));
 
 import { POST as webhook } from "@/app/api/v1/webhooks/higgsfield/[renderId]/route";
-import { registerPostLink, sendReel } from "@/server/reels/service";
+import { PRESENTER_MODEL } from "@/server/reels/router";
+import { registerPostLink, reelDetail, sendReel } from "@/server/reels/service";
 
 const scope = { workspaceId: "w1", brandId: "b1", userId: "u1" };
 const reel = (status: string, body: object = { videoKey: "w1/b1/r.mp4" }) => m.tx.contentItem.findFirst.mockResolvedValue({ id: "i1", status, studio: true, versions: [{ id: "v1", version: 3, body }] });
@@ -66,6 +68,39 @@ describe("sendReel", () => {
   it("waits for the checks before anything can be sent", async () => {
     reel("DRAFT_REVIEW");
     await expect(sendReel(scope, "i1", 3)).rejects.toThrow(/checks are still running/);
+  });
+});
+
+describe("reelDetail captions", () => {
+  const scene = (voiceText: string) => ({ shot: "s", direction: "d", onScreenText: "", voiceText, photoKey: "w1/b1/p.jpg" });
+  const plan = (extra: object = {}) => ({ title: "T", presenter: "none", template: "", voice: "v", scenes: [scene("Hello there"), scene("  "), scene("Bye")], caption: "c", hashtags: [], ...extra });
+  const outputs = { voiceSeconds: [3.2, 1, 20], models: ["kling-3-std", PRESENTER_MODEL, "kling-3-std"], clipSeconds: [5, 5, 10] };
+  const latest = (version: number, body: object) => m.prisma.contentItem.findFirst.mockResolvedValue({ id: "i1", title: "T", status: "AWAITING_APPROVAL", postUrl: null, scheduledFor: null, brief: null, versions: [{ version, body, checks: [] }] });
+  const cues = [{ start: 0, end: 4, text: "Hello there" }, { start: 8, end: 18, text: "Bye" }];
+
+  it("captions come from the DONE render with the body's videoKey", async () => {
+    latest(3, plan({ videoKey: "w1/b1/r.mp4" }));
+    m.prisma.reelRender.findFirst.mockResolvedValue({ outputs });
+    const d = await reelDetail({ workspaceId: "w1", brandId: "b1" }, "i1");
+    expect(m.prisma.reelRender.findFirst).toHaveBeenCalledWith({ where: { contentItemId: "i1", videoKey: "w1/b1/r.mp4", step: "DONE" }, select: { outputs: true } });
+    expect(d.captions).toEqual(cues);
+  });
+
+  it("a caption edit's version keeps its cues", async () => {
+    latest(5, plan({ videoKey: "w1/b1/r.mp4", caption: "edited" }));
+    m.prisma.reelRender.findFirst.mockResolvedValue({ outputs });
+    expect((await reelDetail({ workspaceId: "w1", brandId: "b1" }, "i1")).captions).toEqual(cues);
+  });
+
+  it("no video, or outputs without voiceSeconds, gives null", async () => {
+    latest(3, plan());
+    expect((await reelDetail({ workspaceId: "w1", brandId: "b1" }, "i1")).captions).toBeNull();
+    expect(m.prisma.reelRender.findFirst).not.toHaveBeenCalled();
+    latest(3, plan({ videoKey: "w1/b1/r.mp4" }));
+    m.prisma.reelRender.findFirst.mockResolvedValue({ outputs: { models: [] } });
+    expect((await reelDetail({ workspaceId: "w1", brandId: "b1" }, "i1")).captions).toBeNull();
+    m.prisma.reelRender.findFirst.mockResolvedValue(null);
+    expect((await reelDetail({ workspaceId: "w1", brandId: "b1" }, "i1")).captions).toBeNull();
   });
 });
 

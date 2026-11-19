@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { MODEL_IDS, SCENE_KINDS, TRANSITIONS } from "@/server/reels/router";
+import { MODEL_IDS, PRESENTER_MODEL, SCENE_KINDS, TRANSITIONS } from "@/server/reels/router";
 import { CREDIT_COSTS } from "@/server/services/credits";
 import { MAX_SCENE_WORDS, REEL_SCENES, type ReelPlan as SharedReelPlan, VOICE_TEXT_MAX, wordCount, WORDS_PER_SECOND } from "@/shared";
 
@@ -51,11 +51,15 @@ export const speechSeconds = (text: string) => wordCount(text) / WORDS_PER_SECON
 export const clipSeconds = (voiceSeconds: number) => Math.min(15, Math.max(3, Math.ceil(voiceSeconds)));
 /** The presenter model's shortest clip (Seedance): a presenter scene is never shorter, and is priced for it. */
 export const PRESENTER_MIN_SECONDS = 4;
+export const presenterFloor = (seconds: number, presenter: boolean) => (presenter ? Math.max(PRESENTER_MIN_SECONDS, seconds) : seconds);
 /** A scene lasts as long as its voice: the recording's measured length, else the script read at ~2 words a second. */
 export const sceneSeconds = (scene: Pick<ReelScene, "voiceText" | "presenter" | "recordingId" | "recordingSeconds">) => {
   const s = clipSeconds(scene.recordingId && scene.recordingSeconds !== undefined ? scene.recordingSeconds : speechSeconds(scene.voiceText));
-  return scene.presenter ? Math.max(PRESENTER_MIN_SECONDS, s) : s;
+  return presenterFloor(s, !!scene.presenter);
 };
+/** What the join trims each clip to: the voice's length (presenter minimum applied), at most the clip made. */
+export const joinSeconds = (out: { voiceSeconds: number[]; models: string[]; clipSeconds: number[] }) =>
+  out.voiceSeconds.map((v, i) => Math.min(presenterFloor(clipSeconds(v), out.models[i] === PRESENTER_MODEL), out.clipSeconds[i]));
 export const reelSeconds = (plan: ReelPlan) => plan.scenes.reduce((sum, s) => sum + sceneSeconds(s), 0);
 export const reelPrice = (plan: ReelPlan) =>
   plan.scenes.reduce((sum, s) => sum + sceneSeconds(s) * (s.presenter ? CREDIT_COSTS.presenterPerSecond : CREDIT_COSTS.reelPerSecond), 0);

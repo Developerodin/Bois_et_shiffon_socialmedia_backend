@@ -13,7 +13,7 @@ import { checkSeam } from "@/server/reels/agents";
 import { frameOf, joinReel } from "@/server/reels/join";
 import { productPhotos } from "@/server/content/knowledge";
 import { planOwnershipProblems } from "@/server/reels/ownership";
-import { aiDisclosureLine, clipSeconds, needsAiDisclosure, planProblems, PRESENTER_MIN_SECONDS, ReelPlan, reelPrice, standInProblems } from "@/server/reels/plan";
+import { aiDisclosureLine, joinSeconds, needsAiDisclosure, planProblems, ReelPlan, reelPrice, standInProblems } from "@/server/reels/plan";
 import { donePresenter } from "@/server/reels/presenters";
 import { recordingKeys, recordingProblems } from "@/server/reels/recordings";
 import { promptProblems } from "@/server/reels/prompt-check";
@@ -384,13 +384,12 @@ async function join(r: ReelRender, urls: string[]) {
 }
 
 async function joinClips(r: ReelRender, out: Outputs, urls: string[], scope: { workspaceId: string; brandId: string }, dir: string) {
-  // Each scene lasts as long as its voice (rounded up); longer clips are trimmed to it.
-  // A presenter clip is at least 4 s (and priced so): its scene keeps that length.
-  const sceneSeconds = out.voiceSeconds.map((v, i) => (out.models[i] === PRESENTER_MODEL ? Math.max(PRESENTER_MIN_SECONDS, clipSeconds(v)) : clipSeconds(v)));
+  // Each scene lasts as long as its voice (rounded up, a presenter's at least 4 s); longer clips are trimmed to it.
+  const sceneSeconds = joinSeconds(out);
   const clips = await Promise.all(urls.map(async (u, i) => {
     const file = path.join(dir, `clip${i}.mp4`);
     await writeFile(file, await fetchResult(u));
-    return { file, seconds: Math.min(sceneSeconds[i], out.clipSeconds[i]) };
+    return { file, seconds: sceneSeconds[i] };
   }));
   // Look at every join before joining: a seam that doesn't read as one film is softened to a dissolve.
   const plan = await planOf(r);
