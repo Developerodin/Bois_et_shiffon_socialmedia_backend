@@ -4,6 +4,103 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Feature 3c: reels render, review and publish on the web (2026-11-19)
+
+Branch `feature-3c-reels` in the server, web and mobile repos (not merged). Spec
+`docs/superpowers/specs/2026-11-18-feature-3-reels-design.md`, sections 5 to 7. This finishes the reel page: a reel can
+now be made, reviewed and published without the phone. Behind `WEB_FEATURES=reels`.
+
+- **What was built.** **Make video** on the Storyboard (the page's one primary button, with the price from the server).
+  A finished reel's Storyboard shows **Watch the video** instead. The **Video** step shows the render's progress, a
+  sentence when it fails (X01) with **Try again**, **Edit storyboard** and, when the voice was deleted, **Change voice**,
+  and **Review your reel** when it is done. The **Review** step has the video with captions on by default, the
+  transcript, the quality checks, an editable caption and hashtags, **Download video** (which approves this version)
+  and **Continue to Publish**. The **Publish** step reuses the Overview's release panel: Publish now, Schedule (with
+  the time zone shown) and Cancel schedule. On an unapproved reel, Publish now approves and posts in one press. The
+  reels home gets **Posted it? Add link** on a downloaded reel. A studio reel in the Overview's release panel asks for
+  no video link, shows **Open in Reels** (only with the reels flag on) and has no draft editor.
+- **Web kit.** `ChecksList` (the Overview's quality check list, now shared) and the `PreviewFrame` captions props (see
+  `docs/DESIGN_SYSTEM.md` section 7).
+- **Paid buttons.** Make video and Try again use the shared paid press rules: the price shows from the server, a
+  double click makes one render and one charge, and a 402 opens the paywall.
+- **Server changes.**
+  - `startRender` refuses with 409 `render.alreadyDone` when the version already has a video (unless `again`), and
+    never reuses a refunded attempt's charge id.
+  - The release state says when a reel was made in the studio (`requirements.studio`).
+  - Caption edits on a studio reel keep the plan's hook and script from the scenes, and refuse more than 5 hashtags,
+    a hashtag over 100 characters, or a caption over 2200. A lost version race has the code `draft.changed`.
+  - The reel read carries `captions` (cues timed from the voice and clip lengths, in `server/reels/captions.ts`), and
+    the download link carries the file name `reel-<8>.mp4`.
+  - `captions` and `draft.changed` are in `shared/`, synced to web and mobile.
+  - These are additive for old phone builds. The one earlier change that was not is corrected in 3b below.
+
+**Calls made**
+- The failed reel card says "Didn't work" without "N credits back". The owner chose this on 2026-11-19; the spec
+  (section 5.2) asked for it. The list has no credits for a reel; adding `render.credits` to it would bring it back.
+- Captions use one cue per scene, not per sentence.
+- The Review's checks wait stops after 10 minutes (the spec names no end). It then says "The checks are taking long."
+  with **Check again** (people who can create) or **Read again**. Creators also get one quiet recheck at 90 s.
+- The Review polls its own checks wait; the page's read does not wait for checks.
+- The release state's `studio` flag is set in `releaseState`, not passed to `publishRequirements`.
+- `ChecksList` comes from the Overview's Quality check section; the release panel has no checks list.
+- "Change voice" on a deleted voice opens the Script & voice step, not the Voices sheet.
+- The Overview hides the next-step prompt for studio reels too, not only the draft editor.
+- The time zone line on the schedule input shows for posts as well as reels.
+- The Review's primary button is **Continue to Publish**; Download and Save caption are outline.
+- The Instagram line on the Publish step reads the connections list, since the release state lists only active
+  accounts. It shows only when no account is active ("needs reconnecting" or "isn't connected").
+- `/reels` home first load grew about 0.8 kB gzip (159 to 160 kB): the shared `reel.ts` chunk now carries the Review
+  helpers. Splitting `reel.ts` would fix it with no behaviour change; not worth it for under 1 kB.
+- Caption edits send only caption and hashtags. The phone's edit is unchanged.
+
+**Copy written without a source, for the owner to approve** (desktop-only lines, not from the phone's `reels.json`)
+- Review: "Make the video first. Download and Publish open once it's made.", "This reel can't be sent in its current
+  state.", "Checking… usually under a minute", "The checks are taking long.", "No checks for this version yet.",
+  "Already checking. The result will appear here.", "Saving the caption runs the checks again.", "A reel takes at most
+  5 hashtags.", "The post is over 2200 characters. Shorten the caption or the hashtags.", "Wait for the download to
+  start.", "Downloading approves this version.", "Couldn't start the download. Try again.", "Your role can't approve
+  reels, so Download (which approves) isn't here."
+- Video step: "No video yet.", "Go to the storyboard", "It's safe to leave this page.", "Failed at: …", "N reserved
+  credits released".
+- Storyboard: "Wait for the plan to finish saving."
+- Publish: "Make the video first.", "Publishing approves draft vN first.", "Connect an account for Instagram to publish
+  it.", "Instagram needs reconnecting.", "Instagram isn't connected.", "Your role can't publish reels. Someone who can
+  publish will post it.", "Your role can't approve reels, so it can't publish this one.", "Time zone: …"
+- Overview: "Made in Reels. Change its plan, video and caption there."
+- Reels home: the Add link dialog's title, text and "Post link" field, and the button "Posted it? Add link".
+
+**Manual checks for the owner**
+- [ ] Double-click Make video: one render, one charge.
+- [ ] A finished reel's storyboard shows "Watch the video". A forced render call (`{ action: "render", version }` on
+  that version) gets 409.
+- [ ] A 402 on Make video and on Try again opens the paywall.
+- [ ] The player and every Review control by keyboard. Captions are on by default and in step with the voice.
+- [ ] A sixth hashtag is refused before sending.
+- [ ] Download saves `reel-<8>.mp4` and the reel shows as approved.
+- [ ] Publish now on an unapproved reel approves and posts in one press. After a failed publish, the next press
+  doesn't approve again.
+- [ ] Approving a studio reel in the Overview doesn't book it by itself.
+- [ ] Schedule shows the time zone. Cancel schedule works.
+- [ ] 375 px: no horizontal scroll on Video, Review and Publish.
+- [ ] A studio reel in the Overview's release panel asks for no video link, shows "Open in Reels" and has no draft
+  editor.
+- [ ] "Posted it? Add link" on a downloaded reel.
+- [ ] The Overview's Quality check section looks as before (it now uses `ChecksList`).
+
+**Not checked live:** renders were never run (no provider credits). The Video step, X01 and the captions' timing
+against a real video are unseen. No browser check was done on the new steps; the list above is the owner's.
+
+**Known limits**
+- Captions are on our preview only, not burned into the video (spec Q2b).
+- Nobody is told a render ended once they leave the page (Q3).
+- The failed reel card says "Didn't work" without its credits (the owner's choice).
+- The Review's checks wait stops after 10 minutes.
+- Viewers can still save the video from the player. The approval gate covers the approval act, not the file.
+- A failed publish attempt in History shows the platform's own message, as for posts.
+- A scheduled reel that comes due while the page is open isn't noticed until the page is read again.
+- "Open in Reels" shows only with the reels flag on.
+- `/reels/{id}` still has no `scripts/audit-ui.ts` entry (no fixture reel).
+
 ## Feature 3b: reels steps and voice on the web (2026-11-19)
 
 Branch `feature-3b-reels` in the server and web repos (not merged). Spec
@@ -19,7 +116,7 @@ Branch `feature-3b-reels` in the server and web repos (not merged). Spec
   while recording; closing the dialog stops it and sends nothing.
 - **Paid buttons.** Make a presenter, the template preview and Create the voice use the shared paid press rules: the
   price shows from the server, a repeat never charges twice, and a 402 opens the paywall.
-- **Server changes** (all additive, old phone builds unaffected). Error code `reel.changed`; `clone.stillMaking`; an
+- **Server changes** (additive, with one change for old phone builds: a fast clone retry now gets 409 `clone.stillMaking`). Error code `reel.changed`; `clone.stillMaking`; an
   optional `consentVersion` on clone; the recording bucket is keyed by scope; library previews are https only. A take
   on a web-made reel now works (Task 1, S9).
 
