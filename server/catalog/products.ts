@@ -1,4 +1,4 @@
-import type { Product } from "@prisma/client";
+import type { Prisma, Product } from "@prisma/client";
 import { z } from "zod";
 import { problemResponse } from "@/server/api/http-error";
 import { httpUrl } from "@/server/catalog/sync";
@@ -101,3 +101,31 @@ export const toProductListDto = (p: Omit<Product, "description">) => ({
   archivedAt: p.archivedAt?.toISOString() ?? null,
   updatedAt: p.updatedAt.toISOString(),
 });
+
+/** Page sizes the list offers; anything else is refused rather than guessed. */
+export const PRODUCT_PAGE_SIZES = [20, 50, 100] as const;
+
+/**
+ * The list's paged form (`?page=` present): page from 1, a size from PRODUCT_PAGE_SIZES, a title/SKU search, a stock
+ * filter. null = no `page`, the whole list as before (the phone and the product pickers read that). A page past the
+ * end is clamped by the route once it knows the total.
+ */
+export const ProductPageQuery = z.object({
+  page: z.coerce.number().int().min(1).max(100_000),
+  limit: z.coerce.number().refine((n) => (PRODUCT_PAGE_SIZES as readonly number[]).includes(n), "limit must be 20, 50 or 100").default(50),
+  q: z.string().trim().max(200).default(""),
+  stock: z.enum(["", "in", "out"]).default(""),
+});
+export type ProductPageQuery = z.infer<typeof ProductPageQuery>;
+
+/**
+ * The search and stock filter as a database condition. "In stock" is the web filter's meaning: a positive count, or no
+ * count and inStock true. "Out" is every other row, spelled out so rows with nulls aren't lost to SQL's NOT.
+ */
+export function productPageWhere({ q, stock }: Pick<ProductPageQuery, "q" | "stock">): Prisma.ProductWhereInput {
+  const and: Prisma.ProductWhereInput[] = [];
+  if (q) and.push({ OR: [{ title: { contains: q, mode: "insensitive" } }, { sku: { contains: q, mode: "insensitive" } }] });
+  if (stock === "in") and.push({ OR: [{ stockQuantity: { gt: 0 } }, { stockQuantity: null, inStock: true }] });
+  if (stock === "out") and.push({ OR: [{ stockQuantity: { lte: 0 } }, { stockQuantity: null, inStock: false }, { stockQuantity: null, inStock: null }] });
+  return and.length ? { AND: and } : {};
+}
