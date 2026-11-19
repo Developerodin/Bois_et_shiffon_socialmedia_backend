@@ -18,6 +18,7 @@ const m = vi.hoisted(() => {
     status: fn(),
     spend: fn(),
     refund: fn(),
+    refunded: vi.fn<(w: string, r: string) => Promise<boolean>>(),
     enqueue: fn(),
     startAgentRun: fn(),
     joinReel: vi.fn(async () => undefined),
@@ -29,7 +30,7 @@ const m = vi.hoisted(() => {
 vi.mock("@/server/services/subscriptions", () => ({ requirePlan: vi.fn(async () => undefined), PlanRequiredError: class extends Error {} }));
 vi.mock("@/server/db/prisma", () => ({ prisma: m.prisma }));
 vi.mock("@/server/reels/higgsfield", () => ({ higgsfield: { animate: m.animate, status: m.status }, fetchResult: vi.fn(async () => new Uint8Array(4)) }));
-vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), spendCredits: m.spend, refundCharge: m.refund }));
+vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), spendCredits: m.spend, refundCharge: m.refund, chargeRefunded: m.refunded }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: m.enqueue }));
 vi.mock("@/server/agents/engine", () => ({ startAgentRun: m.startAgentRun }));
 vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), putMedia: vi.fn(), signedMediaUrl: vi.fn(async (k: string) => `https://s3/${k}`) }));
@@ -54,6 +55,7 @@ const render = (over: object = {}) => ({ id: "r1", ...scope, contentItemId: "i1"
 
 beforeEach(() => {
   vi.clearAllMocks();
+  m.refunded.mockImplementation(async () => false);
   m.prisma.contentVersion.findUnique.mockResolvedValue({ id: "v1", version: 2, body: plan });
   m.enqueue.mockResolvedValue({});
   m.startAgentRun.mockResolvedValue({});
@@ -306,6 +308,25 @@ describe("startRender", () => {
     m.tx.reelRender.aggregate.mockResolvedValue({ _max: { attempt: 1 } });
     await startRender({ ...scope, userId: "u1", itemId: "i1", version: 2 });
     expect(m.spend).toHaveBeenCalledWith(expect.objectContaining({ refId: "v1:2" }));
+  });
+
+  const withVideo = () => m.tx.contentItem.findFirst.mockResolvedValue({ id: "i1", studio: true, versions: [{ id: "v3", version: 3, body: { ...plan, videoKey: "w1/b1/r.mp4" } }] });
+
+  it("the real sequence: the join's new version is refused, with no charge", async () => {
+    ready();
+    withVideo();
+    await expect(startRender({ ...scope, userId: "u1", itemId: "i1", version: 3 })).rejects.toMatchObject({ status: 409, code: "render.alreadyDone" });
+    expect(m.spend).not.toHaveBeenCalled();
+    expect(m.tx.reelRender.create).not.toHaveBeenCalled();
+  });
+
+  it("asked again, that version is charged once", async () => {
+    ready();
+    withVideo();
+    m.tx.contentVersion.findFirst.mockResolvedValue({ id: "v3" });
+    await startRender({ ...scope, userId: "u1", itemId: "i1", version: 3, again: true });
+    expect(m.spend).toHaveBeenCalledTimes(1);
+    expect(m.spend).toHaveBeenCalledWith(expect.objectContaining({ refId: "v3:1", amount: 22 }));
   });
 
   it("a plan changed while paying isn't rendered, and the charge comes back", async () => {

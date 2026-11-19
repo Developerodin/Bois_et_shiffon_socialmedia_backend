@@ -124,7 +124,10 @@ export async function startRender(input: { workspaceId: string; brandId: string;
     if (running) return { running };
     if (latest.version !== input.version) throw new PublishingError("A newer plan exists. Review it, then make the video.");
     // The same plan already made a video: paying again needs a yes (`again`). An edit makes a new version, so it isn't asked.
-    if (!input.again && (await tx.reelRender.findFirst({ where: { contentVersionId: latest.id, step: "DONE" } }))) throw new PublishingError("This version already has a video. Make it again?", 409, "render.alreadyDone");
+    // The join writes v+1 with the video and no render rows, so the body's videoKey is the check that fires; the phone
+    // checks the same (`storyboard.tsx`, `!!detail.videoUrl`).
+    const hasVideo = !!(latest.body as { videoKey?: string } | null)?.videoKey || !!(await tx.reelRender.findFirst({ where: { contentVersionId: latest.id, step: "DONE" } }));
+    if (!input.again && hasVideo) throw new PublishingError("This version already has a video. Make it again?", 409, "render.alreadyDone");
     if (["SCHEDULED", "PUBLISHED"].includes(item.status)) throw new PublishingError("This reel is already scheduled or posted.", 409);
     const parsed = ReelPlan.safeParse(latest.body);
     if (!parsed.success) throw new PublishingError("This plan isn't complete yet", 400);
