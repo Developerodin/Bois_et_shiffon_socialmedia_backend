@@ -53,29 +53,22 @@ async function pageOf(where: { workspaceId: string; brandId: string }, archived:
   }
   const { limit, ...q } = query.data;
   const filter = { ...where, archivedAt: archived ? { not: null } : null, ...productPageWhere(q) };
-  const [total, profile, found, running] = await Promise.all([
-    prisma.product.count({ where: filter }),
-    prisma.brandProfile.findFirst({ where, select: { catalogSync: true } }),
-    catalogSource(where),
-    catalogSyncRunning(where),
-  ]);
+  // id breaks updatedAt ties (a sync writes many rows in one instant), so a row never shows on two pages.
+  const rowsOf = (page: number) =>
+    prisma.product.findMany({
+      where: filter,
+      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      skip: (page - 1) * limit,
+      take: limit,
+      omit: { description: true },
+    });
+  // The rows are fetched alongside the count (one round trip, not two); only a page past the end fetches again.
+  const [total, rows] = await Promise.all([prisma.product.count({ where: filter }), rowsOf(q.page)]);
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const page = Math.min(q.page, totalPages);
-  // id breaks updatedAt ties (a sync writes many rows in one instant), so a row never shows on two pages.
-  const products = await prisma.product.findMany({
-    where: filter,
-    orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-    skip: (page - 1) * limit,
-    take: limit,
-    omit: { description: true },
-  });
-  return Response.json({
-    products: products.map(toProductListDto),
-    pagination: { page, limit, total, totalPages },
-    source: found.source,
-    catalogSync: profile?.catalogSync ?? null,
-    running,
-  });
+  const products = page === q.page ? rows : await rowsOf(page);
+  // Sync status isn't here: the board reads it from the full list (and ?status=1), not from each page.
+  return Response.json({ products: products.map(toProductListDto), pagination: { page, limit, total, totalPages } });
 }
 
 /** Add a product by hand (MANUAL). Stock, prices and facts need rules.approve (VOUCHED_FIELDS). */
