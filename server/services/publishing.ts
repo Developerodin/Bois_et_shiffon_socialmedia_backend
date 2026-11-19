@@ -878,7 +878,7 @@ export async function releaseState(scope: { workspaceId: string; brandId: string
     scheduledFor: item.scheduledFor,
     approvedVersionId: approval?.contentVersionId ?? null,
     approvalValid: Boolean(approval),
-    requirements: req,
+    requirements: { ...req, studio: item.studio },
     accounts,
     // An earlier approval of the same package (before an "approve anyway") still holds too.
     decisions: decisions.map((d) => ({

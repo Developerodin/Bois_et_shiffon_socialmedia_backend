@@ -193,3 +193,14 @@ describe("decision history", () => {
     expect(linked).toHaveBeenCalledWith(db, scope, ["p1"]);
   });
 });
+
+describe("release state: studio flag", () => {
+  it("tells a studio reel from a post", async () => {
+    db.approvalDecision.findFirst.mockResolvedValue(null);
+    db.approvalDecision.findMany.mockResolvedValue([]);
+    db.contentItem.findFirst.mockResolvedValue({ ...item("DRAFT_REVIEW"), channel: "INSTAGRAM_REEL", studio: true });
+    expect((await releaseState(scope, "i1")).requirements).toMatchObject({ needsVideo: true, studio: true });
+    db.contentItem.findFirst.mockResolvedValue(item("DRAFT_REVIEW"));
+    expect((await releaseState(scope, "i1")).requirements).toMatchObject({ studio: false });
+  });
+});
