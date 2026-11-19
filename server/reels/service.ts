@@ -312,7 +312,7 @@ export async function sendReel(scope: Scope, itemId: string, version: number) {
   if (!body?.videoKey) throw new PublishingError("This reel has no video yet", 400);
   if (item.status === "AWAITING_APPROVAL") await decide({ ...scope, itemId, version, verdict: "APPROVED" });
   else if (!["APPROVED", "SCHEDULED", "PUBLISHED"].includes(item.status)) throw new PublishingError("The checks are still running. Try again in a moment.", 409);
-  return { videoUrl: await signedMediaUrl(body.videoKey, 3600) };
+  return { videoUrl: await signedMediaUrl(body.videoKey, 3600), downloadUrl: await signedMediaUrl(body.videoKey, 3600, `reel-${itemId.slice(0, 8)}.mp4`) };
 }
 
 const CHECK_IN_FLIGHT_MS = 5 * 60_000;
