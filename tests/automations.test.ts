@@ -95,6 +95,14 @@ describe("auto-publish", () => {
     expect(schedule).not.toHaveBeenCalled();
   });
 
+  it("never books a studio reel: its approval is not a schedule, whichever client sent it", async () => {
+    db.brandProfile.findFirst.mockResolvedValue({ automations: { autoPublish: true } });
+    db.contentItem.findFirst.mockResolvedValue(approved({ channel: "INSTAGRAM_REEL", studio: true }));
+    db.integrationConnection.findFirst.mockResolvedValue({ id: "c1" });
+    await autoPublish(scope, "i1");
+    expect(schedule).not.toHaveBeenCalled();
+  });
+
   it("never throws: a refused schedule leaves the post approved", async () => {
     db.brandProfile.findFirst.mockResolvedValue({ automations: { autoPublish: true } });
     db.contentItem.findFirst.mockResolvedValue(approved());

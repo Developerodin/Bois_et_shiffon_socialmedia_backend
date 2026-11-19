@@ -69,18 +69,21 @@ export async function runMonthlyPlans(now = new Date()) {
 /**
  * After an approval: with auto-publish on, schedule the post for its planned date on the brand's first connected
  * account for that channel, with the approved draft's photos. Never throws: anything missing (no account, the date
- * has passed, a Pinterest board to choose) leaves the post approved for the person to schedule.
+ * has passed, a Pinterest board to choose) leaves the post approved for the person to schedule. A studio reel is never
+ * booked: its approval (Download, or Publish's approve-first) is not a schedule, and a date left from a cancelled
+ * schedule would post it on its own. The clients also send noAutoPublish; this holds for any client.
  */
 export async function autoPublish(scope: Scope & { userId: string }, itemId: string) {
   try {
     if (!(await readAutomations(scope)).autoPublish) return;
     const item = await prisma.contentItem.findFirst({
       where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId, status: "APPROVED" },
-      select: { channel: true, scheduledFor: true, versions: { orderBy: { version: "desc" }, take: 1, select: { version: true, body: true } } },
+      select: { channel: true, studio: true, scheduledFor: true, versions: { orderBy: { version: "desc" }, take: 1, select: { version: true, body: true } } },
     });
     const latest = item?.versions[0];
     if (!item || !latest || !item.scheduledFor || item.scheduledFor.getTime() < Date.now() + 5 * 60_000) return;
     if (item.channel === "INSTAGRAM_STORY") return; // stories are packaged and posted by a person
+    if (item.studio) return; // reels made in the studio are published from the reel page or the phone
     const req = publishRequirements(item.channel);
     if (!req.provider || req.needsBoard) return;
     const account = await prisma.integrationConnection.findFirst({ where: { brandId: scope.brandId, provider: req.provider, status: "ACTIVE" }, orderBy: { createdAt: "asc" }, select: { id: true } });
