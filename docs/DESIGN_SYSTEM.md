@@ -54,7 +54,7 @@ Loaded via `next/font` in `app/layout.tsx`.
 
 - Base unit: 4px (`space-1`); radius token `--radius: 1rem` (`rounded-2xl` for cards and controls)
 - Shell: sidebar `232px`, top bar `72px` (`h-18`), assistant panel on the right from `xl`
-- Non-Overview pages: `p-4 sm:p-8` inside the main area
+- Non-Overview pages: `p-4 sm:p-6` inside the main area (top bar `sm:px-6` to match), `gap-5` between page blocks, document cards `p-5 sm:p-6`
 - **`PageSection`** (`components/ui/page-section.tsx`) is the section card on those pages: `rounded-2xl border border-border bg-card shadow-sm`, `px-5` inset, `text-lg` title, optional description and actions; lists inside run edge to edge. A header-only section (no children) sits above an `EmptyState` or error shown outside the card, never a card in a card. The admin console alone uses its own flat (no card) `Section` (`components/admin/ui.tsx`).
 - **Overview panels** (`components/workspace/panel-layout.tsx`): each panel is a card (`rounded-2xl border bg-card shadow-sm`) on `--background`, `12px` (`gap-3` / `p-3`) between cards. The gap between columns is the resize handle; its line shows only on hover or focus. A column whose panels are all collapsed shrinks to `15rem`.
 - **Inside a panel:** one inset for everything, `px-5`. Sections are separated by spacing (`py-4`), not divider lines; list rows that need edge-to-edge hover use `-mx-2 px-2`.
