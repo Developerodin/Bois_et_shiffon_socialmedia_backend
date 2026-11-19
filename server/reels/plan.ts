@@ -132,13 +132,7 @@ export const toVersionBody = (plan: ReelPlan) => ({
   altText: "",
 });
 
-/** "en" → "English": models are told languages by name. */
-export const languageName = (code: string) => {
-  try {
-    return new Intl.DisplayNames(["en"], { type: "language" }).of(code) ?? code;
-  } catch {
-    return code;
-  }
-};
+/** "en" → "English": models are told languages by name (one helper, in shared/). */
+export { languageName } from "@/shared";
 
 export const isStudioPlan = (body: unknown): body is ReelPlan => ReelPlan.safeParse(body).success;

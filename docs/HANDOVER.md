@@ -4,6 +4,26 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Languages: team working language, post language, Translate (2026-11-19)
+
+On `main` in server, web and mobile (mobile only got the synced `shared/`). Plan with both four-lens rounds folded in:
+`docs/superpowers/plans/2026-11-19-languages.md`.
+
+- Two languages per business (`shared/languages.ts`, en / fr): the team working language (`preferences.workLanguage`)
+  for what agents write for the team, and the post language (`locales[0]`, as before) for what customers read.
+  `GET/PATCH …/brands/[brandId]/languages` (GET brand.read, PATCH context.edit, audited with the old values).
+- Every agent call ends its system prompt with one language line (`languageLine`, engine.ts) once a team language is
+  set; search questions count as customer-facing, so GEO still measures the market's searches. Changing a language
+  resets that brand's OpenAI prompt cache once. Unset: prompts as before.
+- Web: Settings → Languages; before the first run from the app (any Run, Research, Planner, chat Start) a dialog asks
+  once; Cancel starts nothing; a failed save still runs and isn't asked again in that tab. Runs the server starts on its
+  own (research on brand creation, automations) and the welcome page keep today's behaviour until a language is set.
+- Translate (ideas, documents): `POST …/translate` by reference only (idea ids or a document version), light tier,
+  12k characters per AI call, rate-limited per AI call (40 per person, 150 per workspace, per 10 min), in-process cache;
+  shown as "Machine translation", never saved. The grader's injection-echo check skips `TRANSLATE_WORKFLOW` only.
+- Not checked live: no browser and no real OpenAI run. Try: Settings → Languages; a first Run on a business without a
+  team language; Translate on the Opportunities list and on a document.
+
 ## Chat: product access, page context, expand mode (2026-11-19)
 
 On `main` in server, web and mobile (mobile only got the synced `shared/`). Plan with the four-lens amendments:

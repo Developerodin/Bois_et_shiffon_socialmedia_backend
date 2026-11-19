@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
+import { contentLanguageOf } from "@/server/research/brand-summary";
 import { startAgentRun } from "@/server/agents/engine";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
@@ -145,7 +146,7 @@ const LogoAsset = z.object({ logo: z.object({ key: z.string() }).nullable().opti
  */
 async function brandLook(scope: BrandScope, brandMark: boolean): Promise<Look> {
   const profile = await prisma.brandProfile.findFirst({ where: { brandId: scope.brandId, workspaceId: scope.workspaceId }, select: { locales: true, assets: true } });
-  const language = z.array(z.string()).safeParse(profile?.locales).data?.[0] ?? "en";
+  const language = contentLanguageOf(profile?.locales) ?? "en";
   const key = brandMark ? LogoAsset.safeParse(profile?.assets).data?.logo?.key : undefined;
   if (!key || !key.startsWith(`${scope.workspaceId}/${scope.brandId}/`) || key.includes("..")) return { language };
   const bytes = await getMediaBytes(key, LOGO_MAX_BYTES).catch(() => null);

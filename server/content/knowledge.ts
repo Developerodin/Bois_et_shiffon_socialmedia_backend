@@ -6,7 +6,7 @@ import { prisma } from "@/server/db/prisma";
 import { covers, offerState } from "@/server/content/offer-checks";
 import { byExternalId, handleOf, type LinkedProduct } from "@/server/content/product-checks";
 import { BrandAssets } from "@/server/research/brand-assets";
-import { BrandSummary, Preferences } from "@/server/research/brand-summary";
+import { BrandSummary, contentLanguageOf, Preferences } from "@/server/research/brand-summary";
 import { listContextDocs } from "@/server/services/context-docs";
 
 /**
@@ -117,7 +117,7 @@ export function ownerChoices(profile: { summary: unknown; preferences: unknown; 
   const edited = new Set(summary?.edited ?? []);
   const choices = {
     creativeTones: Preferences.safeParse(profile?.preferences).data?.tones,
-    contentLanguage: z.array(z.string()).safeParse(profile?.locales).data?.[0],
+    contentLanguage: contentLanguageOf(profile?.locales) ?? undefined,
     tagline: edited.has("tagline") ? summary?.tagline : undefined,
     targetAudience: edited.has("audience") ? summary?.audience : undefined,
   };

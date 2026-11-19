@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { contentLanguageOf } from "@/server/research/brand-summary";
 import type { IntegrationConnection } from "@prisma/client";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
@@ -198,7 +199,7 @@ export async function createPost(scope: Scope, input: z.infer<typeof PostRequest
   const conn = await requireConnection(scope);
   await limit(scope, "write");
   const profile = await prisma.brandProfile.findFirst({ where: { brandId: scope.brandId, workspaceId: scope.workspaceId }, select: { websiteUrl: true, locales: true } });
-  const language = z.array(z.string()).safeParse(profile?.locales).data?.[0] ?? "en";
+  const language = contentLanguageOf(profile?.locales) ?? "en";
   const post = await google<{ name: string }>(conn, `${V4}/${conn.externalAccountId}/localPosts`, {
     method: "POST",
     body: {

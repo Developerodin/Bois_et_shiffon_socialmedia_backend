@@ -4,7 +4,7 @@ import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-r
 import { brandUploads } from "@/server/content/knowledge";
 import { prisma } from "@/server/db/prisma";
 import { BrandAssets, saveEditedColors } from "@/server/research/brand-assets";
-import { BrandSummary, CONTENT_LANGUAGES, MAX, oneLine, Preferences, savePreferences, saveSummaryEdit, TONES } from "@/server/research/brand-summary";
+import { BrandSummary, CONTENT_LANGUAGES, contentLanguageOf, MAX, oneLine, Preferences, savePreferences, saveSummaryEdit, TONES } from "@/server/research/brand-summary";
 import { PlaceListing } from "@/server/integrations/places";
 import { normalizeHex, type BrandAssetsView } from "@/shared";
 import { signedMediaUrl } from "@/server/storage/media";
@@ -42,7 +42,7 @@ async function view(scope: Required<TenantScope>) {
     summary: summary && { tagline: summary.tagline ?? null, tags: summary.tags ?? [], audience: summary.audience ?? null, strengths: summary.strengths ?? null, foundWebsite: brand.profile?.websiteUrl ? null : (summary.foundWebsite ?? null) },
     preferences: {
       tones: Preferences.safeParse(brand.profile?.preferences).data?.tones ?? null,
-      contentLanguage: CONTENT_LANGUAGES.find((l) => l === locales[0]) ?? null,
+      contentLanguage: contentLanguageOf(locales),
     },
   } satisfies BrandAssetsView;
 }

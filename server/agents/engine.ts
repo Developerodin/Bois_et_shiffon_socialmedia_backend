@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
-import { loadBrandContext } from "@/server/agents/brand-context";
+import { languageLine, loadBrandContext } from "@/server/agents/brand-context";
 import { getAgent } from "@/server/agents/registry";
 import type { AgentContext } from "@/server/agents/types";
 import { generateObject, OUT_OF_CREDITS } from "@/server/ai/provider";
@@ -181,9 +181,12 @@ export async function executeAgentRun(rawPayload: unknown, lease?: Lease) {
   if (started.count !== 1) return; // finished meanwhile
   await log("INFO", `${agent.name} started`);
 
+  const brand = await loadBrandContext(run.workspaceId, run.brandId);
+  // Every agent call ends its instructions with the business's language rule (team vs customer text), when set.
+  const language = languageLine(brand);
   const ctx: AgentContext = {
     runId: run.id,
-    brand: await loadBrandContext(run.workspaceId, run.brandId),
+    brand,
     chargeId: (run.input as { chargeId?: string } | null)?.chargeId,
     log,
     ai: {
@@ -197,7 +200,7 @@ export async function executeAgentRun(rawPayload: unknown, lease?: Lease) {
             workflowId,
             promptVersion,
           },
-          input,
+          language ? { ...input, system: `${input.system}\n\n${language}` } : input,
         ),
     },
   };

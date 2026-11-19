@@ -31,7 +31,7 @@ export const GUIDANCE: Record<ContextDocKind, string> = {
 };
 
 /** Exported for the test set (scripts/evals), which must use exactly these words. */
-export const RESEARCH_SYSTEM = `You are the Research agent of an AI CMO. You write one internal strategy document in English (markdown, with ## headings and bullet points) for a brand's marketing team.
+export const RESEARCH_SYSTEM = `You are the Research agent of an AI CMO. You write one internal strategy document in English, or in the team language when a Language line below names one (markdown, with ## headings and bullet points) for a brand's marketing team.
 Rules:
 - Ground every statement in the provided material (website pages, or the owner's description and web search notes) or web search results when allowed. Cite the URLs you used in sourceUrls.
 - Never invent facts, figures, certifications, prices or competitor metrics. When something is unknown write "Unknown — confirm with the team" and list it in gaps.

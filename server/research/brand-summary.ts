@@ -24,10 +24,19 @@ export const BrandSummary = z.object({
 export type BrandSummary = z.infer<typeof BrandSummary>;
 
 /** Creative tones the app offers (A10). Stored as these English keys; anything else is refused. */
-import { TONES } from "@/shared";
-export { TONES };
+import { CONTENT_LANGUAGES, isContentLanguage, TONES, type ContentLanguage } from "@/shared";
+export { CONTENT_LANGUAGES, TONES };
 export const Preferences = z.object({ tones: z.array(z.enum(TONES)).max(TONES.length) });
-export const CONTENT_LANGUAGES = ["fr", "en"] as const;
+/** The post language (what customers read): the first of `locales`, if it's one we offer. */
+export const contentLanguageOf = (locales: unknown): ContentLanguage | null => {
+  const first = Array.isArray(locales) ? locales[0] : undefined;
+  return isContentLanguage(first) ? first : null;
+};
+/** The team working language, read on its own so a profile without tones (Preferences needs them) still has it. */
+export const workLanguageOf = (preferences: unknown): ContentLanguage | null => {
+  const v = (preferences as { workLanguage?: unknown } | null)?.workLanguage;
+  return isContentLanguage(v) ? v : null;
+};
 
 export const MAX = { tagline: 120, tag: 40, audience: 240, strengths: 240 } as const;
 /** One line of plain text: control/format characters and newlines out, whitespace collapsed, capped at a word with "…". */
@@ -123,13 +132,21 @@ export async function saveSummaryEdit(scope: Required<TenantScope>, field: (type
     WHERE "brandId" = ${scope.brandId} AND "workspaceId" = ${scope.workspaceId}`;
 }
 
-/** Tones → preferences; content language → the existing `locales` agents already read. One statement. */
-export async function savePreferences(scope: Required<TenantScope>, input: { tones?: string[]; contentLanguage?: string }) {
-  const tones = input.tones === undefined ? null : JSON.stringify({ tones: input.tones });
+/**
+ * Tones and the team working language → preferences (merged, other keys kept); content language → the existing
+ * `locales` agents already read. One statement.
+ */
+export async function savePreferences(
+  scope: Required<TenantScope>,
+  input: { tones?: string[]; contentLanguage?: string; workLanguage?: ContentLanguage },
+) {
+  const patch = { ...(input.tones === undefined ? {} : { tones: input.tones }), ...(input.workLanguage === undefined ? {} : { workLanguage: input.workLanguage }) };
+  const prefs = Object.keys(patch).length ? JSON.stringify(patch) : null;
   const locales = input.contentLanguage === undefined ? null : JSON.stringify([input.contentLanguage]);
-  await prisma.$executeRaw`
+  // Rows updated: 0 when the brand has no profile yet (nothing saved).
+  return prisma.$executeRaw`
     UPDATE "BrandProfile" SET "updatedAt" = now(),
-      "preferences" = CASE WHEN ${tones}::jsonb IS NULL THEN "preferences" ELSE COALESCE("preferences", '{}'::jsonb) || ${tones}::jsonb END,
+      "preferences" = CASE WHEN ${prefs}::jsonb IS NULL THEN "preferences" ELSE COALESCE("preferences", '{}'::jsonb) || ${prefs}::jsonb END,
       "locales" = COALESCE(${locales}::jsonb, "locales")
     WHERE "brandId" = ${scope.brandId} AND "workspaceId" = ${scope.workspaceId}`;
 }

@@ -54,6 +54,7 @@ Loaded via `next/font` in `app/layout.tsx`.
 
 - Base unit: 4px (`space-1`); radius token `--radius: 1rem` (`rounded-2xl` for cards and controls)
 - Shell: sidebar `232px`, top bar `72px` (`h-18`), assistant panel on the right from `xl`
+- **Languages** (`components/languages/languages.tsx`): `LanguageSelects` (team working language + post language, used by Settings → Languages and the run dialog), `LanguageDialog` (asked once before a first run; mounted in the shell next to the paywall dialog), `TranslateToggle` (ghost "Translate" button; while shown, "Machine translation" + "Show original").
 - **Assistant panel** (`components/shell/assistant-panel.tsx`): a card (`rounded-2xl border bg-card shadow-sm`) set `12px` off the edges; docked it sits under the top bar, which spans the page and the panel, so its controls reach the right edge. Expanded: `w-[min(56rem,100vw)]` over the scrim, conversation in a `max-w-3xl` column; a `w-80` spacer keeps the docked column's place.
 - Non-Overview pages: `p-4 sm:p-6` inside the main area (top bar `sm:px-6` to match), `gap-5` between page blocks, document cards `p-5 sm:p-6`
 - **`PageSection`** (`components/ui/page-section.tsx`) is the section card on those pages: `rounded-2xl border border-border bg-card shadow-sm`, `px-5` inset, `text-lg` title, optional description and actions; lists inside run edge to edge. A header-only section (no children) sits above an `EmptyState` or error shown outside the card, never a card in a card. The admin console alone uses its own flat (no card) `Section` (`components/admin/ui.tsx`).

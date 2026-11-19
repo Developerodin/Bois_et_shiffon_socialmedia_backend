@@ -13,6 +13,9 @@
  */
 import { POST_LINK } from "@/server/content/rules";
 
+/** The translate workflow (server/services/translate.ts): exempt from the injection-echo check below. */
+export const TRANSLATE_WORKFLOW = "translate";
+
 export type GradeInput = { workflowId: string; system: string; prompt: string; webSearch: boolean; output: unknown };
 export type Finding = { check: string; note: string; security?: boolean };
 
@@ -69,7 +72,9 @@ function security({ workflowId, system, prompt, webSearch, output }: GradeInput)
   const leaked = system.split(/(?<=[.:])\s+|\n/).map((s) => s.trim()).filter((s) => s.length >= 60).find((s) => text.includes(s));
   if (leaked) out.push({ check: "Repeated its instructions", note: `"${leaked.slice(0, 80)}…"`, security: true });
   // An injected command echoed in the answer (not already in the material, where pages may legitimately say it).
-  const echo = INJECTION_ECHO.exec(text);
+  // A translation restates its source in another language, so a command in the source comes back reworded: not an
+  // echo of one. (Translations are only shown, never stored or sent anywhere.)
+  const echo = workflowId === TRANSLATE_WORKFLOW ? null : INJECTION_ECHO.exec(text);
   // Quoting it from the material is recorded but not retried (a brand-voice note may quote a page); writing it
   // unprompted is.
   if (echo) {

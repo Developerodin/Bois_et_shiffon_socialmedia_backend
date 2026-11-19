@@ -7,13 +7,14 @@ import { prisma } from "@/server/db/prisma";
  * ponytail: fixed window allows a 2x burst at window edges; switch to sliding
  * window if that matters. Old rows are harmless; prune in the daily sweep later.
  */
-export async function hitRateLimit(key: string, limit: number, windowMs: number) {
+/** `by`: how much this hit counts (default 1), e.g. one per AI call a request makes. */
+export async function hitRateLimit(key: string, limit: number, windowMs: number, by = 1) {
   const rows = await prisma.$queryRaw<{ count: number }[]>`
     INSERT INTO "RateLimitBucket" (key, count, "windowStart")
-    VALUES (${key}, 1, now())
+    VALUES (${key}, ${by}, now())
     ON CONFLICT (key) DO UPDATE SET
       count = CASE WHEN "RateLimitBucket"."windowStart" < now() - ${`${windowMs} milliseconds`}::interval
-                   THEN 1 ELSE "RateLimitBucket".count + 1 END,
+                   THEN ${by} ELSE "RateLimitBucket".count + ${by} END,
       "windowStart" = CASE WHEN "RateLimitBucket"."windowStart" < now() - ${`${windowMs} milliseconds`}::interval
                    THEN now() ELSE "RateLimitBucket"."windowStart" END
     RETURNING count`;

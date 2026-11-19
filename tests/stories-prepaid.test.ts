@@ -13,7 +13,7 @@ vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn() }));
 vi.mock("@/server/jobs/claim", () => ({ validateAiWorkflowPayload: vi.fn() }));
 vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), spendCredits: m.spend, refundCharge: m.refund }));
-vi.mock("@/server/agents/brand-context", () => ({ loadBrandContext: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1" })) }));
+vi.mock("@/server/agents/brand-context", () => ({ loadBrandContext: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1" })), languageLine: () => null }));
 vi.mock("@/server/agents/registry", async () => {
   const { z } = await import("zod");
   return { getAgent: () => ({ key: "creator", name: "Creator", inputSchema: z.object({ itemId: z.string().optional() }), run: m.run }) };

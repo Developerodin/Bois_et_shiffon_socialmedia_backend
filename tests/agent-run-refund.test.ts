@@ -17,7 +17,7 @@ const db = vi.hoisted(() => {
 const refund = vi.hoisted(() => vi.fn());
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), refundCharge: refund }));
-vi.mock("@/server/agents/brand-context", () => ({ loadBrandContext: vi.fn(async () => ({})) }));
+vi.mock("@/server/agents/brand-context", () => ({ loadBrandContext: vi.fn(async () => ({})), languageLine: () => null }));
 vi.mock("@/server/agents/registry", () => ({
   getAgent: () => ({ key: "creator", name: "Creator", inputSchema: z.object({}).passthrough(), run: async () => ({ drafts: 1 }) }),
 }));
