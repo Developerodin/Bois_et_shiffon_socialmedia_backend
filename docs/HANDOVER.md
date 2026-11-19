@@ -4,6 +4,53 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## End of day 2026-11-19 — start here tomorrow
+
+Everything below is committed on `main` in each repo (local only, no remotes, nothing pushed). Server, web and mobile
+are each their own repo, side by side in `apps/`. Last commits: server `add2255`, web `8ed684b`, mobile `5c9ad7b`.
+Checks at the end of the day: server 1,021 tests, web 375 tests, typecheck and lint clean, mobile typecheck clean.
+Dev servers: server `npm run dev` on 3101, web `npm run dev` on 3100 (never run `next build` in web while dev runs:
+both write `.next`; if a page shows "Internal Server Error", stop dev, delete `web/.next`, start again).
+
+### What was done today (afternoon/evening)
+- **Products pagination** (web + server): server pages `?page&limit&q&stock`, URL-synced table, native history, pages
+  cached and neighbours prefetched, loading bar/spinner; one shared `components/ui/pagination.tsx` now also on the
+  admin People, Workspaces and Activity lists. Stock filter follows `stockLabel` (0 + inStock true = in stock); `%`, `_`
+  are literal in searches.
+- **Speed**: `brandAccess` reads member, brand and grant in parallel (every brand route). Dev slowness is mostly
+  ~150 ms per Neon round trip from India to eu-central-1; production runs in the database's region.
+- **Espanda chat**: redesigned panel (greeting, page-aware starters, composer card, labelled replies), set in a card;
+  the top bar now spans the page and the chat column. Chat reads the product catalogue (`catalogueSummary`,
+  `findProducts`), knows the open page (saved per message), has an expand mode, keeps long threads on the prompt cache,
+  and turns web search off once product data is in the conversation unless the person asks.
+- **Overview**: SEO and GEO tiles show their scores; opening a draft document marks it reviewed (Overview click, or
+  picking one on Business context; the default document shown there isn't).
+- **Languages** (section below): team working language + post language, asked once before the first run, Settings →
+  Languages, Translate on ideas and documents.
+- **Housekeeping**: root-repo archive branches deleted (only `main` and `desktop-shell` left there); this account's
+  workspace added to `UNLIMITED_CREDIT_WORKSPACES` in `server/.env` (local only; the old id in that list is probably a
+  wiped workspace).
+
+### Not verified yet (do these first)
+1. Nothing from today was seen in a browser (Claude in Chrome was off) except through the owner's screenshots. Walk:
+   Products paging (jump far, rows per page, back/forward), admin People/Workspaces/Activity pager, the chat panel
+   (card, top bar, expand/collapse, Escape, starters per page), SEO/GEO tiles, opening a draft document.
+2. No real OpenAI turn was run for the chat's product tools, the page note or Translate. Try on Products: "Explore my
+   catalogue", "Analyse my pricing", "What's out of stock?"; then Translate on Opportunities and on a document.
+3. Languages: on a business with no team language, press any Run → the dialog; Cancel starts nothing; Save and run
+   starts it; Settings → Languages shows and changes both. Then run Opportunities and check ideas come out in the team
+   language while post copy stays in the post language.
+
+### Known gaps / left as notes
+- Server-started runs (Research on brand creation, automations) and the welcome page don't ask the language question;
+  they keep the old behaviour until a team language is set in Settings.
+- Only English and French are offered (`shared/languages.ts`); adding one also needs the content features that read
+  the post language (stories, Google replies) to handle it.
+- Translations are cached in process memory only (lost on restart); no credits are charged, limits are per AI call.
+- Plans for today's two features (untracked like the earlier ones): `docs/superpowers/plans/2026-11-19-chat-products-expand.md`,
+  `docs/superpowers/plans/2026-11-19-languages.md`.
+- Next feature after these checks, per the earlier plan: feature 4 (stories on the web).
+
 ## Languages: team working language, post language, Translate (2026-11-19)
 
 On `main` in server, web and mobile (mobile only got the synced `shared/`). Plan with both four-lens rounds folded in:
