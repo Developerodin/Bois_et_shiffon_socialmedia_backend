@@ -329,6 +329,14 @@ describe("startRender", () => {
     expect(m.spend).toHaveBeenCalledWith(expect.objectContaining({ refId: "v3:1", amount: 22 }));
   });
 
+  it("a retry after a refunded start uses the next attempt", async () => {
+    ready();
+    m.refunded.mockImplementation(async (_w, ref) => ref === "v1:1");
+    await startRender({ ...scope, userId: "u1", itemId: "i1", version: 2 });
+    expect(m.spend).toHaveBeenCalledWith(expect.objectContaining({ refId: "v1:2" }));
+    expect(m.tx.reelRender.create).toHaveBeenCalledWith({ data: expect.objectContaining({ attempt: 2 }) });
+  });
+
   it("a plan changed while paying isn't rendered, and the charge comes back", async () => {
     ready();
     m.tx.contentVersion.findFirst.mockResolvedValue({ id: "v2" });

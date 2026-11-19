@@ -21,7 +21,7 @@ import { BACKUP_MODEL, type ModelId, modelSeconds, needsReencode, PRESENTER_MODE
 import { libraryUsable } from "@/server/reels/library";
 import { isElevenVoice, speak, voiceRefused } from "@/server/reels/voice";
 import { padAndJoinWav, wavSeconds } from "@/server/reels/wav";
-import { refundCharge, spendCredits } from "@/server/services/credits";
+import { chargeRefunded, refundCharge, spendCredits } from "@/server/services/credits";
 import { lock, PublishingError, TX } from "@/server/services/publishing";
 import { mediaKey, putMedia, signedMediaUrl } from "@/server/storage/media";
 import { requirePlan } from "@/server/services/subscriptions";
@@ -138,7 +138,11 @@ export async function startRender(input: { workspaceId: string; brandId: string;
   }, TX);
   if ("running" in loaded) return loaded.running!; // a second tap while it renders
 
-  const refId = `${loaded.versionId}:${loaded.attempt}`;
+  // a start that charged, failed to write its row and was refunded leaves its refId behind; spendCredits would return
+  // it without charging, so step past it (as photoshoots and clones do)
+  let attempt = loaded.attempt;
+  while (await chargeRefunded(input.workspaceId, `${loaded.versionId}:${attempt}`)) attempt++;
+  const refId = `${loaded.versionId}:${attempt}`;
   const chargeId = await spendCredits({ ...scope, amount: reelPrice(loaded.plan), reason: "reel-render", refId, userId: input.userId });
   const render = await prisma.$transaction(async (tx) => {
     await lock(tx, input.itemId);
@@ -148,14 +152,14 @@ export async function startRender(input: { workspaceId: string; brandId: string;
     const latest = await tx.contentVersion.findFirst({ where: { contentItemId: input.itemId }, orderBy: { version: "desc" }, select: { id: true } });
     if (latest?.id !== loaded.versionId) throw new PublishingError("A newer plan exists. Review it, then make the video.");
     const made = await tx.reelRender.create({
-      data: { ...scope, contentItemId: input.itemId, contentVersionId: loaded.versionId, attempt: loaded.attempt, chargeId, webhookSecret: randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "") },
+      data: { ...scope, contentItemId: input.itemId, contentVersionId: loaded.versionId, attempt, chargeId, webhookSecret: randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "") },
     });
     // Each render that speaks with someone's cloned voice is on the audit log, with the render itself.
     if (loaded.plan.voice.startsWith("clone:"))
       await tx.auditEvent.create({ data: { ...scope, actorUserId: input.userId, action: "voice.clone.used", entityType: "Voice", entityId: loaded.plan.voice.slice("clone:".length), metadata: { renderId: made.id, itemId: input.itemId } } });
     return made;
   }, TX).catch(async (e: unknown) => {
-    if ((e as { code?: string }).code === "P2002") return prisma.reelRender.findUniqueOrThrow({ where: { contentVersionId_attempt: { contentVersionId: loaded.versionId, attempt: loaded.attempt } } });
+    if ((e as { code?: string }).code === "P2002") return prisma.reelRender.findUniqueOrThrow({ where: { contentVersionId_attempt: { contentVersionId: loaded.versionId, attempt } } });
     // No render row holds this charge: give it back. ponytail: a process killed right here still keeps it; a sweep
     // for reel-render charges with no render and no refund is the fix if that ever shows up in the ledger.
     await refundCharge(input.workspaceId, chargeId);
