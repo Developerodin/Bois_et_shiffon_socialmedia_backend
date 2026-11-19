@@ -228,6 +228,7 @@ export async function saveDraft(input: { workspaceId: string; brandId: string; u
     const scenes = (latest?.body as { scenes?: { onScreenText?: string; voiceText: string }[] } | undefined)?.scenes;
     if (item.studio && scenes) {
       if (body.hashtags.length > 5) throw new PublishingError("A reel takes at most 5 hashtags.", 400);
+      if (body.hashtags.some((h) => h.length > 100)) throw new PublishingError("A hashtag takes at most 100 characters.", 400);
       if (body.caption.length > 2200) throw new PublishingError("The caption is over 2200 characters.", 400);
       body.hook = scenes[0]?.onScreenText ?? "";
       body.script = scenes.map((s) => s.voiceText);

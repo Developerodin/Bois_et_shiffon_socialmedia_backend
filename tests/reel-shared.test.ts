@@ -111,6 +111,14 @@ describe("studio reels in the publishing flow", () => {
       expect(created().hashtags).toHaveLength(6);
     });
 
+    it("a studio reel's hashtag is at most 100 characters with its #", async () => {
+      withLatest(item(), version({ body: planBody }));
+      await expect(save(sent({ hashtags: ["a".repeat(100)] }))).rejects.toMatchObject({ status: 400, message: "A hashtag takes at most 100 characters." });
+      expect(db.tx.contentVersion.create).not.toHaveBeenCalled();
+      await save(sent({ hashtags: ["a".repeat(99)] }));
+      expect(created().hashtags).toEqual([`#${"a".repeat(99)}`]);
+    });
+
     it("a studio reel's caption is at most 2200 characters", async () => {
       withLatest(item(), version({ body: planBody }));
       await expect(save(sent({ caption: "a".repeat(2201) }))).rejects.toMatchObject({ status: 400, message: "The caption is over 2200 characters." });
