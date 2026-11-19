@@ -14,11 +14,14 @@ now be made, reviewed and published without the phone. Behind `WEB_FEATURES=reel
   A finished reel's Storyboard shows **Watch the video** instead. The **Video** step shows the render's progress, a
   sentence when it fails (X01) with **Try again**, **Edit storyboard** and, when the voice was deleted, **Change voice**,
   and **Review your reel** when it is done. The **Review** step has the video with captions on by default, the
-  transcript, the quality checks, an editable caption and hashtags, **Download video** (which approves this version)
-  and **Continue to Publish**. The **Publish** step reuses the Overview's release panel: Publish now, Schedule (with
-  the time zone shown) and Cancel schedule. On an unapproved reel, Publish now approves and posts in one press. The
-  reels home gets **Posted it? Add link** on a downloaded reel. A studio reel in the Overview's release panel asks for
-  no video link, shows **Open in Reels** (only with the reels flag on) and has no draft editor.
+  transcript, the quality checks, an editable caption and hashtags (with **Discard** while there are unsaved changes),
+  **Download video** (which approves this version) and **Continue to Publish**. An unsaved caption holds Download and
+  Continue to Publish ("Save or discard the caption first."). The **Publish** step reuses the Overview's release
+  panel: Publish now, Schedule (with the time zone shown) and Cancel schedule. On an unapproved reel, Publish now
+  approves and posts as one action (still with its confirm press). While the checks run, the Publish step links to
+  Review ("See the checks"), where the wait runs. The reels home gets **Posted it? Add link** on an approved reel
+  with no post link, for people who can publish. In the Overview, a studio reel's release panel asks for no video
+  link, and its content view shows **Open in Reels** (only with the reels flag on) instead of the draft editor.
 - **Web kit.** `ChecksList` (the Overview's quality check list, now shared) and the `PreviewFrame` captions props (see
   `docs/DESIGN_SYSTEM.md` section 7).
 - **Paid buttons.** Make video and Try again use the shared paid press rules: the price shows from the server, a
@@ -31,7 +34,12 @@ now be made, reviewed and published without the phone. Behind `WEB_FEATURES=reel
     a hashtag over 100 characters, or a caption over 2200. A lost version race has the code `draft.changed`.
   - The reel read carries `captions` (cues timed from the voice and clip lengths, in `server/reels/captions.ts`), and
     the download link carries the file name `reel-<8>.mp4`.
-  - `captions` and `draft.changed` are in `shared/`, synced to web and mobile.
+  - `captions` and `draft.changed` are in `shared/`, synced to web and mobile. `CAPTION_LIMITS` gains
+    `hashtagLengthMax` (100); the reel plan, the studio-reel caption guard and the web Review all read their limits
+    from it.
+  - `autoPublish` skips studio reels, so approving one never books a post, whichever client approves it (the web
+    and the phone also send `noAutoPublish`). Every phone build approves a reel only on its way to its own publish
+    call, so none relied on the auto-booking.
   - These are additive for old phone builds. The one earlier change that was not is corrected in 3b below.
 
 **Calls made**
@@ -48,26 +56,38 @@ now be made, reviewed and published without the phone. Behind `WEB_FEATURES=reel
 - The time zone line on the schedule input shows for posts as well as reels.
 - The Review's primary button is **Continue to Publish**; Download and Save caption are outline.
 - The Instagram line on the Publish step reads the connections list, since the release state lists only active
-  accounts. It shows only when no account is active ("needs reconnecting" or "isn't connected").
+  accounts. It shows only when an account needs reconnecting. With no account at all, the release panel's own
+  "Connect an account…" line says it.
+- The Publish step doesn't poll the checks. While they run it links to Review, whose wait is bounded and has Check
+  again; a second wait on Publish would be a second clock for one state.
+- A Download with no answer or a server error reads the reel again before the button comes back (the approval may
+  have gone through), as a refused one already did.
+- Overview bundle: `reelHref` lives in `components/reels/href.ts` (no imports), so `/` and `/context` don't load
+  `reel.ts`. First load `/` 214 to 210 kB, `/context` 172 to 168 kB.
 - `/reels` home first load grew about 0.8 kB gzip (159 to 160 kB): the shared `reel.ts` chunk now carries the Review
   helpers. Splitting `reel.ts` would fix it with no behaviour change; not worth it for under 1 kB.
 - Caption edits send only caption and hashtags. The phone's edit is unchanged.
 
 **Copy written without a source, for the owner to approve** (desktop-only lines, not from the phone's `reels.json`)
-- Review: "Make the video first. Download and Publish open once it's made.", "This reel can't be sent in its current
-  state.", "Checking… usually under a minute", "The checks are taking long.", "No checks for this version yet.",
-  "Already checking. The result will appear here.", "Saving the caption runs the checks again.", "A reel takes at most
-  5 hashtags.", "The post is over 2200 characters. Shorten the caption or the hashtags.", "Wait for the download to
-  start.", "Downloading approves this version.", "Couldn't start the download. Try again.", "Your role can't approve
-  reels, so Download (which approves) isn't here."
-- Video step: "No video yet.", "Go to the storyboard", "It's safe to leave this page.", "Failed at: …", "N reserved
-  credits released".
+- Review: "Transcript", "Make the video first. Download and Publish open once it's made.", "This reel can't be sent
+  in its current state.", "Changes were asked for (see the history under Publish). Change the caption or the plan and
+  it's checked again.", "This reel was rejected. Change the caption or the plan to send it through review again.",
+  "Checking… usually under a minute", "The checks are taking long.", "Read again", "No checks for this version yet.",
+  "Saving the caption runs the checks again.", "Hashtags (separated by spaces)", "Save caption", "Discard", "Save or
+  discard the caption first.", "A reel takes at most 5 hashtags.", "The post is over 2200 characters. Shorten the
+  caption or the hashtags.", "Wait for the download to start.", "Downloading approves this version.", "Couldn't start
+  the download. Try again.", "Your role can't approve reels, so Download (which approves) isn't here.", "Continue to
+  Publish". ("Already checking. The result will appear here." is the phone's `alreadyChecking`.)
+- Video step: "No video yet.", "Go to the storyboard", "It's safe to leave this page.", "Review your reel", "Making it
+  again costs … now; the last try cost …". ("Failed at" and "N reserved credits released" are the phone's
+  `recovery.json`.)
 - Storyboard: "Wait for the plan to finish saving."
-- Publish: "Make the video first.", "Publishing approves draft vN first.", "Connect an account for Instagram to publish
-  it.", "Instagram needs reconnecting.", "Instagram isn't connected.", "Your role can't publish reels. Someone who can
-  publish will post it.", "Your role can't approve reels, so it can't publish this one.", "Time zone: …"
+- Publish: "Make the video first.", "See the checks", "Publishing approves draft vN first.", "Connect an account for
+  Instagram to publish it.", "Instagram needs reconnecting.", "Your role can't publish reels. Someone who can publish
+  will post it.", "Your role can't approve reels, so it can't publish this one.", "Time zone: …"
 - Overview: "Made in Reels. Change its plan, video and caption there."
-- Reels home: the Add link dialog's title, text and "Post link" field, and the button "Posted it? Add link".
+- Reels home: the Add link dialog's "Post link" field label. (The dialog's title and text and "Posted it? Add link"
+  are the phone's `reels.json`.)
 
 **Manual checks for the owner**
 - [ ] Double-click Make video: one render, one charge.
@@ -77,14 +97,18 @@ now be made, reviewed and published without the phone. Behind `WEB_FEATURES=reel
 - [ ] The player and every Review control by keyboard. Captions are on by default and in step with the voice.
 - [ ] A sixth hashtag is refused before sending.
 - [ ] Download saves `reel-<8>.mp4` and the reel shows as approved.
-- [ ] Publish now on an unapproved reel approves and posts in one press. After a failed publish, the next press
-  doesn't approve again.
-- [ ] Approving a studio reel in the Overview doesn't book it by itself.
+- [ ] Publish now on an unapproved reel approves and posts as one action (its confirm press included). After a failed
+  publish, the next press doesn't approve again.
+- [ ] Type a caption on Review without saving: Download and Continue to Publish are held with "Save or discard the
+  caption first."; Discard brings back the saved caption and hashtags.
+- [ ] Open Publish while the checks run: "See the checks" opens Review, and Publish opens once the checks land.
+- [ ] Approving a studio reel in the Overview doesn't book it by itself (the server skips auto-publish for studio
+  reels too).
 - [ ] Schedule shows the time zone. Cancel schedule works.
 - [ ] 375 px: no horizontal scroll on Video, Review and Publish.
-- [ ] A studio reel in the Overview's release panel asks for no video link, shows "Open in Reels" and has no draft
-  editor.
-- [ ] "Posted it? Add link" on a downloaded reel.
+- [ ] A studio reel in the Overview: the release panel asks for no video link; the content view shows "Open in
+  Reels" and no draft editor.
+- [ ] "Posted it? Add link" on an approved reel with no post link (people who can publish).
 - [ ] The Overview's Quality check section looks as before (it now uses `ChecksList`).
 
 **Not checked live:** renders were never run (no provider credits). The Video step, X01 and the captions' timing
