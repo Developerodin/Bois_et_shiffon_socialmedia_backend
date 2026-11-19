@@ -4,6 +4,28 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Chat: product access, page context, expand mode (2026-11-19)
+
+On `main` in server, web and mobile (mobile only got the synced `shared/`). Plan with the four-lens amendments:
+`docs/superpowers/plans/2026-11-19-chat-products-expand.md`. Plan lenses and final lenses both ran; fixes applied.
+
+- Two read-only chat tools (`server/chat/tools.ts`), `brand.read`, scoped from the session: `catalogueSummary`
+  (variants, stock in / out / unknown, price min / median / max per currency in SQL, top categories, last sync time
+  only, never its error text) and `findProducts` (Products table's own search and stock filter, 10 rows by default,
+  25 at most, columns + rows, links only when asked). Rows are variants. `CHAT_PROMPT_VERSION` is "3".
+- The stock filter now follows `stockLabel` (moved to `shared/products.ts`): a count of 0 with inStock true is
+  "in stock", in the chat and in the Products table filter alike.
+- Page context: the web sends the open page's nav id; the server keeps it only if it is in `shared/chat-pages.ts`,
+  saves it on the user message's metadata and turns it into a note on that message (`withPageNotes`). Not in the
+  system prompt, so OpenAI's cached prefix survives page switches.
+- Web: page-aware starters (Products: catalogue, pricing, out of stock), a "Context: <page>" chip, the panel as a card,
+  and an expand button (wide view over a scrim; Escape or the scrim collapses; collapses on navigation).
+- Not checked live: no browser (Claude in Chrome was off) and no chat turn run against OpenAI. Try on Products:
+  "Explore my catalogue", "Analyse my pricing", "What's out of stock?", then expand and collapse.
+- Left as notes: the model window slides by one message past 40 (misses the prompt cache once a thread is long; trim
+  in chunks if cost matters); `%`/`_` in a product search act as wildcards (scoped, capped); the prompt's "no product
+  data in web searches" is a soft rule (drop webSearch for a turn that read products if it ever matters).
+
 ## Feature 3c: reels render, review and publish on the web (2026-11-19)
 
 Branch `feature-3c-reels` in the server, web and mobile repos (not merged). Spec

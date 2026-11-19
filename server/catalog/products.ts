@@ -119,13 +119,18 @@ export const ProductPageQuery = z.object({
 export type ProductPageQuery = z.infer<typeof ProductPageQuery>;
 
 /**
- * The search and stock filter as a database condition. "In stock" is the web filter's meaning: a positive count, or no
- * count and inStock true. "Out" is every other row, spelled out so rows with nulls aren't lost to SQL's NOT.
+ * The search and stock filter as a database condition, by stockLabel's rule (shared/products.ts) so a filter and the
+ * labels it shows never disagree: "in" is a positive count or inStock true (a store selling an untracked item at 0);
+ * "out" is every other row, unknown stock included (both null; STOCK_UNKNOWN), spelled out so nulls aren't lost to
+ * SQL's NOT.
  */
+/** stockLabel's "Unknown": the source said nothing about stock. */
+export const STOCK_UNKNOWN = { stockQuantity: null, inStock: null } satisfies Prisma.ProductWhereInput;
+
 export function productPageWhere({ q, stock }: Pick<ProductPageQuery, "q" | "stock">): Prisma.ProductWhereInput {
   const and: Prisma.ProductWhereInput[] = [];
   if (q) and.push({ OR: [{ title: { contains: q, mode: "insensitive" } }, { sku: { contains: q, mode: "insensitive" } }] });
-  if (stock === "in") and.push({ OR: [{ stockQuantity: { gt: 0 } }, { stockQuantity: null, inStock: true }] });
-  if (stock === "out") and.push({ OR: [{ stockQuantity: { lte: 0 } }, { stockQuantity: null, inStock: false }, { stockQuantity: null, inStock: null }] });
+  if (stock === "in") and.push({ OR: [{ stockQuantity: { gt: 0 } }, { inStock: true }] });
+  if (stock === "out") and.push({ OR: [{ stockQuantity: { lte: 0 } }, { stockQuantity: null }] }, { OR: [{ inStock: false }, { inStock: null }] });
   return and.length ? { AND: and } : {};
 }

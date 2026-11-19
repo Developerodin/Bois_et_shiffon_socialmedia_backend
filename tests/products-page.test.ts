@@ -50,7 +50,14 @@ describe("GET products, paged", () => {
     const where = db.product.count.mock.calls[0][0].where;
     expect(where).toMatchObject({ workspaceId: "w1", brandId: "b1", archivedAt: null });
     expect(where.AND[0].OR).toEqual([{ title: { contains: "oak", mode: "insensitive" } }, { sku: { contains: "oak", mode: "insensitive" } }]);
-    expect(where.AND[1].OR).toContainEqual({ stockQuantity: null, inStock: null });
+    // "Out" keeps unknown stock: count 0-or-none AND inStock false-or-none (both null = unknown).
+    expect(where.AND.slice(1)).toEqual([{ OR: [{ stockQuantity: { lte: 0 } }, { stockQuantity: null }] }, { OR: [{ inStock: false }, { inStock: null }] }]);
+  });
+
+  it("counts an untracked item the store still sells (0 but inStock) as in stock, like its label", async () => {
+    db.product.count.mockResolvedValue(0);
+    await get("page=1&stock=in");
+    expect(db.product.count.mock.calls[0][0].where.AND[0].OR).toContainEqual({ inStock: true });
   });
 
   it("without page, still returns the whole list and no pagination", async () => {

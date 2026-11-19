@@ -10,7 +10,6 @@ import {
   validateUIMessages,
   type UIMessage,
 } from "ai";
-import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { grade } from "@/server/ai/graders";
@@ -18,18 +17,13 @@ import { modelConfig } from "@/server/ai/model-config";
 import { modelFor, ModelNotConfiguredError, type Tier } from "@/server/ai/models";
 import { isOutOfCreditsText, logRun, OUT_OF_CREDITS } from "@/server/ai/provider";
 import { hitRateLimit, limitKey } from "@/server/auth/rate-limit";
-import { chatSystemPrompt, CHAT_PROMPT_VERSION } from "@/server/chat/prompt";
+import { ChatBody, chatSystemPrompt, CHAT_PROMPT_VERSION, withPage, withPageNotes } from "@/server/chat/prompt";
 import { chatTools } from "@/server/chat/tools";
 import { prisma } from "@/server/db/prisma";
 
 // Streaming replies with a few tool steps can take a while.
 export const maxDuration = 300;
 
-// The client sends only the person's newest message; assistant and tool turns come from our database.
-const Body = z.object({
-  id: z.string().min(8).max(100),
-  message: z.object({ role: z.literal("user") }).passthrough().refine((m) => JSON.stringify(m).length <= 20_000, "Message too long"),
-});
 // ponytail: the model sees the last 40 messages and the thread keeps the last 200; summarise older turns if people want longer memory.
 const MODEL_HISTORY = 40;
 const STORED_HISTORY = 200;
@@ -56,7 +50,7 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
   try {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");
     if (scope instanceof Response) return scope;
-    const body = Body.safeParse(await request.json().catch(() => null));
+    const body = ChatBody.safeParse(await request.json().catch(() => null));
     if (!body.success) {
       return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 422, detail: "That message is too long or malformed. Shorten it and try again." });
     }
@@ -81,7 +75,8 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     // Regenerate resends a message we already have: answer it again from that point, don't append a copy.
     const resent = stored.findIndex((m) => m.id === (body.data.message as { id?: unknown }).id);
     const previous = resent === -1 ? stored : stored.slice(0, resent);
-    const messages = await validateUIMessages({ messages: [...previous, body.data.message], tools });
+    // The page it was sent from is saved on the message (server-set, whitelisted): see withPageNotes.
+    const messages = await validateUIMessages({ messages: [...previous, withPage(body.data.message, body.data.page)], tools });
 
     let tier: Tier, model: string;
     try {
@@ -96,10 +91,11 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     const ctx = { workspaceId: scope.workspaceId, brandId: scope.brandId, userId: scope.userId, workflowId: "chat.turn", promptVersion: CHAT_PROMPT_VERSION };
     const system = chatSystemPrompt({ name: brand.displayName, website: brand.profile?.websiteUrl ?? null });
     const history = messages.slice(-MODEL_HISTORY);
+    const modelMessages = await convertToModelMessages(withPageNotes(history));
     const result = streamText({
       model: openai(model),
       system,
-      messages: await convertToModelMessages(history),
+      messages: modelMessages,
       tools,
       stopWhen: isStepCount(6),
       onFinish: async ({ text, totalUsage, steps }) => {

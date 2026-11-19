@@ -1,5 +1,8 @@
+import type { Prisma } from "@prisma/client";
 import { tool } from "ai";
 import { z } from "zod";
+import { ProductPageQuery, productPageWhere, STOCK_UNKNOWN } from "@/server/catalog/products";
+import { stockLabel, type CatalogSync } from "@/shared";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
@@ -12,7 +15,7 @@ const KINDS = CONTEXT_DOC_KINDS.map((k) => k.kind) as [string, ...string[]];
 const RUNNABLE = AGENTS.filter((a) => a.key !== "systems-check" && !a.internal).map((a) => a.key) as [string, ...string[]];
 
 /**
- * What the CMO chat may do. Read-only access to this brand's documents, reports and agents, and
+ * What the CMO chat may do. Read-only access to this brand's documents, reports, products and agents, and
  * offering an agent run (the person starts it with a button; same permission check as the Run button). Deliberately no tool that
  * publishes, posts, replies, spends or approves: drafts only, people decide (design §4.4).
  */
@@ -90,6 +93,91 @@ export function chatTools(scope: ChatScope) {
           const r = runs.find((x) => x.agentKey === a.key);
           return { key: a.key, name: a.name, does: a.description, lastRun: r ? { status: r.status, finishedAt: r.finishedAt?.toISOString() ?? null, error: r.error?.slice(0, 200) ?? null } : null };
         });
+      },
+    }),
+
+    catalogueSummary: tool({
+      description:
+        "Overview of the brand's product catalogue (each row is a variant, e.g. a size or colour): how many variants, how many in stock / out / unknown, price range and median per currency, top categories, when it last synced.",
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!(await can("brand.read"))) return denied("the products");
+        // One scope for every query, from the session (never the model): this brand's active variants.
+        const where = { workspaceId: scope.workspaceId, brandId: scope.brandId, archivedAt: null };
+        const [total, inStock, unknown, categories, prices, profile] = await Promise.all([
+          prisma.product.count({ where }),
+          prisma.product.count({ where: { ...where, ...productPageWhere({ q: "", stock: "in" }) } }),
+          prisma.product.count({ where: { ...where, ...STOCK_UNKNOWN } }),
+          // Ordered by every row (id), not by category: a count of category skips nulls and would drop "uncategorised".
+          prisma.product.groupBy({ by: ["category"], where, _count: { _all: true }, orderBy: { _count: { id: "desc" } }, take: 15 }),
+          // Median in SQL: Prisma's Decimals would sort as text in JS, and this reads one row per currency, not every price.
+          prisma.$queryRaw<{ currency: string; priced: number; min: string; median: string; max: string }[]>`
+            SELECT coalesce(currency, 'unknown') AS currency, count(*)::int AS priced, min(price)::text AS min,
+                   (percentile_cont(0.5) WITHIN GROUP (ORDER BY price))::numeric(12,2)::text AS median, max(price)::text AS max
+            FROM "Product"
+            WHERE "workspaceId" = ${scope.workspaceId} AND "brandId" = ${scope.brandId} AND "archivedAt" IS NULL AND price IS NOT NULL
+            GROUP BY 1 ORDER BY priced DESC LIMIT 5`,
+          prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { catalogSync: true } }),
+        ]);
+        // Only when and how much: the sync's error/reason text is raw provider output and stays out of the model.
+        const sync = profile?.catalogSync as CatalogSync | null | undefined;
+        return {
+          variants: total,
+          // Three counts, not one snapshot: a sync landing between them must not make "out" negative.
+          stock: { in: inStock, out: Math.max(0, total - inStock - unknown), unknown },
+          prices,
+          topCategories: categories.map((c) => ({ category: c.category ?? "uncategorised", variants: c._count._all })),
+          lastSync: sync ? { at: sync.at, source: sync.source, variants: sync.count } : "never synced",
+        };
+      },
+    }),
+
+    // ponytail: offset-free top-N over the brand's rows; ILIKE and price sorts read every row of the brand, ~15–30 ms at
+    // 20k variants. Past that add a pg_trgm GIN index on title/sku and an index on (brandId, price).
+    findProducts: tool({
+      description:
+        "Find the brand's product variants by title/SKU text and stock, sorted by newest update or price. Returns a few rows as columns + rows. Use catalogueSummary for totals; ask for links only when the person wants them.",
+      // Saved threads are validated against this schema: it may only widen (new optional fields, higher caps), never narrow.
+      inputSchema: ProductPageQuery.pick({ q: true, stock: true }).extend({
+        sort: z.enum(["updated", "price-asc", "price-desc"]).default("updated"),
+        limit: z.number().int().min(1).max(25).default(10),
+        withLinks: z.boolean().default(false),
+      }),
+      execute: async ({ q, stock, sort, limit, withLinks }) => {
+        if (!(await can("brand.read"))) return denied("the products");
+        // The Products table's own search and stock filter ("out" includes unknown; each row's stock label tells them apart).
+        const where = { workspaceId: scope.workspaceId, brandId: scope.brandId, archivedAt: null, ...productPageWhere({ q, stock }) };
+        const orderBy: Prisma.ProductOrderByWithRelationInput[] =
+          sort === "updated"
+            ? [{ updatedAt: "desc" }, { id: "desc" }]
+            : [{ price: { sort: sort === "price-asc" ? "asc" : "desc", nulls: "last" } }, { id: "asc" }];
+        const [total, rows] = await Promise.all([
+          prisma.product.count({ where }),
+          prisma.product.findMany({
+            where,
+            orderBy,
+            take: limit,
+            select: { title: true, sku: true, category: true, price: true, compareAtPrice: true, currency: true, inStock: true, stockQuantity: true, url: true },
+          }),
+        ]);
+        // Columns once, not keys on every row (about 40% fewer tokens; the history resends them every turn), and a
+        // column that's empty on every row (often SKU, compare-at price) left out.
+        const all: [string, (p: (typeof rows)[number]) => string | null][] = [
+          ["title", (p) => p.title],
+          ["sku", (p) => p.sku],
+          ["category", (p) => p.category],
+          ["price", (p) => p.price?.toFixed(2) ?? null],
+          ["compareAt", (p) => p.compareAtPrice?.toFixed(2) ?? null],
+          ["currency", (p) => p.currency],
+          ["stock", (p) => stockLabel(p)],
+        ];
+        if (withLinks) all.push(["url", (p) => p.url]);
+        const used = all.filter(([, get]) => rows.some((p) => get(p) !== null));
+        return {
+          matchingVariants: total,
+          columns: used.map(([name]) => name),
+          rows: rows.map((p) => used.map(([, get]) => get(p))),
+        };
       },
     }),
 

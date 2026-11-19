@@ -54,6 +54,7 @@ Loaded via `next/font` in `app/layout.tsx`.
 
 - Base unit: 4px (`space-1`); radius token `--radius: 1rem` (`rounded-2xl` for cards and controls)
 - Shell: sidebar `232px`, top bar `72px` (`h-18`), assistant panel on the right from `xl`
+- **Assistant panel** (`components/shell/assistant-panel.tsx`): a card (`rounded-2xl border bg-card shadow-sm`) set `12px` off the edges; docked it starts under the top bar (`pt-21`) so it lines up with the page's cards. Expanded: `w-[min(56rem,100vw)]` over the scrim, conversation in a `max-w-3xl` column; a `w-80` spacer keeps the docked column's place.
 - Non-Overview pages: `p-4 sm:p-6` inside the main area (top bar `sm:px-6` to match), `gap-5` between page blocks, document cards `p-5 sm:p-6`
 - **`PageSection`** (`components/ui/page-section.tsx`) is the section card on those pages: `rounded-2xl border border-border bg-card shadow-sm`, `px-5` inset, `text-lg` title, optional description and actions; lists inside run edge to edge. A header-only section (no children) sits above an `EmptyState` or error shown outside the card, never a card in a card. The admin console alone uses its own flat (no card) `Section` (`components/admin/ui.tsx`).
 - **Overview panels** (`components/workspace/panel-layout.tsx`): each panel is a card (`rounded-2xl border bg-card shadow-sm`) on `--background`, `12px` (`gap-3` / `p-3`) between cards. The gap between columns is the resize handle; its line shows only on hover or focus. A column whose panels are all collapsed shrinks to `15rem`.
