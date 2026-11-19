@@ -5,7 +5,7 @@ import { prisma } from "@/server/db/prisma";
 import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefused } from "@/server/integrations/publishers";
 import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
-import { safeHttpUrl } from "@/shared";
+import { CAPTION_LIMITS, safeHttpUrl } from "@/shared";
 import { hasOtherApprover, requirePermission } from "@/server/auth/permissions";
 import { linkedProducts } from "@/server/catalog/linked";
 import { gateIssues, linkedIds, ProductOverride, snapshotOf } from "@/server/content/product-checks";
@@ -227,9 +227,10 @@ export async function saveDraft(input: { workspaceId: string; brandId: string; u
     // limits (plan.ts), or the new version would stop parsing as a plan and the reel page would lose it.
     const scenes = (latest?.body as { scenes?: { onScreenText?: string; voiceText: string }[] } | undefined)?.scenes;
     if (item.studio && scenes) {
-      if (body.hashtags.length > 5) throw new PublishingError("A reel takes at most 5 hashtags.", 400);
-      if (body.hashtags.some((h) => h.length > 100)) throw new PublishingError("A hashtag takes at most 100 characters.", 400);
-      if (body.caption.length > 2200) throw new PublishingError("The caption is over 2200 characters.", 400);
+      const { hashtagsMax, hashtagLengthMax, captionMax } = CAPTION_LIMITS;
+      if (body.hashtags.length > hashtagsMax) throw new PublishingError(`A reel takes at most ${hashtagsMax} hashtags.`, 400);
+      if (body.hashtags.some((h) => h.length > hashtagLengthMax)) throw new PublishingError(`A hashtag takes at most ${hashtagLengthMax} characters.`, 400);
+      if (body.caption.length > captionMax) throw new PublishingError(`The caption is over ${captionMax} characters.`, 400);
       body.hook = scenes[0]?.onScreenText ?? "";
       body.script = scenes.map((s) => s.voiceText);
     }

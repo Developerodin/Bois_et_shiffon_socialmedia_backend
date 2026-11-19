@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { MODEL_IDS, PRESENTER_MODEL, SCENE_KINDS, TRANSITIONS } from "@/server/reels/router";
 import { CREDIT_COSTS } from "@/server/services/credits";
-import { MAX_SCENE_WORDS, REEL_SCENES, type ReelPlan as SharedReelPlan, VOICE_TEXT_MAX, wordCount, WORDS_PER_SECOND } from "@/shared";
+import { CAPTION_LIMITS, MAX_SCENE_WORDS, REEL_SCENES, type ReelPlan as SharedReelPlan, VOICE_TEXT_MAX, wordCount, WORDS_PER_SECOND } from "@/shared";
 
 /**
  * A studio reel's plan (mobile R03/R04/R10–R13), stored as the content version body.
@@ -38,8 +38,8 @@ export const ReelPlan = z.object({
   // The reel's own language (voiceover, on-screen text, caption): the brand's by default, or what the person asked for.
   language: z.string().regex(/^[a-z]{2,3}(-[A-Za-z0-9]{2,8})?$/).optional(),
   scenes: z.array(ReelScene).min(REEL_SCENES.min).max(REEL_SCENES.max), // the reel rule needs a script of at least two beats
-  caption: z.string().max(2200),
-  hashtags: z.array(z.string().max(100)).max(5),
+  caption: z.string().max(CAPTION_LIMITS.captionMax),
+  hashtags: z.array(z.string().max(CAPTION_LIMITS.hashtagLengthMax)).max(CAPTION_LIMITS.hashtagsMax),
 });
 export type ReelScene = z.infer<typeof ReelScene>;
 export type ReelPlan = z.infer<typeof ReelPlan>;
