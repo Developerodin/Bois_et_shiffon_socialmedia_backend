@@ -220,9 +220,18 @@ export async function saveDraft(input: { workspaceId: string; brandId: string; u
     const { item, latest } = await loadItem(input, input.itemId, tx);
     // A story version is only ever made by createStoryVersion, after its frames are rendered (server/stories/service.ts).
     if (item.channel === "INSTAGRAM_STORY") throw new PublishingError("Stories are saved with editStory", 400, "story.useEditStory");
-    if ((latest?.version ?? 0) !== input.version) throw new PublishingError("Someone saved a newer draft while you were editing. Copy your changes, reload and try again.");
+    if ((latest?.version ?? 0) !== input.version) throw new PublishingError("Someone saved a newer draft while you were editing. Copy your changes, reload and try again.", 409, "draft.changed");
     if (item.status === "SCHEDULED") throw new PublishingError("This post is scheduled. Cancel it first, then edit.");
     if (!EDITABLE.includes(item.status)) throw new PublishingError("A published post can't be edited");
+    // A studio reel's plan is its scenes: hook and script follow them whatever was sent, and the caption keeps the plan's
+    // limits (plan.ts), or the new version would stop parsing as a plan and the reel page would lose it.
+    const scenes = (latest?.body as { scenes?: { onScreenText?: string; voiceText: string }[] } | undefined)?.scenes;
+    if (item.studio && scenes) {
+      if (body.hashtags.length > 5) throw new PublishingError("A reel takes at most 5 hashtags.", 400);
+      if (body.caption.length > 2200) throw new PublishingError("The caption is over 2200 characters.", 400);
+      body.hook = scenes[0]?.onScreenText ?? "";
+      body.script = scenes.map((s) => s.voiceText);
+    }
     if (latest && JSON.stringify({ ...(latest.body as object), ...body }) === JSON.stringify(latest.body)) throw new PublishingError("Nothing changed", 400);
     // Fields the editor doesn't show (a studio reel's scenes and video, the linked products) carry over to the new
     // version; the first one takes the products the brief linked.

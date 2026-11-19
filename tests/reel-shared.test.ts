@@ -82,6 +82,49 @@ describe("studio reels in the publishing flow", () => {
     expect(db.tx.contentVersion.create.mock.calls[0][0].data.body).toMatchObject({ caption: "b", scenes: [{ voiceText: "x" }], videoKey: "w1/b1/x.mp4" });
   });
 
+  describe("saveDraft on a studio reel follows its plan", () => {
+    const planBody = { caption: "a", hashtags: [], hook: "Hi", script: ["x", "y"], scenes: [{ onScreenText: "Hi", voiceText: "x" }, { onScreenText: "", voiceText: "y" }] };
+    const sent = (over: object = {}) => ({ hook: "evil", caption: "b", hashtags: [], slides: [], script: ["z"], pinTitle: "", altText: "", ...over });
+    const save = (body: object, version = 3) => saveDraft({ ...scope, userId: "u1", itemId: "i1", version, body: body as never });
+    const created = () => db.tx.contentVersion.create.mock.calls[0][0].data.body;
+    beforeEach(() => { db.tx.contentVersion.create.mockImplementation(async (a: { data: object }) => a.data); });
+
+    it("takes hook and script from the scenes", async () => {
+      withLatest(item(), version({ body: planBody }));
+      await save(sent());
+      expect(created()).toMatchObject({ hook: "Hi", script: ["x", "y"], caption: "b" });
+    });
+
+    it("leaves a post's sent hook and script alone", async () => {
+      withLatest(item({ channel: "INSTAGRAM_POST", studio: false }), version({ body: planBody }));
+      await save(sent());
+      expect(created()).toMatchObject({ hook: "evil", script: ["z"] });
+    });
+
+    const six = ["#a", "#b", "#c", "#d", "#e", "#f"];
+    it("a studio reel takes at most 5 hashtags", async () => {
+      withLatest(item(), version({ body: planBody }));
+      await expect(save(sent({ hashtags: six }))).rejects.toMatchObject({ status: 400, message: "A reel takes at most 5 hashtags." });
+      expect(db.tx.contentVersion.create).not.toHaveBeenCalled();
+      withLatest(item({ channel: "INSTAGRAM_POST", studio: false }), version({ body: planBody }));
+      await save(sent({ hashtags: six }));
+      expect(created().hashtags).toHaveLength(6);
+    });
+
+    it("a studio reel's caption is at most 2200 characters", async () => {
+      withLatest(item(), version({ body: planBody }));
+      await expect(save(sent({ caption: "a".repeat(2201) }))).rejects.toMatchObject({ status: 400, message: "The caption is over 2200 characters." });
+      expect(db.tx.contentVersion.create).not.toHaveBeenCalled();
+      await save(sent({ caption: "a".repeat(2200) }));
+      expect(created().caption).toHaveLength(2200);
+    });
+
+    it("a stale version is a draft.changed 409", async () => {
+      withLatest(item(), version({ body: planBody }));
+      await expect(save(sent(), 2)).rejects.toMatchObject({ status: 409, code: "draft.changed" });
+    });
+  });
+
   it("studio author may approve", async () => {
     withLatest(item(), version());
     db.tx.approvalDecision.create.mockResolvedValue({ packageHash: "h" });
