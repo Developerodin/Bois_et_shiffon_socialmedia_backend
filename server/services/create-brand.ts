@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { AgentStartError, startAgentRun } from "@/server/agents/engine";
 import { requirePermission } from "@/server/auth/permissions";
+import { enqueueCatalogSync } from "@/server/catalog/sync";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
 import { PlaceId, placeDetails } from "@/server/integrations/places";
@@ -106,5 +107,7 @@ export async function createBrandWithResearch(
   for (const agentKey of websiteUrl ? ["seo", "geo"] : []) {
     await startAgentRun({ workspaceId, brandId: brand.id, agentKey, trigger: "event", userId });
   }
+  // Products come in now rather than at the next daily sweep (free; a site without a feed just records a note).
+  if (websiteUrl) await enqueueCatalogSync({ workspaceId, brandId: brand.id }, "created");
   return { brand, researchRunId: run.id };
 }

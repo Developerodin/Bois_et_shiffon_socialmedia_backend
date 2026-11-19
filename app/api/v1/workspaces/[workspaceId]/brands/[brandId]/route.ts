@@ -1,6 +1,8 @@
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
+import { enqueueCatalogSync } from "@/server/catalog/sync";
 import { prisma } from "@/server/db/prisma";
+import { kickRunner } from "@/server/jobs/runner";
 import { assertPublicUrl, CrawlError } from "@/server/research/crawl";
 import { EditBrandInput } from "@/server/services/create-brand";
 
@@ -31,6 +33,11 @@ export async function PATCH(request: Request, context: { params: Promise<BrandRo
         },
       }),
     ]);
+    // A new website means a new product feed: read it now, not at tomorrow's sweep.
+    if (websiteUrl && websiteUrl !== before.profile?.websiteUrl) {
+      await enqueueCatalogSync(scope, `site:${websiteUrl}`);
+      kickRunner();
+    }
     return Response.json({ ok: true });
   } catch (error) {
     if (error instanceof CrawlError) {
