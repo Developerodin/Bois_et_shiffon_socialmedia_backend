@@ -15,6 +15,7 @@
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:seed": "prisma db seed",
+    "dev:test-user": "tsx --conditions=react-server --env-file=.env scripts/dev-test-user.ts",
     "smoke:neon": "tsx --conditions=react-server --env-file=.env scripts/smoke-neon.ts",
     "smoke:agents": "tsx --conditions=react-server --env-file=.env scripts/smoke-agents.ts",
     "smoke:research": "tsx --conditions=react-server --env-file=.env scripts/smoke-research.ts",
