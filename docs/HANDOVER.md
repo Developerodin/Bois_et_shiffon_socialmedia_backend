@@ -22,9 +22,10 @@ On `main` in server, web and mobile (mobile only got the synced `shared/`). Plan
   and an expand button (wide view over a scrim; Escape or the scrim collapses; collapses on navigation).
 - Not checked live: no browser (Claude in Chrome was off) and no chat turn run against OpenAI. Try on Products:
   "Explore my catalogue", "Analyse my pricing", "What's out of stock?", then expand and collapse.
-- Left as notes: the model window slides by one message past 40 (misses the prompt cache once a thread is long; trim
-  in chunks if cost matters); `%`/`_` in a product search act as wildcards (scoped, capped); the prompt's "no product
-  data in web searches" is a soft rule (drop webSearch for a turn that read products if it ever matters).
+- Follow-ups fixed the same day: the model reads 20–40 recent messages with a start that moves 20 at a time
+  (`server/chat/turn.ts` historyWindow), so long threads keep hitting the prompt cache; `%`, `_` and `\` in a product
+  search (chat and Products page) are literal characters; web search is switched off for a turn once product data is in
+  what the model sees, unless the person's own message asks to search (prepareStep). Prompt version "4".
 
 ## Feature 3c: reels render, review and publish on the web (2026-11-19)
 

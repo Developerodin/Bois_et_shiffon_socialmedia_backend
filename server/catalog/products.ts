@@ -129,7 +129,10 @@ export const STOCK_UNKNOWN = { stockQuantity: null, inStock: null } satisfies Pr
 
 export function productPageWhere({ q, stock }: Pick<ProductPageQuery, "q" | "stock">): Prisma.ProductWhereInput {
   const and: Prisma.ProductWhereInput[] = [];
-  if (q) and.push({ OR: [{ title: { contains: q, mode: "insensitive" } }, { sku: { contains: q, mode: "insensitive" } }] });
+  // Prisma passes `contains` into ILIKE as is: escaped, a typed % or _ is a character, not a wildcard (Postgres'
+  // default ILIKE escape is the backslash).
+  const literal = q.replace(/[\\%_]/g, (c) => `\\${c}`);
+  if (q) and.push({ OR: [{ title: { contains: literal, mode: "insensitive" } }, { sku: { contains: literal, mode: "insensitive" } }] });
   if (stock === "in") and.push({ OR: [{ stockQuantity: { gt: 0 } }, { inStock: true }] });
   if (stock === "out") and.push({ OR: [{ stockQuantity: { lte: 0 } }, { stockQuantity: null }] }, { OR: [{ inStock: false }, { inStock: null }] });
   return and.length ? { AND: and } : {};
