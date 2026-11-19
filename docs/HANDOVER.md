@@ -4,6 +4,80 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Feature 3b: reels steps and voice on the web (2026-11-19)
+
+Branch `feature-3b-reels` in the server and web repos (not merged). Spec
+`docs/superpowers/specs/2026-11-18-feature-3-reels-design.md`, section 7. Make video, Video, Review and Publish are 3c.
+
+- **What was built.** Three more steps on `/reels/{id}`. **Presenter**: pick a brand presenter or none, preview a
+  template, and "Create a presenter". **Photos**: pick the photo for each scene, or move a photo to another scene;
+  nothing changes until you save. **Script & voice**: edit each scene's text, pick the reel's voice, and give a scene
+  its own take by recording in the browser or uploading a file. The **Voices sheet** lists the workspace's voices and
+  the ElevenLabs library (search, filters, "More voices"), with samples. **Clone a voice** records a reading and
+  makes a voice from it. Behind `WEB_FEATURES=reels`.
+- **Web kit.** `AudioRecorder` and `VoiceRow` (see `docs/DESIGN_SYSTEM.md` section 7). The microphone is on only
+  while recording; closing the dialog stops it and sends nothing.
+- **Paid buttons.** Make a presenter, the template preview and Create the voice use the shared paid press rules: the
+  price shows from the server, a repeat never charges twice, and a 402 opens the paywall.
+- **Server changes** (all additive, old phone builds unaffected). Error code `reel.changed`; `clone.stillMaking`; an
+  optional `consentVersion` on clone; the recording bucket is keyed by scope; library previews are https only. A take
+  on a web-made reel now works (Task 1, S9).
+
+**Calls made**
+- The spec's "Play take" on a saved scene is not built. The server keeps no playable link for a take, so the record
+  dialog plays only the take it just sent.
+- A FAILED presenter shows the spec's "Didn't work · N credits back", not the phone's "You weren't charged".
+- A voice pick saves on **Use this voice**, not on the radio change. Web radios fire on every arrow key, so saving
+  on change would save while someone is only looking.
+
+**Copy written without a source, for the owner to approve** (desktop-only lines, not from the phone's `reels.json`)
+- Presenter step: "Pick one of your brand's presenters to speak on camera, or keep the reel on your product.",
+  "Presenter removed: pick another.", "Presenters not ready", "Plan a reel first: a presenter is added to a reel's script."
+- Presenter dialog: "Give them a name and pick a few traits. The rest is chosen for you.", "Presenters are AI-made
+  people. Reels with a presenter are labelled as made with AI.", "One presenter is made at a time."
+- Photos step: "Pick the photo for each scene, or move a photo to another scene. Nothing changes until you save.",
+  "The photo for each scene.", "Stand-in: this photo doesn't show what the scene talks about.", "The plan changed:
+  pick the photos again.", "Plan a reel first: photos belong to its scenes."
+- Script step: "Plan a reel first: the script belongs to its scenes.", "The plan changed: edit the script again.",
+  "This reel's voice isn't available any more. Pick another.", "From the ElevenLabs library", "Uses the voice above",
+  "Editing this text drops its recording.", "Save your script changes before recording."
+- Voices sheet: "Listen to a sample, then pick the voice that reads your reel.", "Search voices (name, style…)",
+  "No voices match these filters.", "You can listen to every library voice now. Reels can use them once our
+  ElevenLabs plan is upgraded.", the delete dialog text "The voice is deleted for the whole workspace, at ElevenLabs
+  too. Reels using it need another voice. This can't be undone.", "Withdraw consent and delete".
+- Record dialog: "Your browser will ask to use the microphone. The recording is sent to us only to check it and make
+  your voiceover.", "Or upload an audio file, up to 15 seconds", "Checking what we heard…", "We heard" / "We heard
+  something different", "Nothing. Check your microphone and record again, a little closer.", "Keep it, and the
+  scene's text becomes what you said, so approvers read what is spoken. Or record again.", "This scene isn't in the
+  plan any more."
+- Clone dialog: "Your browser will ask to use the microphone. The reading is sent to us only to make this voice, and
+  isn't kept.", "Reading language", "Record again?" and "Your reading so far is replaced.", "That recording is too
+  large.", "Still being made…".
+
+**Manual checks for the owner**
+- [ ] Record a take in Chrome, Firefox and Safari: accepted.
+- [ ] Upload an M4A and a WebM: accepted. An Ogg or an MP3: the server's 400. A 20 s file: "Keep it under 15 seconds."
+- [ ] Clone: the consent text matches the server's, and there is no upload.
+- [ ] A 402 opens the paywall from Make a presenter, the template preview and Create the voice.
+- [ ] Keyboard through every radio group, the recorder and the photo moves.
+- [ ] Arrow through voices: nothing saves until **Use this voice**.
+- [ ] 375 px: no horizontal scroll on each new step.
+- [ ] Mic denied: "Upload a file instead" still works.
+- [ ] Close the record dialog during the permission prompt and mid-recording: the mic indicator goes off and no take is sent.
+- [ ] A take on a web-made reel works.
+
+**Not checked live:** Presenter, preview and clone were never run for real (no provider credits). Browser checks on
+the new steps are the owner's list above.
+
+**Known limits**
+- ElevenLabs sample and library preview links (`storage.googleapis.com`, ElevenLabs) are outside the report-only CSP
+  `media-src`. Enforcing the CSP needs those origins added.
+- There is no `Permissions-Policy` header today. If one is added it must allow `microphone=(self)`.
+- A take's audio can't be played back after the dialog closes (the server keeps no playable link).
+- Clone challenges are capped at 20 an hour per person.
+- "More voices" can render up to 50 pages with no virtual list.
+- The photoshoot studio still has its own press code; it could adopt `usePaidPress`.
+
 ## Feature 3a: reels plan and storyboard on the web (2026-11-18)
 
 Branch `feature-3a-reels` in the server, web and mobile repos (not merged). Plan:
