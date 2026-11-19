@@ -55,14 +55,21 @@ export async function permissionsOf(
   workspaceId: string,
   userId: string,
   brandId?: string,
+  /** brandGrant already read (in parallel with the member, by brandAccess); undefined reads it here. */
+  preread?: Awaited<ReturnType<typeof brandGrant>>,
 ): Promise<Set<PermissionKey>> {
   if (!found?.role) return new Set();
   const perms = new Set(found.role.permissions as PermissionKey[]);
   if (!brandId) return perms;
 
-  const grant = await prisma.brandMember.findFirst({ where: { brandId, workspaceId, userId }, include: { role: true } });
+  const grant = preread === undefined ? await brandGrant(workspaceId, brandId, userId) : preread;
   for (const p of grant?.role.permissions ?? []) perms.add(p as PermissionKey);
   return perms;
+}
+
+/** The user's project grant on a brand (BrandMember + its role), or null. */
+export function brandGrant(workspaceId: string, brandId: string, userId: string) {
+  return prisma.brandMember.findFirst({ where: { brandId, workspaceId, userId }, include: { role: true } });
 }
 
 /**

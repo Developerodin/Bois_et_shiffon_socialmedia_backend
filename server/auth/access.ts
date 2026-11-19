@@ -2,7 +2,7 @@ import "server-only";
 import { BrandStatus } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { AccessDeniedError, BrandArchivedError } from "@/server/auth/errors";
-import { memberRole, permissionsOf } from "@/server/auth/permissions";
+import { brandGrant, memberRole, permissionsOf } from "@/server/auth/permissions";
 
 export type BrandAccessOptions = {
   /** Allow read-style access when brand is archived (AT-024 history). */
@@ -50,12 +50,17 @@ export async function brandAccess(
   userId: string,
   options?: BrandAccessOptions,
 ) {
-  const found = await memberRole(workspaceId, userId);
+  // The three reads need only the ids, so they go together: one round trip's wait instead of three on every brand
+  // route. The checks below still run in the old order, so a non-member hears "not a member" whatever the brand.
+  const [found, brand, grant] = await Promise.all([
+    memberRole(workspaceId, userId),
+    prisma.brand.findFirst({ where: { id: brandId, workspaceId } }),
+    brandGrant(workspaceId, brandId, userId),
+  ]);
   if (!found) {
     throw new AccessDeniedError("Not a workspace member");
   }
 
-  const brand = await prisma.brand.findFirst({ where: { id: brandId, workspaceId } });
   if (!brand) {
     throw new AccessDeniedError("Brand not found in workspace");
   }
@@ -64,7 +69,7 @@ export async function brandAccess(
     throw new BrandArchivedError();
   }
 
-  const perms = await permissionsOf(found, workspaceId, userId, brandId);
+  const perms = await permissionsOf(found, workspaceId, userId, brandId, grant);
   if (!perms.has("brand.read")) {
     throw new AccessDeniedError("You don't have access to this project");
   }
