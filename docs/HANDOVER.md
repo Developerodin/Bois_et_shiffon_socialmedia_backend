@@ -120,8 +120,8 @@ poll gets slow. Upgrade: Prisma `relationJoins`.
 ## Phase 0 follow-up (2026-11-20)
 
 Branch `phase-0-followup` in server, web and mobile, from the merged Phase 0. Plan:
-`docs/superpowers/plans/2026-11-20-phase-0-followup.md` (untracked). Ranges: server `248344a..76e3a66` (this docs commit
-on top), web `4eb38b9..118bcc5`, mobile `2700b63..f188af7`. Ledger and reports:
+`docs/superpowers/plans/2026-11-20-phase-0-followup.md` (untracked). Ranges (after the second review's fixes): server `248344a..707a099` (this docs
+commit on top), web `4eb38b9..141aa11`, mobile `2700b63..c2a77ed`. Ledger and reports:
 `.superpowers/sdd/2026-11-20-phase-0-followup/` (`progress.md`, `task-*-report.md`, `track-*-report.md`). Not merged or
 pushed when this was written.
 
@@ -138,17 +138,18 @@ pushed when this was written.
   actions and `setOwner` reuse them instead of reading again. `isClientReviewer` was removed; `decide` takes a required
   `byClient`. The catalog-sync job payload is only `{ workspaceId, brandId }` (the route scope used to be passed whole).
 - **One name rule** (`server/content/person-name.ts`): the trimmed name; else the email's local part, only for callers
-  with `project.members.manage`; else "A team member". Never the whole email. It covers the post owner, the CSV Owner
+  with `project.members.manage`; else "A team member". Never the whole email: managers reading an old stored name that
+  is an email get its local part, never the address. It covers the post owner, the CSV Owner
   column, `content/owners`, decision `by` names, members for non-managers and story rights. Client reviewers are not
   offered as owners.
 - **Story rights are hidden, not rewritten.** A story's asset-rights note and `frames[].rights` no longer reach people
   who can't see names (list, `?id=`, check results) or the Quality agent's prompt. **Stored story bodies keep their old
   names and emails in the database; they are hidden on every read.** New bodies store "A team member", not the email.
 - **Hand-posted posts are dated when they went out:** `scheduledFor` is set to now (a planned date is lost).
-- **Calendar and post views are cheaper:** owners are read with one query; the recent half of the list is ordered by
+- **Calendar and post views are cheaper:** the owner joins the item read (no separate owners query); the recent half of the list is ordered by
   `updatedAt desc` and can use the new index `ContentItem(brandId, updatedAt)` (migration
   `20261120082134_content_updated_index`). With 20,000 scratch rows the planner used it; the dev table has 5 rows.
-- **Agents list** is one `DISTINCT ON ("agentKey")` query (same JSON shape). **`agent-events?runId=`** returns one run's
+- **Agents list** is a per-key `LATERAL ... LIMIT 1` query on `[brandId, agentKey, createdAt]` (same JSON shape). **`agent-events?runId=`** returns one run's
   events oldest first (up to 200; `after` and `limit` ignored; `runId` is `[A-Za-z0-9_-]{1,40}` or 400).
 - **Web:** the shell agent watcher and toast; the agents request goes through the shared per-URL fetch, so the Overview,
   board, post panels and watcher make one request; view and URL parsing moved to `lib/workspace-view.ts`. Business
@@ -174,7 +175,9 @@ pushed when this was written.
    the client was not regenerated; only an index changed) and restart it.
 2. Per environment: `npm run redact:story-checks` (dry run, prints counts), then `npm run redact:story-checks -- --apply`
    (optional `--workspace <id>`). It rewrites only passing "Asset rights" notes in story quality checks that contain
-   `@`; it never writes story bodies. When every database is done, delete the script, its npm script and
+   `@`; it never writes story bodies. It logs one line per page, counts the checks it skipped (an email in the note but
+   no story body to rebuild it from: look at those by hand) and, with `--apply`, writes one `story-checks.redacted`
+   audit event per workspace (a failed audit write is logged, not thrown). When every database is done, delete the script, its npm script and
    `tests/redact-story-checks.test.ts`.
 3. One-off DB grep for `@` in older story `QualityCheck` notes outside "Asset rights" (the script only handles that row).
 4. The guarded `client_reviewer` re-run (only workspaces missing the role) and assigning the Client reviewer role only
@@ -192,15 +195,14 @@ staff-approved posts), names on the calendar and the CSV, a hand-posted post's d
 - Names: owners numbering ("A team member (2)") shifts with membership and can differ from the list's plain
   "A team member"; a real display name containing `@` is treated as an email and hidden.
 - Web and phone: Send back to clients can show on team-approved posts (the server answers 409 readably); the mobile
-  `StoryFrame` type (`api/endpoints.ts`) still says confirmed rights are `{ kind, by, name }`; the redact script logs no
-  progress.
+  `StoryFrame` type (`api/endpoints.ts`) still says confirmed rights are `{ kind, by, name }`.
 - Left after the final review (2026-11-20): a refused send-back (per-person limit, AI allowance or in-transaction
-  refusal) can still spend one client-cap slot; 409 says "approved by the team" when another client approved it; new story
-  bodies store "A team member" even for viewers who are managers; one more DB grep for `@` in older QualityCheck notes
-  outside "Asset rights"; a no-change story re-save may create a new version once stored names differ from re-resolved
+  refusal) can still spend one client-cap slot; new story bodies store "A team member" even for viewers who are
+  managers; a no-change story re-save may create a new version once stored names differ from re-resolved
   names (confirm when touched); `decide` with override still re-reads permissions via requirePermission (rare path).
 - RunEvents shows at most 200 events and does not refresh mid-run (upgrade: page by `after`); the toast timer restarts
-  after hover; the watcher baseline can come from a cached response.
+  after hover; the watcher takes its baseline only from an answer fetched after it mounted, so a run that ends in the
+  first poll gap (up to 20 s) is not toasted.
 - Redaction script: one-by-one updates (about 150 ms each); add a prefilter or batching if a table is very large.
 - The Phase 0 minors above still stand.
 

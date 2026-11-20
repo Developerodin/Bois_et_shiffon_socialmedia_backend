@@ -92,7 +92,8 @@ A small own component for "something finished while you were elsewhere", mounted
 - **Timing:** dismissed after 10 s; the timer pauses while the pointer is over it or focus is inside; the close button (`Dismiss`, 36 px target) always works.
 - **Motion:** the same short `rise-in` as other page parts (280 ms); off under `prefers-reduced-motion`.
 - **Tone:** `success` (border `success/50`) for a finished run, `warning` (border `warning/60`) for one that needs a look. Card surface, `rounded-2xl`, a bold title and one muted detail line. Plain text only.
-- **Link:** an optional `href`, accepted only for in-app paths ("/x", never "//host"); the whole body is then a button that dismisses and navigates.
+- **Link:** an optional `href`, accepted only for in-app paths: "/" then a letter, digit, "?" or "#"; "//host", "/\host" and any control character (a tab or newline browsers drop from a URL) are rejected; the whole body is then a button that dismisses and navigates.
+- **Brand switch:** toasts clear (they belong to the brand the watcher was watching).
 - **Announcing:** the stack is `role="status"` with `aria-live="polite"`.
 - **Copy:** "<Agent> finished" or "<Agent> needs a look", the failure reason in the detail line. Runs with nothing to do stay silent.
 
