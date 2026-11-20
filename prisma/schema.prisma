@@ -877,6 +877,8 @@ model ContentItem {
   @@index([workspaceId, brandId, status])
   @@index([brandId, scheduledFor])
   @@index([campaignId])
+  // ponytail: Phase 0's indexes were added with a plain CREATE INDEX, which blocks writes to the table while it builds;
+  // fine at today's size. Past ~1M rows, add such an index with CREATE INDEX CONCURRENTLY in a migration of its own.
   @@index([brandId, ownerId])
 }
 
@@ -1155,7 +1157,7 @@ model ApprovalDecision {
   item ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
 
   @@index([contentItemId, createdAt])
-  @@index([brandId, verdict, createdAt])
+  @@index([brandId, verdict, createdAt]) // plain CREATE INDEX: see the note on ContentItem's [brandId, ownerId]
 }
 
 enum PublicationStatus {

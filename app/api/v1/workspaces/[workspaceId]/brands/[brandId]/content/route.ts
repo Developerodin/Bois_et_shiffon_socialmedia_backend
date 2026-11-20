@@ -40,6 +40,8 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       id ? [] : prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy, take: 200, include }),
     ]);
     // Each half is sorted on its own; sort the whole once so the list keeps one order (undated first, then date, then creation).
+    // Two undated posts give -Infinity - -Infinity = NaN, which is falsy, so `||` falls through to creation time: keep
+    // the `||` (a `??` or a reordering would let NaN through and the sort would be inconsistent).
     const rows = [...openRows, ...recentRows.slice(0, 200 - openRows.length)].sort((a, b) => (a.scheduledFor?.getTime() ?? -Infinity) - (b.scheduledFor?.getTime() ?? -Infinity) || a.createdAt.getTime() - b.createdAt.getTime());
     if (id && !rows.length) return problemResponse({ type: "https://api.brandpilot/errors/not-found", title: "Post not found", status: 404 });
     // The draft's pictures (photoKeys, the first is the cover), signed for an hour: Today, Calendar and the post show them.

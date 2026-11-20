@@ -6,6 +6,8 @@ import { personName } from "@/server/content/person-name";
 import { toCsv } from "@/shared";
 
 const DAY = 86_400_000;
+// ponytail: posts past 5,000 in the range are silently dropped. Narrow ?from/?to, or say so (a "truncated" header) if
+// brands get that big.
 const MAX_ROWS = 5000;
 const COLUMNS = ["Date", "Channel", "Status", "Title", "Owner", "Campaign", "Caption", "Post link"].map((label) => ({ key: label, label }));
 

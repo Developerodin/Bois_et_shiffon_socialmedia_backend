@@ -170,6 +170,8 @@ export type NewPost = { channel: "INSTAGRAM_POST" | "INSTAGRAM_CAROUSEL"; goal: 
 /**
  * The post or story already made for this request id in this brand, if it still exists. Posts and stories share one
  * request-id space per brand; `channel` narrows it (a story lookup never finds a post's id, and the other way round).
+ * ponytail: brief->requestId is a JSON-path match with no index, so it scans the brand's posts of that channel; fine
+ * per brand. Store requestId in a column with a (brandId, requestId) unique index if a brand gets tens of thousands.
  */
 export async function itemForRequest(scope: { workspaceId: string; brandId: string }, requestId: string, opts: { channel?: ContentChannel | ContentChannel[] } = {}, db: Prisma.TransactionClient | typeof prisma = prisma) {
   const { channel } = opts;
