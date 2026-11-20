@@ -7,6 +7,7 @@ import type { AgentDefinition } from "@/server/agents/types";
 import { answeredBy } from "@/server/ai/provider";
 import { campaignsById } from "@/server/catalog/campaigns";
 import { linkedProducts } from "@/server/catalog/linked";
+import { approvedExamples, examplesBlock } from "@/server/content/examples";
 import { brandKnowledge, productFacts, productPhotos } from "@/server/content/knowledge";
 import { campaignFacts, isWithdrawn } from "@/server/content/offer-checks";
 import { handleOf, linkedIds, RANK_SELECT, rankCandidates, type LinkedProduct } from "@/server/content/product-checks";
@@ -116,6 +117,8 @@ export const creatorAgent: AgentDefinition = {
       return out;
     };
     let drafted = 0;
+    // Approved captions per channel, read once per run. They go after the divider, so approvals never change the cached start.
+    const examples = new Map<string, { itemId: string; caption: string }[]>();
 
     for (const item of todo) {
       const last = item.versions[0];
@@ -182,6 +185,8 @@ export const creatorAgent: AgentDefinition = {
         photoKeys: itemPhotos.slice(0, item.channel === "INSTAGRAM_CAROUSEL" ? 3 : 1).map((p) => p.key),
       };
       const schema: z.ZodType<z.infer<typeof Draft> & { productIds?: string[] }> = switchNow ? SwitchDraft : Draft;
+      if (!examples.has(item.channel)) examples.set(item.channel, await approvedExamples(scope, item.channel));
+      const voice = examplesBlock(examples.get(item.channel) ?? [], item.id);
       const out = await ctx.ai.generateObject({
         workflowId: last ? "creator.revise" : "creator.draft",
         promptVersion: CONTENT_PROMPT_VERSION,
@@ -193,7 +198,7 @@ export const creatorAgent: AgentDefinition = {
           last ? `\nPrevious draft:\n${JSON.stringify(last.body)}\n` : ""
         }${reviewer ? `\nThe approver asked for these changes (do exactly this):\n${reviewer}\n` : ""}${
           report?.length ? `\nQuality report to fix:\n${report.map((r) => `- [${r.status}] ${r.check}: ${r.note}`).join("\n")}\n` : ""
-        }\nBrand photos (key | product):\n${photoList}\nphotoKeys: exact keys of the photos that show this post's product: 1 for single-image posts and Pins, 2 to 10 for carousels (one per slide where you can), [] when none fits or for Threads and Reels.\nFill unused fields with "" or []: slides only for carousels, script only for Reels, pinTitle only for Pinterest.${products}${campaignLine}`,
+        }\nBrand photos (key | product):\n${photoList}\nphotoKeys: exact keys of the photos that show this post's product: 1 for single-image posts and Pins, 2 to 10 for carousels (one per slide where you can), [] when none fits or for Threads and Reels.\nFill unused fields with "" or []: slides only for carousels, script only for Reels, pinTitle only for Pinterest.${products}${campaignLine}${voice}`,
         // Our own hard rules (length, hashtags, slides…): a draft that breaks one is asked again with the reasons
         // (Creator is already the top tier, so the same model rewrites it); if it still breaks one, Quality blocks it.
         // Unknown product ids are dropped below, not asked again: a retry would double the top-tier call.

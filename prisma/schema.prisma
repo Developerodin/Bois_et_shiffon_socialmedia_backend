@@ -1154,6 +1154,7 @@ model ApprovalDecision {
   item ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
 
   @@index([contentItemId, createdAt])
+  @@index([brandId, verdict, createdAt])
 }
 
 enum PublicationStatus {

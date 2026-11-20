@@ -5,6 +5,7 @@ const db = vi.hoisted(() => {
     contentItem: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), update: vi.fn(), count: vi.fn(async () => 0) },
     contentVersion: { create: vi.fn() },
     auditEvent: { create: vi.fn() },
+    approvalDecision: { findMany: vi.fn(async () => [] as unknown[]) },
     product: { findMany: vi.fn(async () => [] as unknown[]) },
     brandProfile: { findFirst: vi.fn(async () => null) },
     qualityCheck: { findMany: vi.fn(async () => [] as unknown[]), create: vi.fn() },
