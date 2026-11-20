@@ -5,7 +5,6 @@ import { NothingToDoError, startAgentRun } from "@/server/agents/engine";
 import { CONTENT_PROMPT_VERSION, CREATOR_SYSTEM } from "@/server/agents/prompts/content";
 import type { AgentDefinition } from "@/server/agents/types";
 import { answeredBy } from "@/server/ai/provider";
-import { isClientReviewer } from "@/server/auth/permissions";
 import { campaignsById } from "@/server/catalog/campaigns";
 import { linkedProducts } from "@/server/catalog/linked";
 import { approvedExamples, examplesBlock } from "@/server/content/examples";
@@ -130,7 +129,7 @@ export const creatorAgent: AgentDefinition = {
       );
       const reviewer = sentBack(item);
       // A client reviewer's note is labelled data for the writer, not instructions.
-      const reviewerIsClient = reviewer ? await isClientReviewer(brand.workspaceId, brand.brandId, decision(item)!.userId) : false;
+      const reviewerIsClient = reviewer ? decision(item)!.byClient : false;
       const links = [...new Set(currentIds(item))].flatMap((id) => byId.get(id) ?? []);
       const campaign = item.campaignId ? campaigns.get(item.campaignId) : undefined;
       const campaignLine = item.campaignId

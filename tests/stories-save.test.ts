@@ -52,6 +52,8 @@ vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()
 vi.mock("@/server/agents/engine", async (orig) => ({ ...(await orig<object>()), startAgentRun: m.start }));
 vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), getMediaBytes: m.get, signedMediaUrl: async (k: string) => `https://signed/${k}` }));
 
+// The route reads the caller's permissions for the post's history; these callers publish.
+vi.mock("@/server/auth/permissions", async (orig) => ({ ...(await orig<object>()), effectivePermissions: vi.fn(async () => new Set(["publish.execute"])) }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: m.authorize }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: m.kick }));
 vi.mock("@/server/services/publishing", async (orig) => ({

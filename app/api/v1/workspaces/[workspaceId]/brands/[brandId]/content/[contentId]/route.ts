@@ -2,7 +2,7 @@ import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { startAgentRun } from "@/server/agents/engine";
-import { effectivePermissions, isClientReviewer } from "@/server/auth/permissions";
+import { effectivePermissions } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { pinterestBoards } from "@/server/integrations/publishers";
 import { kickRunner } from "@/server/jobs/runner";
@@ -161,10 +161,10 @@ export async function POST(request: Request, context: Params) {
         rewrite = body.verdict === "CHANGES_REQUESTED" && !item.studio;
         if (rewrite) await aiCap();
       };
-      await decide({ ...scope, itemId, version: body.version, verdict: body.verdict, note: body.note, override: body.override, switchProducts: body.switchProducts, beforeWrite });
+      const decision = await decide({ ...scope, itemId, version: body.version, verdict: body.verdict, note: body.note, override: body.override, switchProducts: body.switchProducts, beforeWrite });
       // After an override the person schedules: auto-publish would re-book the first account after a cancelled schedule.
       // A client reviewer's approval never publishes by itself: staff schedule or post it.
-      if (body.verdict === "APPROVED" && !body.noAutoPublish && !body.override && !(await isClientReviewer(scope.workspaceId, scope.brandId, scope.userId))) {
+      if (body.verdict === "APPROVED" && !body.noAutoPublish && !body.override && !decision.byClient) {
         await autoPublish(scope, itemId);
         kickRunner();
       }

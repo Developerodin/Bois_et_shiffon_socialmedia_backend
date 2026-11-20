@@ -21,7 +21,7 @@ const enqueueJob = vi.hoisted(() => vi.fn());
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/catalog/linked", () => ({ linkedProducts: linked }));
-vi.mock("@/server/auth/permissions", () => ({ requirePermission: vi.fn(async () => undefined), hasOtherApprover: vi.fn(async () => true) }));
+vi.mock("@/server/auth/permissions", () => ({ requirePermission: vi.fn(async () => undefined), hasOtherApprover: vi.fn(async () => true), isClientReviewer: vi.fn(async () => false) }));
 vi.mock("@/server/services/connections", () => ({ accessToken: vi.fn(), markReconnect: vi.fn(), ReconnectNeeded: class extends Error {} }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob }));
 

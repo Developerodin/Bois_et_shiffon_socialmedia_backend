@@ -6,7 +6,7 @@ import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefuse
 import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { CAPTION_LIMITS, safeHttpUrl } from "@/shared";
-import { hasOtherApprover, requirePermission } from "@/server/auth/permissions";
+import { hasOtherApprover, isClientReviewer, requirePermission } from "@/server/auth/permissions";
 import { linkedProducts } from "@/server/catalog/linked";
 import { gateIssues, linkedIds, ProductOverride, snapshotOf } from "@/server/content/product-checks";
 import { campaignsById } from "@/server/catalog/campaigns";
@@ -367,6 +367,8 @@ export async function decide(input: {
     throw new PublishingError("You've sent back a lot of posts this hour. Try again later.", 429);
   }
   await input.beforeWrite?.(pre.item);
+  // Kept on the decision: the writer labels a client's note, examples skip a client's approvals, the apps say "by client".
+  const byClient = await isClientReviewer(input.workspaceId, input.brandId, input.userId);
   return prisma.$transaction(async (tx) => {
     await lock(tx, input.itemId);
     const { item, latest: loaded } = await loadItem(input, input.itemId, tx);
@@ -407,6 +409,7 @@ export async function decide(input: {
         userId: input.userId,
         ...(productOverride ? { productOverride } : {}),
         switchProducts: Boolean(input.switchProducts),
+        byClient,
       },
     });
     const status = input.verdict === "APPROVED" ? "APPROVED" : input.verdict === "REJECTED" ? "REJECTED" : "DRAFT_REVIEW";
@@ -1011,7 +1014,7 @@ export async function releaseState(scope: { workspaceId: string; brandId: string
     accounts: perms.has("publish.execute") ? accounts : [],
     // An earlier approval of the same package (before an "approve anyway") still holds too.
     decisions: decisions.map((d) => ({
-      id: d.id, verdict: d.verdict, note: d.note, by: who(d.userId), at: d.createdAt, current: d.verdict === "APPROVED" && d.packageHash === approval?.packageHash,
+      id: d.id, verdict: d.verdict, note: d.note, by: who(d.userId), byClient: d.byClient, at: d.createdAt, current: d.verdict === "APPROVED" && d.packageHash === approval?.packageHash,
       version: d.contentVersionId === latest?.id ? latest.version : null, override: overrides.has(d.id) ? overrideNames(overrides.get(d.id)!) : null,
     })),
     attempts: attempts.map((a) => {

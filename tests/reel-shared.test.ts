@@ -18,7 +18,7 @@ const db = vi.hoisted(() => {
 vi.mock("@/server/db/prisma", () => ({ prisma: db.prisma }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn(async () => ({})) }));
 const approvers = vi.hoisted(() => ({ other: true }));
-vi.mock("@/server/auth/permissions", () => ({ hasOtherApprover: vi.fn(async () => approvers.other) }));
+vi.mock("@/server/auth/permissions", () => ({ hasOtherApprover: vi.fn(async () => approvers.other), isClientReviewer: vi.fn(async () => false) }));
 
 import { creatorAgent } from "@/server/agents/definitions/creator";
 import { briefAgent } from "@/server/agents/definitions/brief";

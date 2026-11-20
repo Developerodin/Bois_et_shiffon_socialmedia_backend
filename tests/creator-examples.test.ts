@@ -45,11 +45,11 @@ beforeEach(() => {
 });
 
 describe("approvedExamples", () => {
-  it("reads approvals in two scoped queries", async () => {
+  it("reads approvals in two scoped queries, leaving out a client's approvals", async () => {
     approvals([{ item: "i1", version: "v1", caption: "one" }]);
     const out = await approvedExamples(scope, "INSTAGRAM_POST");
     expect(db.approvalDecision.findMany).toHaveBeenCalledWith({
-      where: { ...scope, verdict: "APPROVED", productOverride: { equals: Prisma.DbNull }, item: { channel: "INSTAGRAM_POST" } },
+      where: { ...scope, verdict: "APPROVED", byClient: false, productOverride: { equals: Prisma.DbNull }, item: { channel: "INSTAGRAM_POST" } },
       orderBy: { createdAt: "desc" },
       take: 20,
       select: { contentItemId: true, contentVersionId: true },

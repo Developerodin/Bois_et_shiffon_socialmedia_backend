@@ -19,7 +19,6 @@ const db = vi.hoisted(() => {
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/agents/engine", () => ({ startAgentRun: vi.fn(async () => null), NothingToDoError: class extends Error {} }));
 vi.mock("@/server/services/context-docs", () => ({ listContextDocs: vi.fn(async () => []) }));
-vi.mock("@/server/auth/permissions", () => ({ isClientReviewer: vi.fn(async () => false) })); // A send-back from a client reviewer is labelled differently; these decisions are staff ones.
 vi.mock("@/server/catalog/linked", () => ({ linkedProducts: vi.fn(async () => []) }));
 vi.mock("@/server/research/brand-assets", async (orig) => ({ ...(await orig<object>()), storeImage: vi.fn(async () => null) }));
 

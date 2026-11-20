@@ -1148,6 +1148,7 @@ model ApprovalDecision {
   note             String?
   productOverride  Json? // { productIds, states }: availability issues approved anyway
   switchProducts   Boolean         @default(false) // CHANGES_REQUESTED: the Creator may pick another product
+  byClient         Boolean         @default(false) // made as a client reviewer (decided then, not looked up later)
   userId           String
   createdAt        DateTime        @default(now())
 

@@ -6,14 +6,15 @@ const CAPTION_MAX = 500;
 
 /**
  * The newest captions the team approved for this brand on this channel (one per post, newest first), as voice examples
- * for the writer. Approvals that overrode a product warning are left out. Stories have no caption.
+ * for the writer. Approvals that overrode a product warning, and a client's approvals (the team's voice, not the
+ * client's taste), are left out. Stories have no caption.
  * Two queries: ApprovalDecision has no relation to ContentVersion. Ceiling: looks at the last 20 approvals of the
  * channel; if a busy brand's newest 20 are all one post's, fewer than 3 come back, which is fine.
  */
 export async function approvedExamples(scope: { workspaceId: string; brandId: string }, channel: ContentChannel): Promise<{ itemId: string; caption: string }[]> {
   if (channel === "INSTAGRAM_STORY") return [];
   const decisions = await prisma.approvalDecision.findMany({
-    where: { ...scope, verdict: "APPROVED", productOverride: { equals: Prisma.DbNull }, item: { channel } },
+    where: { ...scope, verdict: "APPROVED", byClient: false, productOverride: { equals: Prisma.DbNull }, item: { channel } },
     orderBy: { createdAt: "desc" },
     take: 20,
     select: { contentItemId: true, contentVersionId: true },

@@ -214,6 +214,7 @@ describe("a client reviewer's decisions", () => {
   it("reviewer approval never auto-publishes", async () => {
     m.authorize.mockResolvedValue(scope);
     caller([], clientRole);
+    m.decide.mockResolvedValueOnce({ id: "d1", byClient: true });
     expect((await approve()).status).toBe(200);
     expect(m.decide).toHaveBeenCalledTimes(1);
     expect(m.autoPublish).not.toHaveBeenCalled();
@@ -270,6 +271,28 @@ describe("a client reviewer's decisions", () => {
     db.contentItem.findFirst.mockResolvedValue({ ...waiting, studio: true });
     expect((await sendBack(2)).status).toBe(200);
     expect(m.buckets.get("post-ai:w1")).toBe(1);
+  });
+
+  it("decide records whether the decision was made as a client reviewer", async () => {
+    const { decide } = await vi.importActual<typeof import("@/server/services/publishing")>("@/server/services/publishing");
+    db.contentItem.findFirst.mockResolvedValue(waiting);
+    let written: unknown;
+    db.$transaction.mockImplementation((async (fn: (tx: unknown) => Promise<unknown>) => {
+      const tx = {
+        $executeRaw: async () => 0,
+        contentItem: { findFirst: async () => waiting, update: async () => ({}) },
+        approvalDecision: { create: async ({ data }: { data: object }) => (written = data) },
+        auditEvent: { create: async () => ({}) },
+      };
+      return fn(tx);
+    }) as never);
+    caller([], clientRole);
+    await decide({ ...scope, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Shorter" });
+    expect(written).toMatchObject({ byClient: true });
+    caller(["content.approve"], clientRole);
+    await decide({ ...scope, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Shorter" });
+    expect(written).toMatchObject({ byClient: false });
+    db.$transaction.mockImplementation(async () => ({ id: "d1" }));
   });
 
   it("a client reviewer's change request reaches the writer as labelled data", () => {
