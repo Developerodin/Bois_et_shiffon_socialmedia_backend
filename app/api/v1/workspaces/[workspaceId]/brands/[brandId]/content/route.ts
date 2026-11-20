@@ -9,6 +9,7 @@ import { createPost, ownMediaKey, postAiAllowed, PublishingError } from "@/serve
 import { signedMediaUrl } from "@/server/storage/media";
 import { CONTENT_GOALS } from "@/shared";
 import { contentWindow } from "@/server/content/window";
+import { personName } from "@/server/content/person-name";
 import { isStoryBody } from "@/server/stories/body";
 import { coverUrl, createStory, failStoryStart, itemForRequest, STORY_RENDER_JOB, STORY_START_NOTE, storyTab } from "@/server/stories/service";
 
@@ -24,7 +25,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const [open, recent] = contentWindow(new Date()).OR;
     const include = {
       opportunity: { select: { title: true } },
-      owner: { select: { id: true, name: true } },
+      owner: { select: { id: true, name: true, email: true } },
       versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } },
       decisions: { orderBy: { createdAt: "desc" }, take: 1, select: { verdict: true, note: true, contentVersionId: true } },
       publications: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, error: true } },
@@ -71,8 +72,10 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     };
     const stories = await Promise.all(rows.map(story));
     return Response.json({
-      items: rows.map(({ versions, decisions, publications, ...i }, n) => ({
+      items: rows.map(({ versions, decisions, publications, owner, ...i }, n) => ({
         ...i,
+        // Named as the owners list names them (the email's local part when there is no name), never the email itself.
+        owner: owner ? { id: owner.id, name: personName(owner) } : null,
         ...stories[n],
         // The last publish went wrong: "FAILED" (back to Approved, reason in publishError) or "CHECK" (may have posted).
         publishIssue: publications[0]?.status === "PENDING_VERIFY" ? "CHECK" : publications[0]?.status === "FAILED" && i.status === "APPROVED" ? "FAILED" : null,

@@ -58,6 +58,16 @@ describe("GET /content window", () => {
     expect((await res.json()).items.map((i: { id: string }) => i.id)).toEqual(["old"]);
   });
 
+  it("names an owner without a name by their email's local part, never the email", async () => {
+    db.rows.push(row("named", "PLANNED"), row("unnamed", "PLANNED", { createdAt: new Date(now) }), row("nobody", "PLANNED", { createdAt: new Date(now + 1) }));
+    const owners: Record<string, unknown> = { named: { id: "u1", name: "Ann", email: "ann@x.com" }, unnamed: { id: "u2", name: null, email: "bo@x.com" }, nobody: null };
+    const plain = db.contentItem.findMany.getMockImplementation()!;
+    db.contentItem.findMany.mockImplementation(async (a: never) => (await plain(a)).map((r: Row) => ({ ...r, owner: owners[r.id] })));
+    const { items } = await (await call()).json();
+    expect(items.map((i: { owner: unknown }) => i.owner)).toEqual([{ id: "u1", name: "Ann" }, { id: "u2", name: "bo" }, null]);
+    expect(JSON.stringify(items)).not.toContain("@");
+  });
+
   it("answers 404 for a post of another brand", async () => {
     db.rows.push(row("other", "PUBLISHED", { brandId: "b2" }));
     expect((await call("?id=other")).status).toBe(404);

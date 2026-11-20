@@ -14,6 +14,7 @@ import { campaignKind, isWithdrawn, offerIssues, offerSnapshotOf, wallTime } fro
 import { liveOfferFor, productIdsForPhoto } from "@/server/content/knowledge";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { listProjectPeople } from "@/server/services/project-members";
+import { personName } from "@/server/content/person-name";
 import { signedMediaUrl } from "@/server/storage/media";
 import type { StoryBody } from "@/server/stories/body";
 import { attemptOutcome, expiredFrames, type FrameProgress, nextFramesToPublish, publishingLimitRoom, settleStoryFrame, unconfirmedMessage, withFrame } from "@/server/stories/publish";
@@ -222,10 +223,10 @@ export async function brandOwners(scope: { workspaceId: string; brandId: string 
   // Project roles are free-form: a grant counts only when its role holds brand.read. Disabled and deleted people never do.
   const reach = [...viaWorkspace, ...people.filter((g) => g.role.permissions.includes("brand.read"))].filter((p) => p.active);
   for (const p of reach) {
-    const name = p.name?.trim();
+    const named = !!p.name?.trim();
     const seen = byId.get(p.userId);
     // The same person on both lists: keep a real name over the email's local part.
-    if (!seen || (!seen.named && name)) byId.set(p.userId, { id: p.userId, name: name || p.email.split("@")[0]!, named: !!name });
+    if (!seen || (!seen.named && named)) byId.set(p.userId, { id: p.userId, name: personName(p), named });
   }
   return [...byId.values()].map(({ id, name }) => ({ id, name }));
 }

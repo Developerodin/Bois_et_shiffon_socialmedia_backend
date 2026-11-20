@@ -2,6 +2,7 @@ import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
+import { personName } from "@/server/content/person-name";
 import { toCsv } from "@/shared";
 
 const DAY = 86_400_000;
@@ -29,7 +30,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     }
     const items = await prisma.contentItem.findMany({
       where: { workspaceId: scope.workspaceId, brandId: scope.brandId, status: { not: "CANCELLED" }, scheduledFor: { gte: from, lte: to } },
-      select: { id: true, title: true, channel: true, status: true, scheduledFor: true, postUrl: true, owner: { select: { name: true } }, campaign: { select: { name: true } } },
+      select: { id: true, title: true, channel: true, status: true, scheduledFor: true, postUrl: true, owner: { select: { name: true, email: true } }, campaign: { select: { name: true } } },
       orderBy: { scheduledFor: "asc" },
       take: MAX_ROWS,
     });
@@ -48,7 +49,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
         Channel: i.channel,
         Status: i.status,
         Title: i.title,
-        Owner: i.owner?.name ?? "",
+        Owner: i.owner ? personName(i.owner) : "",
         Campaign: i.campaign?.name ?? "",
         Caption: caption.get(i.id) ?? "",
         "Post link": i.postUrl,

@@ -61,7 +61,8 @@ describe("GET /content/export", () => {
   });
   it("returns a csv with captions from one raw query", async () => {
     m.contentItem.findMany.mockResolvedValueOnce([
-      { id: "i1", title: "T", channel: "INSTAGRAM_POST", status: "APPROVED", scheduledFor: new Date("2026-11-21T10:00:00Z"), postUrl: null, owner: { name: "Ann" }, campaign: null },
+      { id: "i1", title: "T", channel: "INSTAGRAM_POST", status: "APPROVED", scheduledFor: new Date("2026-11-21T10:00:00Z"), postUrl: null, owner: { name: "Ann", email: "ann@x.com" }, campaign: null },
+      { id: "i2", title: "U", channel: "INSTAGRAM_POST", status: "APPROVED", scheduledFor: new Date("2026-11-22T10:00:00Z"), postUrl: null, owner: { name: null, email: "bo@x.com" }, campaign: null },
     ] as never);
     m.queryRaw.mockResolvedValueOnce([{ contentItemId: "i1", caption: "=evil" }] as never);
     const res = await call();
@@ -69,6 +70,10 @@ describe("GET /content/export", () => {
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
     const text = await res.text();
     expect(text).toContain("'=evil");
+    // An owner without a name: the email's local part, as in the app.
+    expect(text).toContain(",Ann,");
+    expect(text).toContain(",bo,");
+    expect(text).not.toContain("@");
     expect(m.queryRaw).toHaveBeenCalledTimes(1);
     expect(m.auditEvent.create).toHaveBeenCalled();
   });
