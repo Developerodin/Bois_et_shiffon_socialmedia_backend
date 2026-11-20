@@ -25,7 +25,6 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const [open, recent] = contentWindow(new Date()).OR;
     const include = {
       opportunity: { select: { title: true } },
-      owner: { select: { id: true, name: true, email: true } },
       versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } },
       decisions: { orderBy: { createdAt: "desc" }, take: 1, select: { verdict: true, note: true, contentVersionId: true } },
       publications: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, error: true } },
@@ -75,6 +74,9 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       };
     };
     const stories = await Promise.all(rows.map(story));
+    // Owners by one read of the distinct ids, not a join on each half.
+    const ownerIds = [...new Set(rows.flatMap((r) => (r.ownerId ? [r.ownerId] : [])))];
+    const owners = new Map((ownerIds.length ? await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, name: true, email: true } }) : []).map((u) => [u.id, u]));
     // Who confirmed a story frame's rights (in the body and the check's note) is for people who manage members; the
     // stored version is never rewritten (packageHash covers it), only what is sent.
     const reveal = scope.perms.has("project.members.manage");
@@ -83,10 +85,10 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       return !c || reveal ? (c ?? null) : { ...c, results: hideRightsNote(c.results, v.body) };
     };
     return Response.json({
-      items: rows.map(({ versions, decisions, publications, owner, ...i }, n) => ({
+      items: rows.map(({ versions, decisions, publications, ...i }, n) => ({
         ...i,
         // Named as the owners list names them, never the email itself.
-        owner: owner ? { id: owner.id, name: personName(owner, { reveal }) } : null,
+        owner: owners.has(i.ownerId ?? "") ? { id: i.ownerId, name: personName(owners.get(i.ownerId!)!, { reveal }) } : null,
         ...stories[n],
         // The last publish went wrong: "FAILED" (back to Approved, reason in publishError) or "CHECK" (may have posted).
         publishIssue: publications[0]?.status === "PENDING_VERIFY" ? "CHECK" : publications[0]?.status === "FAILED" && i.status === "APPROVED" ? "FAILED" : null,

@@ -29,7 +29,7 @@ vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn() }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
 vi.mock("@/server/agents/engine", () => ({ startAgentRun: vi.fn(async () => ({})) }));
 vi.mock("@/server/services/automations", () => ({ autoPublish }));
-vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1", userId: "boss" })) }));
+vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1", userId: "boss", perms: new Set<string>() })) }));
 
 import { decide, executePublication, packageHash, releaseState, saveDraft } from "@/server/services/publishing";
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/[contentId]/route";

@@ -9,6 +9,8 @@ const db = vi.hoisted(() => {
     creditEntry: { findFirst: vi.fn(async () => null) },
     opportunity: { findMany: vi.fn(async () => []), updateMany: vi.fn(), findFirst: vi.fn(async () => null) },
     brandProfile: { findFirst: vi.fn(async () => null) },
+    workspaceMember: { findFirst: vi.fn(async (_a: { where: Record<string, unknown> }) => null as object | null) },
+    brandMember: { findFirst: vi.fn(async (_a: { where: Record<string, unknown> }) => null as object | null) },
     $executeRaw: vi.fn(async () => 0),
     $transaction: vi.fn(),
   };
@@ -108,9 +110,13 @@ describe("post owner", () => {
 
 describe("setOwner", () => {
   const item = { id: "i1", ownerId: "u1" };
+  // A workspace member with brand.read: u1. A project grant with brand.read that is not the client-reviewer role: u3.
+  // (The where clauses do the filtering in the database; here they are matched by user id.)
   beforeEach(() => {
     db.contentItem.findFirst.mockResolvedValue(item);
     db.contentItem.update.mockResolvedValue({});
+    db.workspaceMember.findFirst.mockImplementation(async ({ where }: { where: Record<string, unknown> }) => (where.userId === "u1" ? { id: "m1" } : null));
+    db.brandMember.findFirst.mockImplementation(async ({ where }: { where: Record<string, unknown> }) => (where.userId === "u3" ? { id: "g1" } : null));
   });
 
   it("assigns someone with brand access and audits from/to", async () => {
@@ -128,6 +134,18 @@ describe("setOwner", () => {
     expect(errs.map((e) => e.status)).toEqual([400, 400]);
     expect(errs[0]!.message).toBe(errs[1]!.message);
     expect(db.contentItem.update).not.toHaveBeenCalled();
+  });
+
+  it("setOwner refuses a client reviewer and a no-read grant, asking the database for brand.read and not the client-reviewer role", async () => {
+    db.workspaceMember.findFirst.mockResolvedValue(null);
+    db.brandMember.findFirst.mockResolvedValue(null);
+    db.workspaceMember.findFirst.mockClear();
+    db.brandMember.findFirst.mockClear();
+    await expect(setOwner(scope, "i1", "u9")).rejects.toMatchObject({ status: 400, message: "Pick someone who works on this brand." });
+    expect(db.workspaceMember.findFirst.mock.calls[0]![0]!.where).toMatchObject({ workspaceId: "w1", userId: "u9", roleRef: { permissions: { has: "brand.read" } } });
+    expect(db.brandMember.findFirst.mock.calls[0]![0]!.where).toMatchObject({ workspaceId: "w1", brandId: "b1", userId: "u9", role: { permissions: { has: "brand.read" }, NOT: { isSystem: true, slug: "client-reviewer" } } });
+    expect(db.contentItem.update).not.toHaveBeenCalled();
+    expect(m.people).not.toHaveBeenCalled();
   });
 
   it("setOwner null unassigns", async () => {
@@ -160,27 +178,18 @@ describe("owners list", () => {
     expect(await brandOwners(scope, { reveal: true })).toEqual([{ id: "u1", name: "Ana" }, { id: "u2", name: "bob" }, { id: "u3", name: "cy" }]);
   });
 
-  it("client reviewers are not offered as owners, and can't be given a post", async () => {
+  it("client reviewers are not offered as owners", async () => {
     const p = people();
     m.people.mockResolvedValue({ ...p, people: [...p.people, { id: "g9", userId: "u9", name: "Client Carl", email: "carl@client.com", role: { id: "rc", name: "Client reviewer", permissions: ["brand.read", "content.approve"] }, active: true, client: true }] });
     expect((await brandOwners(scope, { reveal: true })).map((o) => o.id)).toEqual(["u1", "u2", "u3"]);
-    db.contentItem.findFirst.mockResolvedValue({ id: "i1", ownerId: "u1" });
-    await expect(setOwner(scope, "i1", "u9")).rejects.toMatchObject({ status: 400 });
-    expect(db.contentItem.update).not.toHaveBeenCalled();
   });
 
-  it("leaves out grants whose role lacks brand.read and people who are disabled or deleted", async () => {
+  it("the picker leaves out grants whose role lacks brand.read and people who are disabled or deleted", async () => {
     const p = people();
     p.people.push({ id: "g3", userId: "u4", name: "Dee", email: "dee@x.com", role: { id: "r2", name: "Nothing", permissions: ["content.create"] }, active: true });
     p.people.push({ id: "g4", userId: "u5", name: "Eve", email: "eve@x.com", role: { id: "r", name: "Viewer", permissions: ["brand.read"] }, active: false });
     m.people.mockResolvedValue(p);
     expect((await brandOwners(scope, { reveal: true })).map((o) => o.id)).toEqual(["u1", "u2", "u3"]);
-    db.contentItem.findFirst.mockResolvedValue({ id: "i1", ownerId: "u1" });
-    const errs: PublishingError[] = [];
-    for (const who of ["u4", "u5", "u-nobody"]) await setOwner(scope, "i1", who).catch((e) => errs.push(e));
-    expect(errs.map((e) => e.status)).toEqual([400, 400, 400]);
-    expect(new Set(errs.map((e) => e.message)).size).toBe(1);
-    expect(db.contentItem.update).not.toHaveBeenCalled();
   });
 
   it("GET /content/owners lists names without emails, and local parts only for people who manage members", async () => {

@@ -2,7 +2,6 @@ import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { startAgentRun } from "@/server/agents/engine";
-import { effectivePermissions } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { pinterestBoards } from "@/server/integrations/publishers";
 import { kickRunner } from "@/server/jobs/runner";
@@ -70,7 +69,7 @@ export async function GET(request: Request, context: Params) {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");
     if (scope instanceof Response) return scope;
     const { contentId } = await context.params;
-    const perms = await effectivePermissions(scope.workspaceId, scope.userId, scope.brandId);
+    const perms = scope.perms;
     const state = await releaseState(scope, contentId, perms);
     const boards: Record<string, { id: string; name: string }[] | null> = {};
     // Boards are for scheduling: only people who publish make the Pinterest calls.
@@ -124,7 +123,7 @@ export async function POST(request: Request, context: Params) {
         await startAgentRun({ workspaceId: scope.workspaceId, brandId: scope.brandId, agentKey: "quality", trigger: "event", input: { itemId, version: saved.version } }).catch(() => null);
       }
       kickRunner();
-      const state = await releaseState(scope, itemId, await effectivePermissions(scope.workspaceId, scope.userId, scope.brandId));
+      const state = await releaseState(scope, itemId, scope.perms);
       return Response.json({ ...state, saved: saved.status, ...(await storyExtras(scope, itemId, state.requirements)) });
     } else if (body.action === "edit") {
       const saved = await saveDraft({ ...scope, itemId, version: body.version, body: body.body });
@@ -189,7 +188,7 @@ export async function POST(request: Request, context: Params) {
     } else {
       await settlePublication({ ...scope, itemId, attemptId: body.attemptId, action: body.action, url: body.url });
     }
-    return Response.json(await releaseState(scope, itemId, await effectivePermissions(scope.workspaceId, scope.userId, scope.brandId)));
+    return Response.json(await releaseState(scope, itemId, scope.perms));
   } catch (error) {
     return toProblem(error);
   }

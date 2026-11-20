@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-type Row = { id: string; workspaceId: string; brandId: string; status: string; channel: string; scheduledFor: Date | null; createdAt: Date; updatedAt: Date };
-const db = vi.hoisted(() => ({ perms: new Set<string>(["brand.read"]), rows: [] as Row[], contentItem: { findMany: vi.fn() }, publicationAttempt: { findMany: vi.fn(async () => []) }, job: { findMany: vi.fn(async () => []) } }));
+type Row = { id: string; workspaceId: string; brandId: string; status: string; channel: string; scheduledFor: Date | null; ownerId?: string | null; createdAt: Date; updatedAt: Date };
+const db = vi.hoisted(() => ({ perms: new Set<string>(["brand.read"]), rows: [] as Row[], contentItem: { findMany: vi.fn() }, user: { findMany: vi.fn(async (_a: object) => [] as { id: string; name: string | null; email: string }[]) }, publicationAttempt: { findMany: vi.fn(async () => []) }, job: { findMany: vi.fn(async () => []) } }));
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: async () => ({ userId: "u1", workspaceId: "w1", brandId: "b1", perms: db.perms }) }));
@@ -32,6 +32,7 @@ const call = (qs = "") => GET(new Request(`http://x/content${qs}`), { params: Pr
 
 beforeEach(() => {
   db.rows = [];
+  db.user.findMany.mockClear();
   // Honours the one other order the route asks for: newest change first.
   db.contentItem.findMany.mockImplementation(async (a: { where: Where; take?: number; orderBy?: object[] }) =>
     db.rows
@@ -52,6 +53,27 @@ describe("GET /content window", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
+  it("the list reads owners once, over the distinct owner ids", async () => {
+    db.rows.push(row("a", "SCHEDULED", { ownerId: "u2" }), row("b", "SCHEDULED", { ownerId: "u2" }), row("c", "SCHEDULED", { ownerId: "u3" }), row("d", "SCHEDULED"));
+    db.user.findMany.mockResolvedValue([{ id: "u2", name: "Bea", email: "bea@x.com" }]);
+    const { items } = await (await call()).json();
+    expect(db.user.findMany).toHaveBeenCalledTimes(1);
+    const arg = db.user.findMany.mock.calls[0]![0] as { where: { id: { in: string[] } }; select: object };
+    expect(arg.where.id.in.sort()).toEqual(["u2", "u3"]);
+    expect(arg.select).toEqual({ id: true, name: true, email: true });
+    const owner = (id: string) => items.find((i: { id: string }) => i.id === id).owner;
+    expect(owner("a")).toEqual({ id: "u2", name: "Bea" });
+    expect(owner("c")).toBeNull();
+    expect(owner("d")).toBeNull();
+    for (const c of db.contentItem.findMany.mock.calls) expect((c[0] as { include: object }).include).not.toHaveProperty("owner");
+  });
+
+  it("reads no owners when no post has one", async () => {
+    db.rows.push(row("a", "SCHEDULED"));
+    await call();
+    expect(db.user.findMany).not.toHaveBeenCalled();
+  });
+
   it("opens one post by id even when it is 90 days old", async () => {
     db.rows.push(row("old", "PUBLISHED", { updatedAt: new Date(now - 90 * DAY) }));
     const res = await call("?id=old");
@@ -61,9 +83,9 @@ describe("GET /content window", () => {
 
   it("names an owner without a name by their email's local part to people who manage members, else \"A team member\"; never the email", async () => {
     db.rows.push(row("named", "PLANNED"), row("unnamed", "PLANNED", { createdAt: new Date(now) }), row("nobody", "PLANNED", { createdAt: new Date(now + 1) }));
-    const owners: Record<string, unknown> = { named: { id: "u1", name: "Ann", email: "ann@x.com" }, unnamed: { id: "u2", name: null, email: "bo@x.com" }, nobody: null };
-    const plain = db.contentItem.findMany.getMockImplementation()!;
-    db.contentItem.findMany.mockImplementation(async (a: never) => (await plain(a)).map((r: Row) => ({ ...r, owner: owners[r.id] })));
+    db.rows[0]!.ownerId = "u1";
+    db.rows[1]!.ownerId = "u2";
+    db.user.findMany.mockResolvedValue([{ id: "u1", name: "Ann", email: "ann@x.com" }, { id: "u2", name: null, email: "bo@x.com" }]);
     const { items } = await (await call()).json();
     expect(items.map((i: { owner: unknown }) => i.owner)).toEqual([{ id: "u1", name: "Ann" }, { id: "u2", name: "A team member" }, null]);
     expect(JSON.stringify(items)).not.toMatch(/@|"bo"/);

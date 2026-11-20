@@ -34,7 +34,7 @@ vi.mock("@/server/catalog/campaigns", () => ({ campaignsById: vi.fn(async () => 
 vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), signedMediaUrl: vi.fn(async (k: string) => `https://signed.example/${k}`) }));
 // The route reads the caller's permissions for the post's history; these callers publish.
 vi.mock("@/server/auth/permissions", async (orig) => ({ ...(await orig<object>()), effectivePermissions: vi.fn(async () => new Set(["publish.execute"])) }));
-vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1", userId: "u1" })) }));
+vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1", userId: "u1", perms: new Set(["publish.execute"]) })) }));
 vi.mock("@/server/auth/rate-limit", () => ({ hitRateLimit: vi.fn(async () => ({ allowed: ++db.hits <= 20, count: db.hits })) }));
 vi.mock("@/server/agents/engine", () => ({ startAgentRun: vi.fn(async () => ({})) }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));

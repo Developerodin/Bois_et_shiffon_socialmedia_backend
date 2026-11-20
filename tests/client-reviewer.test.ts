@@ -7,6 +7,7 @@ const db = vi.hoisted(() => ({
   brandMember: { findMany: vi.fn(), findFirst: vi.fn() },
   role: { findMany: vi.fn(), findUnique: vi.fn() },
   contentItem: { findFirst: vi.fn(), findMany: vi.fn(async (): Promise<unknown[]> => []) },
+  user: { findMany: vi.fn(async () => [] as unknown[]) },
   contentVersion: { update: vi.fn(), updateMany: vi.fn() },
   approvalDecision: { findFirst: vi.fn() },
   publicationAttempt: { findMany: vi.fn(async () => []) },
@@ -448,13 +449,14 @@ describe("story rights never expose an email", () => {
   let body = storyBody();
   const row = () => ({
     id: "i1", workspaceId: "w1", brandId: "b1", title: "Story", channel: "INSTAGRAM_STORY", status: "APPROVED", scheduledFor: null, createdAt: new Date(), updatedAt: new Date(),
-    opportunity: null, owner: { id: "o1", name: null, email: "zoe.private@x.com" }, publications: [], decisions: [{ verdict: "APPROVED", note: null, contentVersionId: "v2" }],
+    ownerId: "o1", opportunity: null, publications: [], decisions: [{ verdict: "APPROVED", note: null, contentVersionId: "v2" }],
     versions: [{ id: "v2", version: 2, body, createdAt: new Date(), createdBy: "u7", checks: [{ id: "q1", overall: "PASS", results: [{ check: "Frames", status: "pass", note: "3 frames, all rendered." }, { check: "Asset rights", status: "pass", note }] }] }],
   });
   const list = async (qs = "") => (await contentGet(req("GET", undefined, `http://x/api/content${qs}`), { params })).json();
   beforeEach(() => {
     body = storyBody();
     db.contentItem.findMany.mockImplementation(async () => [row()]);
+    db.user.findMany.mockResolvedValue([{ id: "o1", name: null, email: "zoe.private@x.com" }]);
   });
 
   it("a client reviewer gets no email or local part in the list, ?id=, or the check, and the approval still holds", async () => {

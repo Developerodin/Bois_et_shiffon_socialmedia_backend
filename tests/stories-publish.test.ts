@@ -61,7 +61,7 @@ vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), 
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
 vi.mock("@/server/agents/engine", () => ({ startAgentRun: vi.fn(async () => ({})) }));
 vi.mock("@/server/services/automations", () => ({ autoPublish: vi.fn() }));
-vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1", userId: "u1" })) }));
+vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1", userId: "u1", perms: new Set(["publish.execute"]) })) }));
 
 // The Graph API, mocked at fetch: frame i's file is f<i>, its container c<i>, its media m<i>.
 const graph = vi.hoisted(() => ({
