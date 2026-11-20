@@ -39,7 +39,7 @@ export class PublishingError extends Error {
   }
 }
 
-type Body = { hook?: string; caption?: string; hashtags?: string[]; pinTitle?: string; altText?: string; aiDisclosure?: boolean; presenter?: string; voice?: string; language?: string };
+type Body = { hook?: string; caption?: string; hashtags?: string[]; pinTitle?: string; altText?: string; pinLink?: string; aiDisclosure?: boolean; presenter?: string; voice?: string; language?: string };
 
 const CHANNEL_PROVIDER: Record<ContentChannel, IntegrationProvider | null> = {
   FACEBOOK_POST: "META",
@@ -153,7 +153,7 @@ export const TX = { maxWait: 10_000, timeout: 20_000 };
 /** Per-post lock shared by people (edit, approve, publish) and agents (Creator, Quality). */
 export const lock = (tx: Prisma.TransactionClient, itemId: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`content:${itemId}`}))`;
 
-export type DraftInput = { hook: string; caption: string; hashtags: string[]; slides: string[]; script: string[]; pinTitle: string; altText: string; photoKeys?: string[] };
+export type DraftInput = { hook: string; caption: string; hashtags: string[]; slides: string[]; script: string[]; pinTitle: string; altText: string; photoKeys?: string[]; pinLink?: string };
 
 export const APP_GOALS = { newArrival: "awareness", productFeature: "saves", specialOffer: "sales" } as const;
 /**
@@ -232,6 +232,19 @@ export const ownMediaKey = (scope: { workspaceId: string; brandId: string }, key
 // A person can edit until the post is handed to a platform; a scheduled post must be cancelled first.
 export const EDITABLE = ["PLANNED", "BRIEF_READY", "DRAFT_REVIEW", "AWAITING_APPROVAL", "APPROVED", "REJECTED", "BLOCKED"];
 
+/** A pin's destination as the person typed it: https only, no credentials, at most 2000 characters; kept as URL.href. Null when it isn't one. */
+export function cleanPinLink(raw: string): string | null {
+  const t = raw.trim();
+  if (t.length > 2000) return null;
+  const u = safeHttpUrl(t);
+  return u && u.protocol === "https:" && !u.username && !u.password ? u.href : null;
+}
+
+/** Where a pin leads: its own link (re-checked, since the body is JSON anyone with edit rights could have shaped), else the brand's website. */
+export function pinDestination(pinLink: unknown, websiteUrl: string | null | undefined): string | null {
+  return (typeof pinLink === "string" ? cleanPinLink(pinLink) : null) ?? safeHttpUrl(websiteUrl)?.href ?? null;
+}
+
 /**
  * A person saves a draft: always a new immutable version (any approval of the old one stops
  * holding), back to draft review for the Quality check. The editor can't approve it themselves when someone else can.
@@ -246,10 +259,16 @@ export async function saveDraft(input: { workspaceId: string; brandId: string; u
     script: input.body.script.map((s) => s.trim()).filter(Boolean),
     pinTitle: input.body.pinTitle.trim(),
     altText: input.body.altText.trim(),
+    ...(input.body.pinLink?.trim() ? { pinLink: input.body.pinLink.trim() } : {}),
     ...(input.body.photoKeys === undefined ? {} : { photoKeys: [...new Set(input.body.photoKeys)] }),
   };
   if (!body.caption) throw new PublishingError("The caption can't be empty", 400);
   if (body.photoKeys?.some((k) => !ownMediaKey(input, k))) throw new PublishingError("Unknown image", 400);
+  if (body.pinLink !== undefined) {
+    const href = cleanPinLink(body.pinLink);
+    if (!href) throw new PublishingError("The pin's link must be a full https:// address (no password in it, 2000 characters at most).", 400);
+    body.pinLink = href;
+  }
   return prisma.$transaction(async (tx) => {
     await lock(tx, input.itemId);
     const { item, latest } = await loadItem(input, input.itemId, tx);
@@ -269,11 +288,14 @@ export async function saveDraft(input: { workspaceId: string; brandId: string; u
       body.hook = scenes[0]?.onScreenText ?? "";
       body.script = scenes.map((s) => s.voiceText);
     }
-    if (latest && JSON.stringify({ ...(latest.body as object), ...body }) === JSON.stringify(latest.body)) throw new PublishingError("Nothing changed", 400);
+    // An emptied link field (sent as "") takes the link off; one left out keeps what the version had.
+    const merged: Record<string, unknown> = { ...((latest?.body as object | undefined) ?? { productIds: item.productIds }), ...body };
+    if (input.body.pinLink !== undefined && !body.pinLink) delete merged.pinLink;
+    if (latest && JSON.stringify(merged) === JSON.stringify(latest.body)) throw new PublishingError("Nothing changed", 400);
     // Fields the editor doesn't show (a studio reel's scenes and video, the linked products) carry over to the new
     // version; the first one takes the products the brief linked.
     const version = await tx.contentVersion.create({
-      data: { contentItemId: item.id, version: (latest?.version ?? 0) + 1, body: { ...((latest?.body as object | undefined) ?? { productIds: item.productIds }), ...body }, createdBy: input.userId },
+      data: { contentItemId: item.id, version: (latest?.version ?? 0) + 1, body: merged as Prisma.InputJsonValue, createdBy: input.userId },
     });
     await tx.contentItem.update({ where: { id: item.id }, data: { status: "DRAFT_REVIEW" } });
     await tx.auditEvent.create({
@@ -573,7 +595,7 @@ export async function executePublication(payload: unknown, lease?: Lease) {
     // Uploads are private: the platform gets a link valid for an hour, made at the moment of posting.
     const images = [...(await Promise.all((target.media ?? []).map((k) => signedMediaUrl(k, 3600)))), ...(target.links ?? (target.imageUrl ? [target.imageUrl] : []))];
     const res = await publisher(
-      { text: postText(body), title: body.pinTitle || body.hook || item.title, altText: body.altText ?? "", link: safeHttpUrl(profile?.websiteUrl)?.href ?? null, imageUrl: images[0] ?? null, imageUrls: images, videoUrl: target.videoKey ? await signedMediaUrl(target.videoKey, 3600) : (target.videoUrl ?? null), boardId: target.boardId, beforePublish },
+      { text: postText(body), title: body.pinTitle || body.hook || item.title, altText: body.altText ?? "", link: pinDestination(body.pinLink, profile?.websiteUrl), imageUrl: images[0] ?? null, imageUrls: images, videoUrl: target.videoKey ? await signedMediaUrl(target.videoKey, 3600) : (target.videoUrl ?? null), boardId: target.boardId, beforePublish },
       { id: conn.externalAccountId, token },
     );
     await finish("PUBLISHED", { externalId: res.externalId, externalUrl: safeHttpUrl(res.externalUrl)?.href ?? null, publishedAt: new Date(), error: null }, "PUBLISHED");

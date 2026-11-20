@@ -25,7 +25,7 @@ const Action = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("edit"),
     version: z.number().int().min(0),
-    body: z.object({ hook: text(500), caption: z.string().min(1).max(5000), hashtags: list(30, 100), slides: list(20, 1000), script: list(30, 1000), pinTitle: text(200), altText: text(1000), photoKeys: z.array(z.string().max(300)).max(10).optional() }),
+    body: z.object({ hook: text(500), caption: z.string().min(1).max(5000), hashtags: list(30, 100), slides: list(20, 1000), script: list(30, 1000), pinTitle: text(200), altText: text(1000), pinLink: z.string().max(2000).optional(), photoKeys: z.array(z.string().max(300)).max(10).optional() }),
   }),
   // noAutoPublish: the app's Schedule approves and then schedules itself, so auto-publish stays out of its way.
   // override: "Approve anyway" past product availability issues; switchProducts: a send-back asking for another product.

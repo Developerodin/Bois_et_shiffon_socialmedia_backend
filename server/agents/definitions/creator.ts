@@ -216,7 +216,9 @@ export const creatorAgent: AgentDefinition = {
       const chosen = own.filter((k) => itemKeys.has(k) || !!last);
       const max = item.channel === "INSTAGRAM_CAROUSEL" ? 10 : item.channel === "THREADS_POST" || item.channel === "INSTAGRAM_REEL" ? 0 : 1;
       const photoKeys = [...new Set([...switchedIn.map((p) => p.key), ...chosen, ...draft.photoKeys.filter((k) => !switchNow || !fromOld(k))])].slice(0, max);
-      const body = { ...draft, photoKeys, hashtags: draft.hashtags.map((h) => (h.startsWith("#") ? h : `#${h}`)), productIds };
+      // The pin's destination is the person's, not the writer's: a rewrite keeps it.
+      const pinLink = item.channel === "PINTEREST_PIN" ? (last?.body as { pinLink?: string } | undefined)?.pinLink : undefined;
+      const body = { ...draft, ...(pinLink ? { pinLink } : {}), photoKeys, hashtags: draft.hashtags.map((h) => (h.startsWith("#") ? h : `#${h}`)), productIds };
       const version = (last?.version ?? 0) + 1;
       const names = alternatives.filter((c) => productIds.includes(c.id)).map((c) => c.name);
       // Writing takes a while: if someone edited, approved or scheduled the post meanwhile, keep their work.
