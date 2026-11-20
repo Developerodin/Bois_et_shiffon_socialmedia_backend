@@ -8,8 +8,9 @@ tested on the emulator, fixed, and committed.
 
 Branch `phase-0` in server, web and mobile (not merged, not pushed). Plan: `docs/superpowers/plans/2026-11-20-phase-0-quick-wins.md`
 (untracked, like the earlier ones). Commit ranges: server `78eaf75..c433195` (this handover on top), web `8ed684b..23d88ae`,
-mobile `5c9ad7b..a444942`. Each task got a review and fix round. **Next: the four-lens branch review (correctness,
-security, performance, maintainability) across all three repos, one fix wave, then the merge decision.** Phase 0 extends
+mobile `5c9ad7b..a444942`. Each task got a review and fix round. The four-lens branch review (correctness,
+security, performance, maintainability) and its fix wave are done (`.superpowers/sdd/2026-11-20-phase-0-quick-wins/final-fix-report.md`).
+**Next: the merge decision.** Phase 0 extends
 existing panels, so it needs no feature flag.
 
 ### What shipped
@@ -18,7 +19,7 @@ existing panels, so it needs no feature flag.
 2. **Post owner.** `ContentItem.ownerId` (migration `content_owner`, backfilled). Owner = who created the post or started
    the run, else unassigned. `POST content/:id` `{ action: "setOwner", userId | null }`; `GET content/owners` lists names
    (no emails) of people on the brand; the shell now carries the user's id.
-3. **Calendar filters and "needs action"** (web): channel, status, campaign, owner (Mine / Unassigned / a person),
+3. **Calendar filters and "needs action"** (web): channel, status, campaign, owner (Anyone / Mine / Unassigned),
    needs action, with a "No posts match these filters" state and an owner label on each card. Blocked means work still
    needing action (finished posts are not blocked).
 4. **Posted by hand.** `{ action: "postedByHand", url? }` records that someone posted an approved post themselves; the
@@ -37,8 +38,9 @@ existing panels, so it needs no feature flag.
 10. **Phone parity** (mobile): owner, filters, `?id=`, posted by hand, pinLink, goals from `CONTENT_GOALS`.
 
 ### The six decisions (owner can override)
-1. A client reviewer's approval is enough, but **never publishes by itself**: it is a normal `ApprovalDecision`, the decide
-   route does not auto-publish, staff schedule or post it. Staff self-approval is unchanged (`hasOtherApprover` ignores
+1. A client reviewer's approval is enough, but **a client reviewer's approval never auto-publishes; staff approvals behave
+   as before**. It is a normal `ApprovalDecision` with `byClient` set (stored at decision time); staff schedule or post
+   it. Staff self-approval is unchanged (`hasOtherApprover` ignores
    people whose `content.approve` comes only from the system `client-reviewer` grant). Staff can always skip client review.
 2. Client reviewer permissions as in item 7. They see posts, reports, products, campaigns, competitors and member names.
    Closed to them: customer inbox and Google reviews, connections, assistant chat and Translate, publishing, editing,
@@ -51,18 +53,28 @@ existing panels, so it needs no feature flag.
 
 ### Deploy order
 Server first, with migrations `20261120054624_content_owner`, `20261120060816_approval_brand_index`,
-`20261120061605_client_reviewer`; then web; then mobile. Clients tolerate the old server (a missing `owner` reads as
-Unassigned). `npm run sync:shared` is already done in all three repos.
+`20261120061605_client_reviewer`, `20261120070845_approval_by_client`; then web; then mobile. Clients tolerate the old
+server (a missing `owner` reads as Unassigned, a missing `byClient` as staff). `npm run sync:shared` is already done in
+all three repos.
+- **After the new server is live, re-run the guarded `client_reviewer` steps 2, 3 and 5** (inbox.read, content.download,
+  the Client reviewer role) by hand against production. A workspace created between `migrate deploy` and the switch to
+  the new server gets the old catalog from the old server; the steps are guarded, so a second run changes nothing else.
+- **Confirm the owner backfill on a production snapshot first:** compare the `content.create` audit rows with the posts
+  whose `ownerId` was filled (`content_owner`); the counts were never compared (the dev DB is nearly empty).
+- The `client_reviewer` migration was corrected in place after the branch review (step 4: `agents.read` only for custom
+  roles holding `content.create` or `agents.run`, never the renamed role; step 1: the renamed slug carries the role id).
+  It had only run on the dev database, whose recorded checksum was updated by hand; production runs the corrected file once.
 
 ### Access changes people will notice
 - **Viewer, Creator and Commercial owner lose customer inbox and Google reviews** (`inbox.read`). The connections list now
   needs any of `inbox.read`, `publish.execute`, `integrations.manage` (`CONNECTIONS_READ`), so publishing roles still work.
-- **Members without `members.read` lose the credit history** (`GET credits?history=1`).
-- **Custom roles with `brand.read` gained `agents.read` through the migration**, so they keep the assistant chat and
-  Translate; both spend credits. Tell the owner; revoke per role if unwanted.
+- **Members without `members.read` lose the credit history** (`GET credits?history=1`). Old phone builds ask for it and
+  get a 403 for those people until they update.
+- **Custom roles holding `content.create` or `agents.run` gained `agents.read` through the migration**, so they keep the
+  assistant chat and Translate (both spend credits; `agents.read` also opens the Agent log, runs and AI spend). Read-only
+  custom roles did not. Tell the owner; revoke per role if unwanted.
 - Roles with `publish.execute` or `content.approve` gained `content.download`.
-- A custom role using the slug `client-reviewer` is renamed `client-reviewer-custom` by the migration (this can collide if
-  that slug already exists).
+- A custom role using the slug `client-reviewer` is renamed `client-reviewer-custom-<role id>` by the migration.
 
 ### Out of plan
 Web `0d9d6a3`: the New campaign dialog scrolled sideways; fixed with `grid-cols-[minmax(0,1fr)]` on the dialog grid
@@ -79,20 +91,20 @@ in Excel, a client reviewer login (what they see and cannot open), the phone cal
 - Window: mobile Stories Posted tab loses stories finished more than 30 days ago; `ContentView` lookup not keyed by id
   (one stale frame); campaigns fetch has no cancel flag; a post late on day +7 drops off the phone Today agenda
   (`inNextWeek` is under 7x24h).
-- Owner: disabled users may be listed by `content/owners`; the setOwner race is commented only.
-- Hand-posting: reels `registerPostLink` no longer limited to studio items; `checkStoryLink` uses global `prisma` inside the
-  locked transaction; web says the link is optional for studio reels (server requires it); a publishing or published post
-  gets "Approve the post first"; Facebook `permalink.php`/`watch?v` and `pinterest.co.uk` links are refused (not stored).
-- Pinterest: `pinLink` kept on non-pin channels; encoded href can exceed 2000; mobile `PostBody` lacks `pinLink`.
+- Owner: the setOwner race is commented only.
+- Hand-posting: a publishing or published post gets "Approve the post first"; Facebook `permalink.php`/`watch?v` and
+  `pinterest.co.uk` links are refused (not stored).
+- Pinterest: `pinLink` kept on non-pin channels; encoded href can exceed 2000.
 - Examples: only 2 when the revised item is one of the 3; no test for missing version or empty caption.
-- Reviewer: send-back limit used before validity checks; audit board polls `/agents` for a reviewer (403 every 6 s);
-  `usePerms` falls back to `[]` on failure and Retry does not refetch it; `isClientReviewer` runs two queries per item.
-- New post: `usePerms` import cycle `content-panels` <-> `new-post-dialog` and one perms fetch per dialog; no test for a post
-  `requestId` after a story used it.
-- CSV: date-only `to=` excludes the last day; no truncated flag at 5,000 rows; undated posts not exported; no tests for the
-  findings route or its 429.
-- Phone: `me()` fetched per calendar mount with swallowed errors; stacked doc comment in `controls.tsx`; the server's
-  success text is not shown.
+- CSV: date-only `to=` excludes the last day; no truncated flag at 5,000 rows (ponytail comment at `MAX_ROWS`); undated
+  posts not exported.
+- Content list sort: two undated posts compare as `-Infinity - -Infinity = NaN`, which `||` treats as a tie and falls
+  through to creation time. Keep the `||` (commented in `content/route.ts`).
+- Phone: `me()` fetched per calendar mount with swallowed errors; the server's success text is not shown.
+
+### Open question (owner decision pending)
+- May a client reviewer send back an approved-but-unscheduled post? Today they can, and it cancels the staff approval
+  (the post goes back to the writer). Behaviour left as is until the owner decides.
 
 ### Pre-existing cost to know about
 The calendar poll (every 6 s) loads, for up to 200 items, every child row behind the nested `take: 1` includes (versions,

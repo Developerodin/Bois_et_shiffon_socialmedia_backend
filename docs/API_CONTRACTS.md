@@ -443,10 +443,10 @@ The tables above are the original design; the built routes live under `/api/v1/w
 
 | Method | Path | Permission | Notes |
 |--------|------|------------|-------|
-| GET | `content` | `brand.read` | Open posts plus anything updated in the last 30 days, 200 rows. `?id=` returns one post of any age (404 if cancelled). Each item carries `owner: { id, name }` or null. |
+| GET | `content` | `brand.read` | Open posts plus anything updated in the last 30 days, 200 rows. `?id=` returns one post of any age (404 if cancelled). Each item carries `owner: { id, name }` or null; `name` is the person's name, else their email's local part (never the email). |
 | GET | `content/owners` | `content.create` | `{ owners: [{ id, name }] }`, people on the brand, no emails. |
 | POST | `content` | `content.create` | Optional `requestId` (uuid): a retry returns the first post before any rate limit is used. A post body may carry `pinLink` (max 2000). |
-| POST | `content/:id` | by action | New actions `setOwner` (`{ userId }` or null, `content.create`) and `postedByHand` (`{ url? }`, `publish.execute`). Decide never auto-publishes. |
+| POST | `content/:id` | by action | New actions `setOwner` (`{ userId }` or null, `content.create`) and `postedByHand` (`{ url? }`, `publish.execute`). A client reviewer's approval never auto-publishes; staff approvals behave as before. In the GET each decision carries `byClient`; `by` is a name, else the email's local part for callers with `project.members.manage`, else "A team member"; `accounts` is empty without `publish.execute`. |
 | GET | `content/export` | `content.download` | CSV of posts scheduled in `?from..?to` (default 90 days each way, max 366 days, 5,000 rows, cancelled left out). Columns: Date, Channel, Status, Title, Owner, Campaign, Caption, Post link. 20 per hour per user; audited. |
 | GET | `audit-reports/export` | `analytics.read` | CSV of the latest findings, `?kind=SEO` or `GEO`. 20 per hour per user. |
 | GET | `members` | `brand.read` | Full list only with `project.members.manage`; others get names and role names (no emails, invitations or role permissions). |
