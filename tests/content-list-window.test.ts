@@ -12,8 +12,9 @@ vi.mock("@/server/storage/media", () => ({ signedMediaUrl: vi.fn() }));
 vi.mock("@/server/stories/service", () => ({ coverUrl: vi.fn(), createStory: vi.fn(), failStoryStart: vi.fn(), STORY_RENDER_JOB: "story.render", STORY_START_NOTE: "", itemForRequest: vi.fn(), storyTab: vi.fn() }));
 
 import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/route";
+import { contentRange } from "@/server/content/window";
 
-type Where = { id?: string; workspaceId?: string; brandId?: string; status?: { in?: string[]; not?: string }; OR?: Where[]; NOT?: Where; updatedAt?: { gte: Date } };
+type Where = { id?: string; workspaceId?: string; brandId?: string; status?: { in?: string[]; not?: string }; OR?: Where[]; NOT?: Where; updatedAt?: { gte: Date }; scheduledFor?: { gte: Date; lt: Date } };
 const matches = (r: Row, w: Where): boolean =>
   (w.id === undefined || r.id === w.id) &&
   (w.workspaceId === undefined || r.workspaceId === w.workspaceId) &&
@@ -21,6 +22,7 @@ const matches = (r: Row, w: Where): boolean =>
   (!w.status?.in || w.status.in.includes(r.status)) &&
   (w.status?.not === undefined || r.status !== w.status.not) &&
   (!w.updatedAt || r.updatedAt >= w.updatedAt.gte) &&
+  (!w.scheduledFor || (!!r.scheduledFor && r.scheduledFor >= w.scheduledFor.gte && r.scheduledFor < w.scheduledFor.lt)) &&
   (!w.NOT || !matches(r, w.NOT)) &&
   (!w.OR || w.OR.some((o) => matches(r, o)));
 const time = (r: Row) => r.scheduledFor?.getTime() ?? -Infinity; // nulls first
@@ -158,5 +160,41 @@ describe("GET /content window", () => {
     const { items } = await (await call()).json();
     expect(items).toHaveLength(200);
     expect(items.some((i: { id: string }) => i.id === "hist")).toBe(false);
+  });
+});
+
+describe("GET /content?from&to", () => {
+  it("returns the posts dated in [from, to), past ones included, never cancelled or undated, in one read", async () => {
+    const at = (d: string) => new Date(d);
+    db.rows.push(
+      row("old", "PUBLISHED", { scheduledFor: at("2026-08-03T09:00:00Z"), updatedAt: new Date(now - 120 * DAY) }),
+      row("edge", "PUBLISHED", { scheduledFor: at("2026-08-01T00:00:00Z") }),
+      row("after", "PUBLISHED", { scheduledFor: at("2026-09-01T00:00:00Z") }),
+      row("gone", "CANCELLED", { scheduledFor: at("2026-08-04T00:00:00Z") }),
+      row("undated", "PLANNED"),
+    );
+    db.contentItem.findMany.mockClear();
+    const res = await call("?from=2026-08-01T00:00:00.000Z&to=2026-09-01T00:00:00.000Z");
+    expect(res.status).toBe(200);
+    expect((await res.json()).items.map((i: { id: string }) => i.id)).toEqual(["edge", "old"]);
+    expect(db.contentItem.findMany).toHaveBeenCalledTimes(1);
+    expect((db.contentItem.findMany.mock.calls[0]![0] as { take: number }).take).toBe(500);
+  });
+
+  it("answers 400 for a bad range", async () => {
+    for (const qs of ["?from=2026-08-01", "?from=nope&to=2026-08-02", "?from=2026-08-02&to=2026-08-01", "?from=2026-08-01&to=2026-08-01", "?from=2026-01-01&to=2026-04-01"])
+      expect((await call(qs)).status, qs).toBe(400);
+  });
+});
+
+describe("contentRange", () => {
+  it("is null without from and to, the dates for a good range, a reason otherwise", () => {
+    expect(contentRange(null, null)).toBeNull();
+    expect(contentRange("2026-10-26", "2026-12-07")).toEqual({ from: new Date("2026-10-26"), to: new Date("2026-12-07") });
+    expect(contentRange("2026-10-26T00:00:00+01:00", "2026-12-07T00:00:00+01:00")).toMatchObject({ from: new Date("2026-10-25T23:00:00Z") });
+    expect(contentRange("2026-01-01", "2026-03-04")).toEqual({ from: new Date("2026-01-01"), to: new Date("2026-03-04") }); // 62 days
+    expect(typeof contentRange("2026-01-01", "2026-03-05")).toBe("string"); // 63 days
+    expect(typeof contentRange("2026-01-01", null)).toBe("string");
+    expect(typeof contentRange("2026-01-02", "2026-01-01")).toBe("string");
   });
 });

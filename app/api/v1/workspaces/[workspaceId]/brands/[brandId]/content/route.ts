@@ -8,7 +8,7 @@ import { kickRunner } from "@/server/jobs/runner";
 import { createPost, ownMediaKey, postAiAllowed, PublishingError } from "@/server/services/publishing";
 import { signedMediaUrl } from "@/server/storage/media";
 import { CONTENT_GOALS } from "@/shared";
-import { contentWindow } from "@/server/content/window";
+import { contentRange, contentWindow } from "@/server/content/window";
 import { personName } from "@/server/content/person-name";
 import { hideRightsNames, hideRightsNote, isStoryBody, revealRightsNames, revealRightsNote } from "@/server/stories/body";
 import { coverUrl, createStory, failStoryStart, itemForRequest, STORY_RENDER_JOB, STORY_START_NOTE, storyTab } from "@/server/stories/service";
@@ -18,8 +18,12 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
   try {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");
     if (scope instanceof Response) return scope;
-    // ?id= opens one post whatever its age (a link to an old post); otherwise the calendar window.
-    const id = new URL(request.url).searchParams.get("id");
+    // ?id= opens one post whatever its age (a link to an old post); ?from&to= the posts dated in [from, to) (the
+    // calendar's month view, past months included); otherwise the calendar window.
+    const q = new URL(request.url).searchParams;
+    const id = q.get("id");
+    const range = id ? null : contentRange(q.get("from"), q.get("to"));
+    if (typeof range === "string") return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 400, detail: range });
     // Spreading `open` after `base` replaces base.status safely (open never holds CANCELLED); ?id= of a cancelled post is a 404 on purpose.
     const base = { workspaceId: scope.workspaceId, brandId: scope.brandId, status: { not: "CANCELLED" as const } };
     const [open, recent] = contentWindow(new Date()).OR;
@@ -37,9 +41,11 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     // Both halves are read at once; open posts fill the 200 first, so a long history (undated, so sorted first) can never
     // push upcoming posts out. The recent half is read newest change first, so rows past what's left drop the oldest
     // (at most 200 read for nothing).
+    // ponytail: a range reads up to 500 dated posts (about 60 days); a brand past ~8 posts a day would lose the latest days.
+    const where = id ? { ...base, id } : range ? { ...base, scheduledFor: { gte: range.from, lt: range.to } } : { ...base, ...open };
     const [openRows, recentRows] = await Promise.all([
-      prisma.contentItem.findMany({ where: id ? { ...base, id } : { ...base, ...open }, orderBy, take: 200, include }),
-      id ? [] : prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy: [{ updatedAt: "desc" }], take: 200, include }),
+      prisma.contentItem.findMany({ where, orderBy, take: range ? 500 : 200, include }),
+      id || range ? [] : prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy: [{ updatedAt: "desc" }], take: 200, include }),
     ]);
     // Each half is sorted on its own; sort the whole once so the list keeps one order (undated first, then date, then creation).
     // Two undated posts give -Infinity - -Infinity = NaN, which is falsy, so `||` falls through to creation time: keep
