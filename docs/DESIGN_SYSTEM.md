@@ -48,6 +48,8 @@ Source of truth: `apps/web/app/globals.css` (hex, light mode only). The values b
 
 Loaded via `next/font` in `app/layout.tsx`.
 
+**Text floor:** `text-xs` (12 px) is the smallest visible text; no `text-[11px]` or smaller.
+
 ---
 
 ## 4. Spacing & layout
@@ -61,6 +63,8 @@ Loaded via `next/font` in `app/layout.tsx`.
 - **Overview panels** (`components/workspace/panel-layout.tsx`): each panel is a card (`rounded-2xl border bg-card shadow-sm`) on `--background`, `12px` (`gap-3` / `p-3`) between cards. The gap between columns is the resize handle; its line shows only on hover or focus. A column whose panels are all collapsed shrinks to `15rem`.
 - **Inside a panel:** one inset for everything, `px-5`. Sections are separated by spacing (`py-4`), not divider lines; list rows that need edge-to-edge hover use `-mx-2 px-2`.
 - Icon tiles: agent and task icons sit on `bg-accent` tiles (`size-8 rounded-lg` in rows, `size-12 rounded-xl` in the agent grid).
+- **Touch size:** controls reach 44 px on touch screens through `Button` itself (`size="sm"` gets `pointer-coarse:h-11`, `size="icon"` gets `pointer-coarse:size-11`); do not add per-site `pointer-coarse:` classes to a `Button`. Raw `<button>`/`<select>` elements add their own `pointer-coarse:` size. `rounded-xl` (12 px) is for boxes inside `rounded-2xl` cards.
+- **Disabled buttons:** a disabled button never shows its tooltip, so give the reason as visible text (a muted `text-xs` line) and link it with `aria-describedby`; never `title` alone.
 - Max content width for reading: `max-w-3xl` (brief editor); dashboards `max-w-7xl`
 
 ---
@@ -99,7 +103,7 @@ A small own component for "something finished while you were elsewhere", mounted
 
 ### Toast: action and duration
 
-`ToastInput` also takes `action: { label, onAction }` and `ms`. The action is a text button beside the body (`text-primary`, `hover:bg-muted`, focus ring); pressing it dismisses the toast and then runs the callback. `ms` overrides the 10 s default (`toastMs`); the hover and focus pause still applies. Used for "Closed X" / Reopen (6 s). Toasts with an action are cleared when the Overview unmounts (`clearActionToasts`), because their callback would act on a page that is gone.
+`ToastInput` also takes `action: { label, onAction }` and `ms`. The action is a text button beside the body (`text-primary`, `hover:bg-muted`, focus ring); pressing it dismisses the toast and then runs the callback. `ms` overrides the 10 s default (`toastMs`); the hover and focus pause still applies. Used for "Closed X" / Reopen (6 s). **Undo pattern:** a reversible action (closing a panel, starting a new conversation) shows a `success`-tone toast with an `Undo` action and `ms: 8000`; there is no separate neutral tone. Toasts with an action are cleared when the Overview unmounts (`clearActionToasts`), because their callback would act on a page that is gone.
 
 ### Peek (built: `web/components/workspace/peek.tsx`, `use-peek.ts`)
 
