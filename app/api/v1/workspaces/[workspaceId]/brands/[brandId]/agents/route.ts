@@ -17,12 +17,11 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
 
     const [configs, lastRuns] = await Promise.all([
       prisma.brandAgentConfig.findMany({ where: { workspaceId, brandId } }),
-      prisma.agentRun.findMany({
-        where: { workspaceId, brandId },
-        orderBy: { createdAt: "desc" },
-        distinct: ["agentKey"],
-        select: { id: true, agentKey: true, status: true, startedAt: true, finishedAt: true, error: true },
-      }),
+      // Each agent's newest run, read in the database (the [brandId, agentKey, createdAt] index), not every run.
+      prisma.$queryRaw<{ id: string; agentKey: string; status: string; startedAt: Date | null; finishedAt: Date | null; error: string | null }[]>`
+        SELECT DISTINCT ON ("agentKey") "id", "agentKey", "status", "startedAt", "finishedAt", "error"
+        FROM "AgentRun" WHERE "workspaceId" = ${workspaceId} AND "brandId" = ${brandId}
+        ORDER BY "agentKey", "createdAt" DESC`,
     ]);
 
     const agents = AGENTS.filter((a) => !a.internal).map((a) => {

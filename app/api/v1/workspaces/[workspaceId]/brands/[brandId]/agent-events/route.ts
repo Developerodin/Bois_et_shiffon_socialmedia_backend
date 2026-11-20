@@ -1,4 +1,4 @@
-import { fromAccessError } from "@/server/api/http-error";
+import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { prisma } from "@/server/db/prisma";
 
@@ -12,8 +12,13 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get("limit") ?? "100", 10) || 100, 1), 200);
 
     const where = { workspaceId: scope.workspaceId, brandId: scope.brandId };
+    // ?runId= reads one run's events, oldest first (a run's log is short; no cursor).
+    const runId = url.searchParams.get("runId");
+    if (runId !== null && !/^[A-Za-z0-9_-]{1,40}$/.test(runId)) return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 400, detail: "runId: up to 40 letters, digits, - or _" });
     // First load: latest `limit` events; later polls: everything after the cursor.
-    const rows = Number.isFinite(after)
+    const rows = runId !== null
+      ? await prisma.agentEvent.findMany({ where: { ...where, runId }, orderBy: { id: "asc" }, take: 200 })
+      : Number.isFinite(after)
       ? await prisma.agentEvent.findMany({ where: { ...where, id: { gt: after } }, orderBy: { id: "asc" }, take: limit })
       : (await prisma.agentEvent.findMany({ where, orderBy: { id: "desc" }, take: limit })).reverse();
 
