@@ -318,7 +318,7 @@ export function enqueueCatalogSync(scope: Scope, key?: string) {
     type: CATALOG_SYNC_JOB,
     workspaceId: scope.workspaceId,
     brandId: scope.brandId,
-    payload: scope,
+    payload: { workspaceId: scope.workspaceId, brandId: scope.brandId },
     idempotencyKey: key && `catalog-sync:${scope.brandId}:${key}`,
   });
 }

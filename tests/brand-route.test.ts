@@ -79,6 +79,13 @@ describe("authorizeBrandRoute: what it hands back", () => {
     expect(scope.clientReviewer).toBe(false);
   });
 
+  it("does not flag a custom (non-system) role that only has the client-reviewer slug", async () => {
+    m.db.brandMember.findFirst.mockResolvedValue({ role: { ...client.role, isSystem: false } });
+    const scope = await authorizeBrandRoute(request(), params, "content.approve");
+    if (scope instanceof Response) throw new Error("expected a scope");
+    expect(scope.clientReviewer).toBe(false);
+  });
+
   it("does not flag staff without a grant", async () => {
     const scope = await authorizeBrandRoute(request(), params, "content.create");
     if (scope instanceof Response) throw new Error("expected a scope");
