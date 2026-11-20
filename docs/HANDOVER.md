@@ -4,6 +4,53 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Overview side peek (2026-11-20)
+
+Branch `overview-peek` in web (server and mobile carry only the shared `ContextDocKind` list). Plan:
+`docs/superpowers/plans/2026-11-20-overview-side-peek.md`. Task reports: `.superpowers/sdd/2026-11-20-overview-side-peek/`.
+**Not checked in a browser.** There are no DOM tests; every behaviour below was read against the code and covered at the
+pure-function level only (focus restore, the slide, the flash, the Recent menu and R need a hands-on pass first).
+
+### What changed for people
+- A post, document, agent or competitor now opens in a side peek over the right of the Overview. The board behind stays
+  as it was (the Today panel no longer gets replaced). X or Esc closes it; a "Closed ..." toast offers Reopen (6 s).
+- Buttons that point at a panel scroll to it and flash it instead of adding it. A collapsed panel gets "X is collapsed"
+  with Expand; one not on the board gets "X isn't on your board" with Add to board (15 s). Both change the board only
+  when pressed.
+- A **Recent** menu beside Layout lists the last 8 items opened here; R reopens the last closed one.
+- Unsaved work is guarded per editor, so a post's caption and its release form each count and the person is asked once.
+
+### URL rules (`lib/workspace-view.ts`)
+- `?post=` and `?competitor=` match `^[A-Za-z0-9_-]{1,64}$`; `?agent=` matches `^[a-z][a-z0-9-]{0,39}$`; `?doc=` must be in
+  `DOC_KINDS` (server `shared/context-docs.ts`); `runId` must match `RUN_ID_PATTERN` and only applies to an agent.
+- Anything else is a bad link: it opens home and the URL is replaced at once (no history entry). When several item
+  parameters are present, the first of post, doc, agent, competitor wins.
+- A URL never sets `run`: a link, reload or Recent cannot start a paid run. Unknown agents are dropped once the list loads.
+- A brand or workspace switch strips the item parameters after the person agrees to discard unsaved work.
+- Sidebar `?panel=` is still an insert into the saved board, by choice (owner's request). Only that path can add a panel;
+  every in-page button reveals.
+
+### Recent storage (`lib/recent.ts`)
+- localStorage key `recent:<workspaceId>:<brandId>:<userId>`; nothing is kept without a user id. Entries are
+  `{kind, id, at}`, newest first, 8 at most, dropped after 30 days or when `at` is more than 1 min in the future.
+- Reads are strict: entries are rebuilt, never spread, and each must parse through `parseViewParts`. Reads happen on menu
+  open and on push, not in render. Re-opening the item already on top writes nothing.
+- Titles come from data the Overview holds (shared content cache, docs, agents); competitor names are fetched only when
+  the menu opens. "No longer available" shows only when the relevant list loaded and lacks it; a failed fetch purges nothing.
+- Sign-out removes every `recent:` key in the browser. A brand switch clears the last-closed item (so R and Reopen cannot
+  carry it across). Reopen and R open by kind and id alone.
+
+### Deferred
+- **A3, two peeks side by side**: not built. Each peek is a narrow column over a board that is already two or three
+  columns wide; two would hide the board, and the unsaved-guard and focus rules are per single peek. Revisit if people ask.
+- Not built either: full pages for posts, documents and competitors; hover prefetch.
+- Minors: the peek shows a skeleton forever if the agents or docs fetch fails (no retry there); an item opened and edited
+  during a brand-switch request is dropped without a new ask; during the 200 ms slide-out an agreed-to-discard editor's
+  guard is off, but opening another item inside that window can ask again; picking the already-active brand leaves
+  nothing to strip; a post outside the calendar window is titled "Post" in the peek header (its own h1 has the real title);
+  the peek's views keep their own h1 under the header; import order in `workspace.tsx`; the reveal closure is untested
+  (DOM); reveal before the saved layout loads; Recent's post "No longer available" depends on the content cache being loaded.
+
 ## Phase 0: B&C quick wins (2026-11-20)
 
 Merged to `main` in server, web and mobile on 2026-11-20 (not pushed). Plan: `docs/superpowers/plans/2026-11-20-phase-0-quick-wins.md`

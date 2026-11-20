@@ -86,7 +86,7 @@ Customize via CSS variables above in `components.json`.
 
 ### Toast (built: `web/components/ui/toast.tsx`, not shadcn/sonner)
 
-A small own component for "something finished while you were elsewhere", mounted once in the shell. Used today only by the agent watcher.
+A small own component for "something finished while you were elsewhere", mounted once in the shell. Used by the agent watcher and the Overview peek.
 
 - **Placement:** stacked bottom-right, `max-w-sm`, full width on a phone, above the home bar (`env(safe-area-inset-bottom)`), `z-[70]`. The newest three stay.
 - **Timing:** dismissed after 10 s; the timer pauses while the pointer is over it or focus is inside; the close button (`Dismiss`, 36 px target) always works.
@@ -96,6 +96,32 @@ A small own component for "something finished while you were elsewhere", mounted
 - **Brand switch:** toasts clear (they belong to the brand the watcher was watching).
 - **Announcing:** the stack is `role="status"` with `aria-live="polite"`.
 - **Copy:** "<Agent> finished" or "<Agent> needs a look", the failure reason in the detail line. Runs with nothing to do stay silent.
+
+### Toast: action and duration
+
+`ToastInput` also takes `action: { label, onAction }` and `ms`. The action is a text button beside the body (`text-primary`, `hover:bg-muted`, focus ring); pressing it dismisses the toast and then runs the callback. `ms` overrides the 10 s default (`toastMs`); the hover and focus pause still applies. Used for "Closed X" / Reopen (6 s) and "X is collapsed" / Expand and "X isn't on your board" / Add to board (15 s, so there is time to decide). Toasts with an action are cleared when the Overview unmounts (`clearActionToasts`), because their callback would act on a page that is gone.
+
+### Peek (built: `web/components/workspace/peek.tsx`, `use-peek.ts`)
+
+The Overview's side peek for a post, document, agent or competitor. Not `Sheet`: that is a modal dialog fixed to the viewport with a focus trap and a click-eating scrim; the peek sits inside the Overview and leaves the board usable.
+
+- **Placement:** `absolute inset-y-0 right-0` over the right of the Overview's own wrapper, `z-20`, `border-l`, `shadow-xl`, scrolls on its own. Beside the assistant panel, not over it. A scrim `bg-foreground/5` covers the board and is `pointer-events-none`.
+- **Width:** full width below `lg`; from `lg`, `min(560px, 100%)`. One peek at a time (two side by side was deferred).
+- **Header:** sticky; muted crumb ("Calendar › Post", "Context › Document", "Agents", "Competitors"), the title as `h2` (the item's name, else its kind), "Open full page" only where a page exists (studio reels), and a Close button (32 px, Sheet's icon and focus ring). The views' own back bars are gone.
+- **Motion:** slides in and out in 200 ms (`ease-out`), off under `prefers-reduced-motion`. On close the last item stays mounted until `transitionend` (300 ms fallback) so the slide shows content; during that time the unsaved guard is off for it.
+- **Focus:** opening moves focus to the title (`data-peek-title`, `tabIndex -1`; the aside itself is not focusable). It is an `aside role="region"` named by the title. Closing returns focus to what opened it, else that panel's header button (`panel-head-<id>`), else Layout; if focus already moved elsewhere on purpose (a sidebar link) it stays. Opening another item from inside keeps the first opener.
+- **Esc:** handled on the aside's `onKeyDown`, so a menu or dialog inside that used Esc first wins. It is then `preventDefault`ed so the assistant's document-level Esc does not also act. The story zoom listens on `window` in the capture phase and stops Esc itself.
+- **Mobile:** same component, full width and covering the panel tabs' content; reveals switch the tab (`setMobilePanel`) instead of scrolling.
+- **Loading:** an agent not yet in the list, or documents not loaded, shows a `ListSkeleton` under the header; the agent view mounts only for a known agent. Before the title is known the agent title reads "Competitors agent" (key with hyphens as spaces), a post "Post", a document "Document". A role without `agents.read` sees "Your role doesn't include documents" / not-for-role text.
+- **Unsaved guard:** per editor (`useUnsavedGuard(dirty)` in `components/context/unsaved.ts`). Each dirty editor registers its own symbol and clears only its own on unmount, so two dirty editors (a post's caption and its release form) ask once. One shared `beforeunload` and capture-phase link listener is attached while any editor is dirty. `okToDiscard()` asks before closing, switching items or documents, and switching brand or workspace. `UnsavedGuardOff` turns the hook off inside a peek that is sliding out.
+
+### Reveal flash
+
+A button that points at a panel (`revealPanel` in `workspace.tsx`, `revealPlan` / `withPanel` in `panel-layout.tsx`) closes an open peek first (asking about unsaved work), then: panel shown, scrolls its header into view (`block: nearest`, smooth) and outlines the panel (`outline-2 outline-primary outline-offset-2`) for 1.2 s, one at a time; collapsed or absent, shows the warning toast with Expand or Add to board. Nothing is saved to the board unless that button is pressed. Reduced motion: scroll jumps and there is no outline. Sidebar `?panel=` still inserts into the saved board.
+
+### Recent menu (built: `web/components/workspace/recent-menu.tsx`, `lib/recent.ts`)
+
+A `History` tool button "Recent" (label hidden below `sm`) beside Layout, in the top bar slot. A `DropdownMenu` (`w-72`, end-aligned) headed "Recently opened"; each row is the title (truncated) over "Kind · 3 min ago" (`text-xs` muted), or "No longer available" and disabled. Empty: "Nothing opened yet." Up to 8 items, newest first. Storage and titles load only when it opens. R (outside inputs, menus and dialogs, no modifier, not repeating) reopens the last closed item while nothing is open. Storage rules are in the handover.
 
 ---
 
