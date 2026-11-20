@@ -6,6 +6,7 @@ import { prisma } from "@/server/db/prisma";
 import { kickRunner } from "@/server/jobs/runner";
 import { createPost, ownMediaKey, postAiAllowed, PublishingError } from "@/server/services/publishing";
 import { signedMediaUrl } from "@/server/storage/media";
+import { contentWindow } from "@/server/content/window";
 import { isStoryBody } from "@/server/stories/body";
 import { coverUrl, createStory, failStoryStart, STORY_RENDER_JOB, STORY_START_NOTE, storyForRequest, storyTab } from "@/server/stories/service";
 
@@ -14,19 +15,26 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
   try {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");
     if (scope instanceof Response) return scope;
-    const rows = await prisma.contentItem.findMany({
-      where: { workspaceId: scope.workspaceId, brandId: scope.brandId, status: { not: "CANCELLED" } },
-      // Unscheduled first (a post just made in the app has no date yet), then by date.
-      // ponytail: 200 items; filter by month when a brand's calendar outgrows that.
-      orderBy: [{ scheduledFor: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }],
-      take: 200,
-      include: {
-        opportunity: { select: { title: true } },
-        versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } },
-        decisions: { orderBy: { createdAt: "desc" }, take: 1, select: { verdict: true, note: true, contentVersionId: true } },
-        publications: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, error: true } },
-      },
-    });
+    // ?id= opens one post whatever its age (a link to an old post); otherwise the calendar window.
+    const id = new URL(request.url).searchParams.get("id");
+    const base = { workspaceId: scope.workspaceId, brandId: scope.brandId, status: { not: "CANCELLED" as const } };
+    const [open, recent] = contentWindow(new Date()).OR;
+    const include = {
+      opportunity: { select: { title: true } },
+      versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } },
+      decisions: { orderBy: { createdAt: "desc" }, take: 1, select: { verdict: true, note: true, contentVersionId: true } },
+      publications: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, error: true } },
+    } as const;
+    // Unscheduled first (a post just made in the app has no date yet), then by date.
+    const orderBy = [{ scheduledFor: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }] as const;
+    // ponytail: open posts + 30 days of changes, 200 rows; past 200 open posts add from/to and filter params.
+    // Open posts are read first so a long history (undated, so sorted first) can never push upcoming posts out.
+    const openRows = await prisma.contentItem.findMany({ where: id ? { ...base, id } : { ...base, ...open }, orderBy: [...orderBy], take: 200, include });
+    const recentRows = id || openRows.length >= 200
+      ? []
+      : await prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy: [...orderBy], take: 200 - openRows.length, include });
+    const rows = [...openRows, ...recentRows];
+    if (id && !rows.length) return problemResponse({ type: "https://api.brandpilot/errors/not-found", title: "Post not found", status: 404 });
     // The draft's pictures (photoKeys, the first is the cover), signed for an hour: Today, Calendar and the post show them.
     // A studio reel has no photoKeys: its first scene's photo stands in as the cover.
     const photoKeys = (r: (typeof rows)[number]) => {
