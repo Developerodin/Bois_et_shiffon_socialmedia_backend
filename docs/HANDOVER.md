@@ -6,12 +6,12 @@ tested on the emulator, fixed, and committed.
 
 ## Phase 0: B&C quick wins (2026-11-20)
 
-Branch `phase-0` in server, web and mobile (not merged, not pushed). Plan: `docs/superpowers/plans/2026-11-20-phase-0-quick-wins.md`
-(untracked, like the earlier ones). Commit ranges: server `78eaf75..c433195` (this handover on top), web `8ed684b..23d88ae`,
-mobile `5c9ad7b..a444942`. Each task got a review and fix round. The four-lens branch review (correctness,
-security, performance, maintainability) and its fix wave are done (`.superpowers/sdd/2026-11-20-phase-0-quick-wins/final-fix-report.md`).
-**Next: the merge decision.** Phase 0 extends
-existing panels, so it needs no feature flag.
+Merged to `main` in server, web and mobile on 2026-11-20 (not pushed). Plan: `docs/superpowers/plans/2026-11-20-phase-0-quick-wins.md`
+(untracked, like the earlier ones). Commit ranges: server `78eaf75..248344a`, web `8ed684b..4eb38b9`, mobile `5c9ad7b..2700b63`.
+Each task got a review and fix round, then a four-lens branch review and its fix wave
+(`.superpowers/sdd/2026-11-20-phase-0-quick-wins/final-fix-report.md`). Phase 0 extends existing panels, so it needs
+no feature flag. The work after the merge (a second review and the owner's answers) is in "Phase 0 follow-up" below.
+**Next: the post-merge steps in "Deploy order" and "Phase 0 follow-up".**
 
 ### What shipped
 1. **Calendar window.** `GET .../content` returns open posts plus anything updated in the last 30 days (two queries, open
@@ -39,7 +39,8 @@ existing panels, so it needs no feature flag.
 
 ### The six decisions (owner can override)
 1. A client reviewer's approval is enough, but **a client reviewer's approval never auto-publishes; staff approvals behave
-   as before**. It is a normal `ApprovalDecision` with `byClient` set (stored at decision time); staff schedule or post
+   as before**. (`decide` itself never publishes for anyone; the content route skips `autoPublish` when the decision
+   has `byClient`, and staff approvals still call it unless `noAutoPublish` or an override.) It is a normal `ApprovalDecision` with `byClient` set (stored at decision time); staff schedule or post
    it. Staff self-approval is unchanged (`hasOtherApprover` ignores
    people whose `content.approve` comes only from the system `client-reviewer` grant). Staff can always skip client review.
 2. Client reviewer permissions as in item 7. They see posts, reports, products, campaigns, competitors and member names.
@@ -56,9 +57,14 @@ Server first, with migrations `20261120054624_content_owner`, `20261120060816_ap
 `20261120061605_client_reviewer`, `20261120070845_approval_by_client`; then web; then mobile. Clients tolerate the old
 server (a missing `owner` reads as Unassigned, a missing `byClient` as staff). `npm run sync:shared` is already done in
 all three repos.
-- **After the new server is live, re-run the guarded `client_reviewer` steps 2, 3 and 5** (inbox.read, content.download,
-  the Client reviewer role) by hand against production. A workspace created between `migrate deploy` and the switch to
-  the new server gets the old catalog from the old server; the steps are guarded, so a second run changes nothing else.
+- **Re-run the guarded `client_reviewer` steps by hand against production, only for workspaces missing the role.** A
+  workspace created between `migrate deploy` and the switch to the new server gets the old catalog from the old server.
+  Limit step 5 (the role insert) with `WHERE NOT EXISTS` on that workspace's `client-reviewer` role, so a role someone
+  has since edited is not reset (the migration's own `ON CONFLICT DO UPDATE` would overwrite it). Steps 2 and 3 are
+  guarded appends, but step 3 re-adds `content.download` to any role holding `publish.execute` or `content.approve`,
+  including one where someone removed it on purpose; check before running it.
+- **Assign the Client reviewer role only after the new server is live.** An old server reads a missing `byClient` as a
+  staff approval, which can auto-publish.
 - **Confirm the owner backfill on a production snapshot first:** compare the `content.create` audit rows with the posts
   whose `ownerId` was filled (`content_owner`); the counts were never compared (the dev DB is nearly empty).
 - The `client_reviewer` migration was corrected in place after the branch review (step 4: `agents.read` only for custom
@@ -102,14 +108,94 @@ in Excel, a client reviewer login (what they see and cannot open), the phone cal
   through to creation time. Keep the `||` (commented in `content/route.ts`).
 - Phone: `me()` fetched per calendar mount with swallowed errors; the server's success text is not shown.
 
-### Open question (owner decision pending)
-- May a client reviewer send back an approved-but-unscheduled post? Today they can, and it cancels the staff approval
-  (the post goes back to the writer). Behaviour left as is until the owner decides.
+### Open question (answered)
+- May a client reviewer send back an approved-but-unscheduled post? Answered 2026-11-20: only one they approved
+  themselves. See "Phase 0 follow-up".
 
 ### Pre-existing cost to know about
 The calendar poll (every 6 s) loads, for up to 200 items, every child row behind the nested `take: 1` includes (versions,
 checks, decisions, publications). Not new, and the window keeps it at 200 items, but it is the first thing to fix if the
 poll gets slow. Upgrade: Prisma `relationJoins`.
+
+## Phase 0 follow-up (2026-11-20)
+
+Branch `phase-0-followup` in server, web and mobile, from the merged Phase 0. Plan:
+`docs/superpowers/plans/2026-11-20-phase-0-followup.md` (untracked). Ranges: server `248344a..76e3a66` (this docs commit
+on top), web `4eb38b9..118bcc5`, mobile `2700b63..f188af7`. Ledger and reports:
+`.superpowers/sdd/2026-11-20-phase-0-followup/` (`progress.md`, `task-*-report.md`, `track-*-report.md`). Not merged or
+pushed when this was written.
+
+### The owner's two answers
+1. **Client send-back only on their own approval.** A client reviewer can send a post back to the writer only when the
+   current approval is theirs (`approval.byClient` and the same user). A post the team or another client approved gets a
+   409 "This post was approved by the team. Ask them to reopen it." Staff can still send back anything. Clients are also
+   capped at 20 send-backs a day per brand (429); the per-person 30 an hour applies as before.
+2. **Agent-finished toast.** The web shell toasts "<agent> finished" (green) or "<agent> needs a look" (amber, with the
+   error) when a run ends, linking to `/?agent=<key>&runId=<id>`, where the agent log shows that run's events.
+
+### What shipped
+- **Route check hands back more.** `authorizeBrandRoute` returns `perms` and `clientReviewer` (read once); post detail,
+  actions and `setOwner` reuse them instead of reading again. `isClientReviewer` was removed; `decide` takes a required
+  `byClient`. The catalog-sync job payload is only `{ workspaceId, brandId }` (the route scope used to be passed whole).
+- **One name rule** (`server/content/person-name.ts`): the trimmed name; else the email's local part, only for callers
+  with `project.members.manage`; else "A team member". Never the whole email. It covers the post owner, the CSV Owner
+  column, `content/owners`, decision `by` names, members for non-managers and story rights. Client reviewers are not
+  offered as owners.
+- **Story rights are hidden, not rewritten.** A story's asset-rights note and `frames[].rights` no longer reach people
+  who can't see names (list, `?id=`, check results) or the Quality agent's prompt. **Stored story bodies keep their old
+  names and emails in the database; they are hidden on every read.** New bodies store "A team member", not the email.
+- **Hand-posted posts are dated when they went out:** `scheduledFor` is set to now (a planned date is lost).
+- **Calendar and post views are cheaper:** owners are read with one query; the recent half of the list is ordered by
+  `updatedAt desc` and can use the new index `ContentItem(brandId, updatedAt)` (migration
+  `20261120082134_content_updated_index`). With 20,000 scratch rows the planner used it; the dev table has 5 rows.
+- **Agents list** is one `DISTINCT ON ("agentKey")` query (same JSON shape). **`agent-events?runId=`** returns one run's
+  events oldest first (up to 200; `after` and `limit` ignored; `runId` is `[A-Za-z0-9_-]{1,40}` or 400).
+- **Web:** the shell agent watcher and toast; the agents request goes through the shared per-URL fetch, so the Overview,
+  board, post panels and watcher make one request; view and URL parsing moved to `lib/workspace-view.ts`. Business
+  context and story downloads are kept to the roles that can use them.
+- **Phone:** the week ahead leaves published posts out; "channel not connected" shows only to people who can publish.
+
+### Rulings
+- Stored story bodies are never rewritten (no approval or hash risk; cost: old names stay in the database).
+- Client send-back is limited to the client's own approval ("post he has approved"). If the owner meant any approved
+  post, clients are refused on staff-approved ones.
+- Hand-post always sets `scheduledFor` to now.
+- Runs with nothing to do ("No ideas...", "Nothing to...") do not toast.
+- Toasts are deduped across tabs by localStorage (last 50 run ids per workspace and brand), no leader election: two tabs
+  in the same second can both toast. `GET /agents` sends only each agent's newest run, so a run followed within one poll
+  by another can be missed.
+- Two implementers ran in parallel by repo (server track, web/mobile track); the web coded against the `runId`
+  contract before the server landed.
+- The new index stays (EXPLAIN uses it at 20k rows).
+
+### Post-merge steps
+1. Run migrations in every environment (`npx prisma migrate deploy`), including `20261120082134_content_updated_index`.
+   Then stop the server dev, run `npx prisma generate` (it hit EPERM because the running dev server holds the engine, so
+   the client was not regenerated; only an index changed) and restart it.
+2. Per environment: `npm run redact:story-checks` (dry run, prints counts), then `npm run redact:story-checks -- --apply`
+   (optional `--workspace <id>`). It rewrites only passing "Asset rights" notes in story quality checks that contain
+   `@`; it never writes story bodies. When every database is done, delete the script, its npm script and
+   `tests/redact-story-checks.test.ts`.
+3. One-off DB grep for `@` in older story `QualityCheck` notes outside "Asset rights" (the script only handles that row).
+4. The guarded `client_reviewer` re-run (only workspaces missing the role) and assigning the Client reviewer role only
+   after the new server is live: see "Deploy order" above.
+
+### Not checked live
+No browser and no emulator were driven for this work (web and mobile were only unit-tested and typechecked). The toast
+has not been seen on screen: placement, timing, the link into the agent's run and the two-tab case are unchecked.
+Nothing was run against a real channel or OpenAI. Walk first: a client reviewer approving and then sending back (own and
+staff-approved posts), names on the calendar and the CSV, a hand-posted post's date, the toast after a real agent run.
+
+### Deferred minors
+- Server: a refused client send-back can still spend a cap slot (the cap is spent before the per-person limit); the 409
+  says "the team" even when another client approved; members GET for managers also returns a `client` flag and still
+  reads `effectivePermissions` rather than `scope.perms`.
+- Names: owners numbering ("A team member (2)") shifts with membership and can differ from the list's plain
+  "A team member"; a real display name containing `@` is treated as an email and hidden.
+- Web and phone: Send back to clients can show on team-approved posts (the server answers 409 readably); the mobile
+  `StoryFrame` type (`api/endpoints.ts`) still says confirmed rights are `{ kind, by, name }`; the redact script logs no
+  progress.
+- The Phase 0 minors above still stand.
 
 ## End of day 2026-11-19 — start here tomorrow
 

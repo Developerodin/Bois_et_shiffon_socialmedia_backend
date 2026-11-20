@@ -84,6 +84,18 @@ Loaded via `next/font` in `app/layout.tsx`.
 
 Customize via CSS variables above in `components.json`.
 
+### Toast (built: `web/components/ui/toast.tsx`, not shadcn/sonner)
+
+A small own component for "something finished while you were elsewhere", mounted once in the shell. Used today only by the agent watcher.
+
+- **Placement:** stacked bottom-right, `max-w-sm`, full width on a phone, above the home bar (`env(safe-area-inset-bottom)`), `z-[70]`. The newest three stay.
+- **Timing:** dismissed after 10 s; the timer pauses while the pointer is over it or focus is inside; the close button (`Dismiss`, 36 px target) always works.
+- **Motion:** the same short `rise-in` as other page parts (280 ms); off under `prefers-reduced-motion`.
+- **Tone:** `success` (border `success/50`) for a finished run, `warning` (border `warning/60`) for one that needs a look. Card surface, `rounded-2xl`, a bold title and one muted detail line. Plain text only.
+- **Link:** an optional `href`, accepted only for in-app paths ("/x", never "//host"); the whole body is then a button that dismisses and navigates.
+- **Announcing:** the stack is `role="status"` with `aria-live="polite"`.
+- **Copy:** "<Agent> finished" or "<Agent> needs a look", the failure reason in the detail line. Runs with nothing to do stay silent.
+
 ---
 
 ## 7. Application components (feature-level)

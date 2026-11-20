@@ -443,16 +443,22 @@ The tables above are the original design; the built routes live under `/api/v1/w
 
 | Method | Path | Permission | Notes |
 |--------|------|------------|-------|
-| GET | `content` | `brand.read` | Open posts plus anything updated in the last 30 days, 200 rows. `?id=` returns one post of any age (404 if cancelled). Each item carries `owner: { id, name }` or null; `name` is the person's name, else their email's local part (never the email). |
-| GET | `content/owners` | `content.create` | `{ owners: [{ id, name }] }`, people on the brand, no emails. |
+| GET | `content` | `brand.read` | Open posts plus anything updated in the last 30 days, 200 rows. `?id=` returns one post of any age (404 if cancelled). Each item carries `owner: { id, name }` or null; `name` follows the name rule below. A story's `latest.body.frames[].rights` and its "Asset rights" check note are hidden from callers without `project.members.manage`. |
+| GET | `content/owners` | `content.create` | `{ owners: [{ id, name }] }`, people on the brand, no emails, client reviewers left out (`setOwner` to one is 400). Nameless people read "A team member", "A team member (2)", ... unless the caller has `project.members.manage`. |
 | POST | `content` | `content.create` | Optional `requestId` (uuid): a retry returns the first post before any rate limit is used. A post body may carry `pinLink` (max 2000). |
-| POST | `content/:id` | by action | New actions `setOwner` (`{ userId }` or null, `content.create`) and `postedByHand` (`{ url? }`, `publish.execute`). A client reviewer's approval never auto-publishes; staff approvals behave as before. In the GET each decision carries `byClient`; `by` is a name, else the email's local part for callers with `project.members.manage`, else "A team member"; `accounts` is empty without `publish.execute`. |
+| POST | `content/:id` | by action | New actions `setOwner` (`{ userId }` or null, `content.create`) and `postedByHand` (`{ url? }`, `publish.execute`). A client reviewer's approval never auto-publishes; staff approvals behave as before. In the GET each decision carries `byClient`; `by` follows the name rule below; `accounts` is empty without `publish.execute`. `decision` takes a required `byClient` from the route. A client reviewer may send back (`CHANGES_REQUESTED`) or reopen only an approval they made themselves (`byClient` and their own user), else 409 "This post was approved by the team. Ask them to reopen it." (checked before and again inside the transaction); client send-backs are capped at 20 per brand per day (429), on top of 30 per person per hour. Posting by hand sets `scheduledFor` to now. |
 | GET | `content/export` | `content.download` | CSV of posts scheduled in `?from..?to` (default 90 days each way, max 366 days, 5,000 rows, cancelled left out). Columns: Date, Channel, Status, Title, Owner, Campaign, Caption, Post link. 20 per hour per user; audited. |
 | GET | `audit-reports/export` | `analytics.read` | CSV of the latest findings, `?kind=SEO` or `GEO`. 20 per hour per user. |
 | GET | `members` | `brand.read` | Full list only with `project.members.manage`; others get names and role names (no emails, invitations or role permissions). |
 | GET | `connections` | any of `CONNECTIONS_READ` | `inbox.read`, `publish.execute`, `integrations.manage` (`shared/permissions.ts`). |
 | GET | `/workspaces/:workspaceId/credits?history=1` | `members.read` | The ledger lines need `members.read`; without it the call is refused. |
+| GET | `agents` | `agents.read` | `{ agents: [{ key, name, description, enabled, lastRun }] }`; `lastRun` is the agent's newest run `{ id, status, startedAt, finishedAt, error }` (`error` only when FAILED, up to 300 chars) or null. One query, not every run. |
+| GET | `agent-events` | `agents.read` | `?after=<id>&limit=` as before. New `?runId=<id>` (`[A-Za-z0-9_-]{1,40}`, else 400) returns that run's events oldest first, up to 200; `after` and `limit` are ignored. Events carry `runId`. |
 
 New permission keys: `inbox.read` (customer inbox and Google reviews; Owner, Admin, Project admin, Manager, Approver and
 custom roles with `publish.execute`) and `content.download` (CSV exports). New system project role `client-reviewer`:
 `brand.read`, `analytics.read`, `content.approve`, `content.download`; its approval counts but never publishes.
+
+Name rule (`server/content/person-name.ts`): the person's trimmed name; else the email's local part only for callers with
+`project.members.manage`; else "A team member". The whole email is never returned. It applies to post owners, the CSV
+Owner column, `content/owners`, decision and attempt `by`, `members` for non-managers and story rights.

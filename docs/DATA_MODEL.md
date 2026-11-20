@@ -356,4 +356,18 @@ Built in Prisma (`prisma/schema.prisma`); section 5 is only a sketch.
   first item through `itemForRequest` under an advisory lock.
 - A post body (`ContentVersion.body`) may hold `pinLink` (Pinterest destination, max 2000 chars).
 - Roles: system `client-reviewer` (PROJECT scope) added to every workspace by migration `client_reviewer`, which also adds
-  `inbox.read`, `content.download` and (custom roles with `brand.read`) `agents.read` by guarded `array_append`.
+  `inbox.read`, `content.download` and (custom roles holding `content.create` or `agents.run`, never the custom role renamed
+  from the slug `client-reviewer`) `agents.read` by guarded `array_append`.
+- `ApprovalDecision.byClient Boolean @default(false)` (migration `20261120070845_approval_by_client`): set at decision time
+  when the decider is a client reviewer, never looked up later. It drives "a client approval never auto-publishes" and
+  the client send-back rule (a client may reopen only an approval with `byClient` and their own `userId`). Index
+  `(brandId, verdict, createdAt)` came with `approval_brand_index`.
+
+## 10. Phase 0 follow-up additions (2026-11-20)
+
+- Index `ContentItem(brandId, updatedAt)` (migration `20261120082134_content_updated_index`) for the calendar's recent
+  half (`orderBy updatedAt desc`). Checked with EXPLAIN on 20,000 scratch rows; the dev table is too small to use it.
+- No column changes. A story's `ContentVersion.body.frames[].rights` still holds `{ kind, by, name }` for confirmed rights;
+  old bodies may hold an email as `name`. They are not rewritten: reads hide rights for callers who can't see names, and
+  `scripts/redact-story-checks.ts` (temporary, per environment) rewrites only the passing "Asset rights" note in
+  `QualityCheck.results`.
