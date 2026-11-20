@@ -12,7 +12,7 @@ const db = vi.hoisted(() => ({
 const m = vi.hoisted(() => ({
   authorize: vi.fn(),
   autoPublish: vi.fn(),
-  decide: vi.fn(async () => ({ id: "d1" })),
+  decide: vi.fn(async (_input: unknown): Promise<unknown> => ({ id: "d1" })),
   people: vi.fn(),
   buckets: new Map<string, number>(),
 }));
@@ -216,14 +216,48 @@ describe("a client reviewer's decisions", () => {
     expect(m.autoPublish).toHaveBeenCalledTimes(2);
   });
 
+  const waiting = { id: "i1", status: "AWAITING_APPROVAL", channel: "INSTAGRAM_POST", studio: false, versions: [{ id: "v2", version: 2, body: {}, createdBy: "u7", checks: [] }] };
+
   it("send-backs are rate-limited: the 31st in an hour by one person is a 429", async () => {
     const { decide } = await vi.importActual<typeof import("@/server/services/publishing")>("@/server/services/publishing");
+    db.contentItem.findFirst.mockResolvedValue(waiting);
     const sendBack = () => decide({ ...scope, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Shorter please" });
     for (let i = 0; i < 30; i++) await sendBack();
     await expect(sendBack()).rejects.toMatchObject({ status: 429 });
     expect(db.$transaction).toHaveBeenCalledTimes(30);
     // Someone else still can.
     await expect(decide({ ...scope, userId: "u9", itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "x" })).resolves.toBeTruthy();
+  });
+
+  it("send-backs on a made-up post are 404s and spend neither the send-back limit nor the workspace's post-AI allowance", async () => {
+    const actual = await vi.importActual<typeof import("@/server/services/publishing")>("@/server/services/publishing");
+    m.decide.mockImplementation((input) => actual.decide(input as Parameters<typeof actual.decide>[0]));
+    m.authorize.mockResolvedValue(scope);
+    db.contentItem.findFirst.mockResolvedValue(null);
+    const sendBack = () => contentPost(req("POST", { action: "decide", version: 2, verdict: "CHANGES_REQUESTED", note: "x" }), { params });
+    for (let i = 0; i < 61; i++) expect((await sendBack()).status).toBe(404);
+    expect(m.buckets.has("post-ai:w1")).toBe(false);
+    expect(m.buckets.has("send-back:u1")).toBe(false);
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("a send-back that can't happen spends nothing; a real one spends one send-back and one post-AI run", async () => {
+    const actual = await vi.importActual<typeof import("@/server/services/publishing")>("@/server/services/publishing");
+    m.decide.mockImplementation((input) => actual.decide(input as Parameters<typeof actual.decide>[0]));
+    m.authorize.mockResolvedValue(scope);
+    const sendBack = (version: number) => contentPost(req("POST", { action: "decide", version, verdict: "CHANGES_REQUESTED", note: "x" }), { params });
+    db.contentItem.findFirst.mockResolvedValue({ ...waiting, status: "PUBLISHED" });
+    expect((await sendBack(2)).status).toBe(409);
+    db.contentItem.findFirst.mockResolvedValue(waiting);
+    expect((await sendBack(1)).status).toBe(409);
+    expect(m.buckets.size).toBe(0);
+    expect((await sendBack(2)).status).toBe(200);
+    expect(m.buckets.get("send-back:u1")).toBe(1);
+    expect(m.buckets.get("post-ai:w1")).toBe(1);
+    // A studio reel is rewritten in the app's chat: no post-AI run.
+    db.contentItem.findFirst.mockResolvedValue({ ...waiting, studio: true });
+    expect((await sendBack(2)).status).toBe(200);
+    expect(m.buckets.get("post-ai:w1")).toBe(1);
   });
 
   it("a client reviewer's change request reaches the writer as labelled data", () => {

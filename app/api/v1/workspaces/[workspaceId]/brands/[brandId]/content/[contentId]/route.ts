@@ -98,13 +98,12 @@ export async function POST(request: Request, context: Params) {
     const scope = await authorizeBrandRoute(request, context.params, PERMISSION[body.action]);
     if (scope instanceof Response) return scope;
     const { contentId: itemId } = await context.params;
-    // An edit or a send-back starts free AI runs (Quality, Creator): capped per workspace per day.
-    const startsAi =
-      body.action === "edit" ||
-      body.action === "editStory" ||
-      body.action === "rewrite" ||
-      (body.action === "decide" && body.verdict === "CHANGES_REQUESTED" && !(await prisma.contentItem.findFirst({ where: { id: itemId, brandId: scope.brandId }, select: { studio: true } }))?.studio);
-    if (startsAi && !(await postAiAllowed(scope.workspaceId))) throw new PublishingError("Too many posts written today. Try again tomorrow.", 429);
+    // An edit or a send-back starts free AI runs (Quality, Creator): capped per workspace per day. A send-back is
+    // counted inside decide, once the post exists and the send-back can happen (decide's beforeWrite).
+    const aiCap = async () => {
+      if (!(await postAiAllowed(scope.workspaceId))) throw new PublishingError("Too many posts written today. Try again tomorrow.", 429);
+    };
+    if (body.action === "edit" || body.action === "editStory" || body.action === "rewrite") await aiCap();
     if (body.action === "setOwner") {
       await setOwner(scope, itemId, body.userId);
       return new Response(null, { status: 204 });
@@ -155,15 +154,20 @@ export async function POST(request: Request, context: Params) {
       }
       kickRunner();
     } else if (body.action === "decide") {
-      await decide({ ...scope, itemId, version: body.version, verdict: body.verdict, note: body.note, override: body.override, switchProducts: body.switchProducts });
+      // Sent back: the Creator rewrites the post (studio reels are rewritten in the app's chat instead).
+      let rewrite = false;
+      const beforeWrite = async (item: { studio: boolean }) => {
+        rewrite = body.verdict === "CHANGES_REQUESTED" && !item.studio;
+        if (rewrite) await aiCap();
+      };
+      await decide({ ...scope, itemId, version: body.version, verdict: body.verdict, note: body.note, override: body.override, switchProducts: body.switchProducts, beforeWrite });
       // After an override the person schedules: auto-publish would re-book the first account after a cancelled schedule.
       // A client reviewer's approval never publishes by itself: staff schedule or post it.
       if (body.verdict === "APPROVED" && !body.noAutoPublish && !body.override && !(await isClientReviewer(scope.workspaceId, scope.brandId, scope.userId))) {
         await autoPublish(scope, itemId);
         kickRunner();
       }
-      // Sent back: the Creator rewrites this post now (studio reels are rewritten in the app's chat instead).
-      if (startsAi) {
+      if (rewrite) {
         await startAgentRun({ workspaceId: scope.workspaceId, brandId: scope.brandId, agentKey: "creator", trigger: "event", input: { itemId } }).catch(() => null);
         kickRunner();
       }

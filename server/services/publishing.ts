@@ -342,6 +342,12 @@ export async function decide(input: {
   override?: boolean;
   /** CHANGES_REQUESTED: the Creator may link another product instead. */
   switchProducts?: boolean;
+  /**
+   * Runs once the decision is known to be possible (a send-back: also within the person's send-back limit), before
+   * anything is written: the route spends the workspace's post-AI allowance here, so a made-up id or a send-back that
+   * can't happen spends nothing. Throw to refuse.
+   */
+  beforeWrite?: (item: { studio: boolean }) => Promise<void>;
 }) {
   const note = input.note?.trim() || null;
   if (input.verdict !== "APPROVED" && !note) throw new PublishingError("Say what needs to change", 400);
@@ -350,21 +356,21 @@ export async function decide(input: {
   if (input.switchProducts && input.verdict !== "CHANGES_REQUESTED") throw new PublishingError("Only a request for changes can ask for another product", 400);
   // Checked here, not only in the route: reels and future callers call decide too.
   if (input.override) await requirePermission(input.workspaceId, input.userId, "rules.approve", input.brandId);
+  // Checked first outside the transaction (and again inside it): a missing post or a decision that can't happen spends
+  // no send-back or AI allowance.
+  const pre = await loadItem(input, input.itemId);
+  await assertDecidable(pre.item, pre.latest, input);
   // Read outside the transaction (it reads every member): whether someone else could approve, for self-approval below.
   const otherApprover = input.verdict === "APPROVED" ? await hasOtherApprover(input.workspaceId, input.brandId, input.userId) : false;
   // Each send-back starts a free rewrite: capped per person, so one reviewer can't loop the writer.
   if (input.verdict === "CHANGES_REQUESTED" && !(await hitRateLimit(`send-back:${input.userId}`, 30, 3_600_000)).allowed) {
     throw new PublishingError("You've sent back a lot of posts this hour. Try again later.", 429);
   }
+  await input.beforeWrite?.(pre.item);
   return prisma.$transaction(async (tx) => {
     await lock(tx, input.itemId);
-    const { item, latest } = await loadItem(input, input.itemId, tx);
-    if (!latest || latest.version !== input.version) throw new PublishingError("A newer draft exists. Review the latest version.");
-    // An approved, not yet scheduled post can still be approved anyway or sent back (a product sold out since),
-    // as long as its approval holds.
-    const afterApproval = item.status === "APPROVED" && (input.override || input.verdict === "CHANGES_REQUESTED");
-    if (afterApproval && !(await currentApproval(item.id, latest, item.channel, tx))) throw new PublishingError("The approval no longer holds. Review the latest version.");
-    if (item.status !== "AWAITING_APPROVAL" && !afterApproval) throw new PublishingError("This post isn't waiting for approval");
+    const { item, latest: loaded } = await loadItem(input, input.itemId, tx);
+    const latest = await assertDecidable(item, loaded, input, tx);
     let productOverride: ProductOverride | undefined;
     if (input.verdict === "APPROVED") {
       if (latest.checks[0]?.overall === "BLOCKER" || !latest.checks[0]) throw new PublishingError("The quality check must pass before approval");
@@ -424,6 +430,22 @@ export async function decide(input: {
     }
     return decision;
   }, TX);
+}
+
+/** The latest version, if the decision can be made on it now; else the reason it can't. */
+async function assertDecidable<V extends { id: string; version: number; body: unknown }>(
+  item: { id: string; status: string; channel: string },
+  latest: V | null,
+  input: { version: number; verdict: ApprovalVerdict; override?: boolean },
+  db: Prisma.TransactionClient = prisma,
+) {
+  if (!latest || latest.version !== input.version) throw new PublishingError("A newer draft exists. Review the latest version.");
+  // An approved, not yet scheduled post can still be approved anyway or sent back (a product sold out since),
+  // as long as its approval holds.
+  const afterApproval = item.status === "APPROVED" && (input.override || input.verdict === "CHANGES_REQUESTED");
+  if (afterApproval && !(await currentApproval(item.id, latest, item.channel, db))) throw new PublishingError("The approval no longer holds. Review the latest version.");
+  if (item.status !== "AWAITING_APPROVAL" && !afterApproval) throw new PublishingError("This post isn't waiting for approval");
+  return latest;
 }
 
 export async function schedulePublication(input: {
