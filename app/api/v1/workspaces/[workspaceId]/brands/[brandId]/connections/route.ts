@@ -5,7 +5,7 @@ import { listConnections, listProviders, toConnectionDto } from "@/server/servic
 /** Which channels can be connected (keys present) and what this brand has connected. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
-    const scope = await authorizeBrandRoute(request, context.params, "brand.read");
+    const scope = await authorizeBrandRoute(request, context.params, "inbox.read");
     if (scope instanceof Response) return scope;
     const rows = await listConnections(scope.workspaceId, scope.brandId);
     return Response.json({ providers: listProviders(), connections: rows.map(toConnectionDto) });

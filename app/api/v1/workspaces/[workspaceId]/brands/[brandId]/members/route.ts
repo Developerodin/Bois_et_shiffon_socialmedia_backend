@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { fromAccessError } from "@/server/api/http-error";
+import { effectivePermissions } from "@/server/auth/permissions";
 import { accountErrorResponse, invalid } from "@/server/api/workspace-route";
 import { kickRunner } from "@/server/jobs/runner";
 import { prisma } from "@/server/db/prisma";
@@ -8,17 +9,30 @@ import { addToProject, listProjectPeople } from "@/server/services/project-membe
 
 type Ctx = { params: Promise<BrandRouteParams> };
 
-/** Who works on this project, plus the project roles to pick from. */
+/**
+ * Who works on this project, plus the project roles to pick from. Emails, invitations, role permissions and who is
+ * disabled are for people who manage the project; everyone else (a client reviewer too) gets names and role names.
+ */
 export async function GET(request: Request, context: Ctx) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");
     if (scope instanceof Response) return scope;
-    const roles = await prisma.role.findMany({
-      where: { workspaceId: scope.workspaceId, scope: "PROJECT" },
-      orderBy: [{ isSystem: "desc" }, { createdAt: "asc" }],
-      select: { id: true, name: true, description: true },
+    const [roles, people, perms] = await Promise.all([
+      prisma.role.findMany({
+        where: { workspaceId: scope.workspaceId, scope: "PROJECT" },
+        orderBy: [{ isSystem: "desc" }, { createdAt: "asc" }],
+        select: { id: true, name: true, description: true },
+      }),
+      listProjectPeople(scope.workspaceId, scope.brandId),
+      effectivePermissions(scope.workspaceId, scope.userId, scope.brandId),
+    ]);
+    if (perms.has("project.members.manage")) return Response.json({ ...people, roles });
+    return Response.json({
+      viaWorkspace: people.viaWorkspace.map((m) => ({ userId: m.userId, name: m.name, role: m.role })),
+      people: people.people.map((g) => ({ id: g.id, userId: g.userId, name: g.name, role: { id: g.role.id, name: g.role.name } })),
+      invitations: [],
+      roles,
     });
-    return Response.json({ ...(await listProjectPeople(scope.workspaceId, scope.brandId)), roles });
   } catch (error) {
     return accountErrorResponse(error) ?? fromAccessError(error);
   }

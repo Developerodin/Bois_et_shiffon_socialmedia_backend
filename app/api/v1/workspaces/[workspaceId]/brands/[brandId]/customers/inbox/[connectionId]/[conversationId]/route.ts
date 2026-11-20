@@ -8,7 +8,7 @@ type Params = { params: Promise<BrandRouteParams & { connectionId: string; conve
 /** M03 Reply: one conversation's latest messages. */
 export async function GET(request: Request, context: Params) {
   try {
-    const scope = await authorizeBrandRoute(request, context.params, "brand.read");
+    const scope = await authorizeBrandRoute(request, context.params, "inbox.read");
     if (scope instanceof Response) return scope;
     const { connectionId, conversationId } = await context.params;
     return Response.json(await thread(scope, connectionId, conversationId));

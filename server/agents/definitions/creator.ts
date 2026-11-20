@@ -5,6 +5,7 @@ import { NothingToDoError, startAgentRun } from "@/server/agents/engine";
 import { CONTENT_PROMPT_VERSION, CREATOR_SYSTEM } from "@/server/agents/prompts/content";
 import type { AgentDefinition } from "@/server/agents/types";
 import { answeredBy } from "@/server/ai/provider";
+import { isClientReviewer } from "@/server/auth/permissions";
 import { campaignsById } from "@/server/catalog/campaigns";
 import { linkedProducts } from "@/server/catalog/linked";
 import { approvedExamples, examplesBlock } from "@/server/content/examples";
@@ -16,7 +17,7 @@ import { prisma } from "@/server/db/prisma";
 import { storeImage } from "@/server/research/brand-assets";
 import { lock, postAiAllowed, TX } from "@/server/services/publishing";
 import { isStoryBody } from "@/server/stories/body";
-import { onlyMediaBlockers, writeStory } from "@/server/stories/writer";
+import { changeRequest, onlyMediaBlockers, writeStory } from "@/server/stories/writer";
 
 export const Draft = z.object({
   hook: z.string(),
@@ -128,6 +129,8 @@ export const creatorAgent: AgentDefinition = {
         (r) => r.status !== "pass" && (!(r.kind || r.productId) || r.status === "blocker"),
       );
       const reviewer = sentBack(item);
+      // A client reviewer's note is labelled data for the writer, not instructions.
+      const reviewerIsClient = reviewer ? await isClientReviewer(brand.workspaceId, brand.brandId, decision(item)!.userId) : false;
       const links = [...new Set(currentIds(item))].flatMap((id) => byId.get(id) ?? []);
       const campaign = item.campaignId ? campaigns.get(item.campaignId) : undefined;
       const campaignLine = item.campaignId
@@ -142,6 +145,7 @@ export const creatorAgent: AgentDefinition = {
           campaignLine,
           last: isStoryBody(last?.body) ? last.body : undefined,
           reviewer: reviewer ?? undefined,
+          reviewerIsClient,
           report: report as CheckResult[] | undefined,
           chargeId: itemId ? ctx.chargeId : undefined,
         });
@@ -196,7 +200,7 @@ export const creatorAgent: AgentDefinition = {
         // Brand knowledge first: it's the same for every post in this run, so OpenAI can bill it at the cached rate.
         prompt: `Brand: ${brand.displayName}\n\nBrand knowledge:\n${knowledge.text}\n\n---\nThe post to write\nChannel: ${item.channel}\nPost: ${item.title.replace(/\s+/g, " ")}\nBrief: ${JSON.stringify(item.brief)}\n${
           last ? `\nPrevious draft:\n${JSON.stringify(last.body)}\n` : ""
-        }${reviewer ? `\nThe approver asked for these changes (do exactly this):\n${reviewer}\n` : ""}${
+        }${changeRequest(reviewer, reviewerIsClient)}${
           report?.length ? `\nQuality report to fix:\n${report.map((r) => `- [${r.status}] ${r.check}: ${r.note}`).join("\n")}\n` : ""
         }\nBrand photos (key | product):\n${photoList}\nphotoKeys: exact keys of the photos that show this post's product: 1 for single-image posts and Pins, 2 to 10 for carousels (one per slide where you can), [] when none fits or for Threads and Reels.\nFill unused fields with "" or []: slides only for carousels, script only for Reels, pinTitle only for Pinterest.${products}${campaignLine}${voice}`,
         // Our own hard rules (length, hashtags, slides…): a draft that breaks one is asked again with the reasons

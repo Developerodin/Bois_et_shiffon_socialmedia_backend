@@ -17,7 +17,7 @@ const HEADERS = { "Cache-Control": "no-store" };
  */
 export async function GET(request: Request, context: Params) {
   try {
-    const scope = await authorizeBrandRoute(request, context.params, "publish.execute");
+    const scope = await authorizeBrandRoute(request, context.params, "content.download");
     if (scope instanceof Response) return scope;
     const { contentId: itemId } = await context.params;
     if (!(await hitRateLimit(`story-package:${scope.userId}`, 20, 3600_000)).allowed) {

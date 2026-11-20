@@ -22,7 +22,8 @@ const accessToken = vi.hoisted(() => vi.fn());
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/catalog/linked", () => ({ linkedProducts: linked }));
-vi.mock("@/server/auth/permissions", () => ({ requirePermission, hasOtherApprover: vi.fn(async () => true) }));
+vi.mock("@/server/auth/permissions", () => ({ requirePermission, hasOtherApprover: vi.fn(async () => true), isClientReviewer: vi.fn(async () => false), effectivePermissions: vi.fn(async () => new Set()) }));
+vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>()), hitRateLimit: vi.fn(async () => ({ allowed: true, count: 1 })) }));
 vi.mock("@/server/services/connections", () => ({ accessToken, markReconnect: vi.fn(), ReconnectNeeded: class extends Error {} }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn() }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));

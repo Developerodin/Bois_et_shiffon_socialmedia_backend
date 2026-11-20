@@ -7,7 +7,7 @@ type Params = { params: Promise<BrandRouteParams> };
 /** G13/G14 Google Growth: the connected Business Profile and its latest posts ({ connected: false } before connecting). */
 export async function GET(request: Request, context: Params) {
   try {
-    const scope = await authorizeBrandRoute(request, context.params, "brand.read");
+    const scope = await authorizeBrandRoute(request, context.params, "inbox.read");
     if (scope instanceof Response) return scope;
     const profile = await businessProfile(scope);
     return Response.json({ profile, posts: profile.connected ? await businessPosts(scope) : [] });

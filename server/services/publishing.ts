@@ -328,6 +328,12 @@ export async function decide(input: {
   if (input.switchProducts && input.verdict !== "CHANGES_REQUESTED") throw new PublishingError("Only a request for changes can ask for another product", 400);
   // Checked here, not only in the route: reels and future callers call decide too.
   if (input.override) await requirePermission(input.workspaceId, input.userId, "rules.approve", input.brandId);
+  // Read outside the transaction (it reads every member): whether someone else could approve, for self-approval below.
+  const otherApprover = input.verdict === "APPROVED" ? await hasOtherApprover(input.workspaceId, input.brandId, input.userId) : false;
+  // Each send-back starts a free rewrite: capped per person, so one reviewer can't loop the writer.
+  if (input.verdict === "CHANGES_REQUESTED" && !(await hitRateLimit(`send-back:${input.userId}`, 30, 3_600_000)).allowed) {
+    throw new PublishingError("You've sent back a lot of posts this hour. Try again later.", 429);
+  }
   return prisma.$transaction(async (tx) => {
     await lock(tx, input.itemId);
     const { item, latest } = await loadItem(input, input.itemId, tx);
@@ -342,7 +348,7 @@ export async function decide(input: {
       if (latest.checks[0]?.overall === "BLOCKER" || !latest.checks[0]) throw new PublishingError("The quality check must pass before approval");
       // Studio reels are made and sent by the same person (owner's call, 2026-10-30). Other posts need a second
       // person, unless there is nobody else who can approve (a one-person business, owner's call 2026-11-02).
-      if (latest.createdBy === input.userId && !item.studio && (await hasOtherApprover(input.workspaceId, input.brandId, input.userId))) {
+      if (latest.createdBy === input.userId && !item.studio && otherApprover) {
         throw new PublishingError("You wrote this draft, so someone else has to approve it", 403);
       }
       // Judged as if there were no override: only the latest decision counts, so an override lists every

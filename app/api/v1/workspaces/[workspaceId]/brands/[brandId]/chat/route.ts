@@ -33,7 +33,7 @@ const CHAT_LIMIT = { limit: 30, windowMs: 10 * 60_000 }; // per person: each mes
 /** Latest conversation for this person and brand, so the panel restores it. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
-    const scope = await authorizeBrandRoute(request, context.params, "brand.read");
+    const scope = await authorizeBrandRoute(request, context.params, "agents.read");
     if (scope instanceof Response) return scope;
     const thread = await prisma.chatThread.findFirst({
       where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId: scope.userId },
@@ -49,7 +49,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
 /** One turn: the client sends only its newest message; history comes from the database. */
 export async function POST(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
-    const scope = await authorizeBrandRoute(request, context.params, "brand.read");
+    const scope = await authorizeBrandRoute(request, context.params, "agents.read");
     if (scope instanceof Response) return scope;
     const body = ChatBody.safeParse(await request.json().catch(() => null));
     if (!body.success) {

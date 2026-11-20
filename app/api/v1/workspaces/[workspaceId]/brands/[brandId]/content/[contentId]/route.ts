@@ -2,6 +2,7 @@ import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { startAgentRun } from "@/server/agents/engine";
+import { effectivePermissions, isClientReviewer } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { pinterestBoards } from "@/server/integrations/publishers";
 import { kickRunner } from "@/server/jobs/runner";
@@ -71,7 +72,8 @@ export async function GET(request: Request, context: Params) {
     const { contentId } = await context.params;
     const state = await releaseState(scope, contentId);
     const boards: Record<string, { id: string; name: string }[] | null> = {};
-    if (state.requirements.needsBoard) {
+    // Boards are for scheduling: only people who publish make the Pinterest calls.
+    if (state.requirements.needsBoard && (await effectivePermissions(scope.workspaceId, scope.userId, scope.brandId)).has("publish.execute")) {
       for (const a of state.accounts) {
         // Any failure (expired access, bad key, Pinterest down) shows as "couldn't load boards", not a broken page.
         const c = await prisma.integrationConnection.findUnique({ where: { id: a.id } });
@@ -155,7 +157,8 @@ export async function POST(request: Request, context: Params) {
     } else if (body.action === "decide") {
       await decide({ ...scope, itemId, version: body.version, verdict: body.verdict, note: body.note, override: body.override, switchProducts: body.switchProducts });
       // After an override the person schedules: auto-publish would re-book the first account after a cancelled schedule.
-      if (body.verdict === "APPROVED" && !body.noAutoPublish && !body.override) {
+      // A client reviewer's approval never publishes by itself: staff schedule or post it.
+      if (body.verdict === "APPROVED" && !body.noAutoPublish && !body.override && !(await isClientReviewer(scope.workspaceId, scope.brandId, scope.userId))) {
         await autoPublish(scope, itemId);
         kickRunner();
       }

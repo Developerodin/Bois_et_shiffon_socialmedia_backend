@@ -1,6 +1,7 @@
 import { requestUserId } from "@/server/auth/request-user";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { requireWorkspaceMember } from "@/server/auth/access";
+import { requirePermission } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { listAccessibleBrands } from "@/server/services/brands";
 import { creditBalance } from "@/server/services/credits";
@@ -17,7 +18,7 @@ const kindOf = (reason: string): Kind =>
 
 /**
  * The workspace's credit balance (mobile module headers). Any member sees it, as R03 already shows it.
- * `?history=1` adds the last 20 ledger lines (Business M11), each reel charge or refund named after its reel.
+ * `?history=1` (members.read) adds the last 20 ledger lines (Business M11), each reel charge or refund named after its reel.
  */
 export async function GET(request: Request, context: { params: Promise<{ workspaceId: string }> }) {
   const userId = await requestUserId(request);
@@ -29,6 +30,8 @@ export async function GET(request: Request, context: { params: Promise<{ workspa
     await requireWorkspaceMember(workspaceId, userId);
     const credits = await creditBalance(workspaceId);
     if (new URL(request.url).searchParams.get("history") !== "1") return Response.json({ credits });
+    // What the workspace spent on what is for the people who run it (members.read), not a project's guests.
+    await requirePermission(workspaceId, userId, "members.read");
 
     // Zero lines are bookkeeping (a charge in a workspace with unlimited credits): not shown.
     const rows = await prisma.creditEntry.findMany({ where: { workspaceId, delta: { not: 0 } }, orderBy: { createdAt: "desc" }, take: 20 });

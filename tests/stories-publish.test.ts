@@ -53,7 +53,8 @@ vi.mock("@/server/db/prisma", () => {
 });
 vi.mock("@/server/catalog/linked", () => ({ linkedProducts: vi.fn(async () => []) }));
 vi.mock("@/server/catalog/campaigns", () => ({ campaignsById: vi.fn(async () => ({ campaigns: new Map(), timeZone: "UTC" })) }));
-vi.mock("@/server/auth/permissions", () => ({ requirePermission: vi.fn(), hasOtherApprover: vi.fn(async () => true) }));
+vi.mock("@/server/auth/permissions", () => ({ requirePermission: vi.fn(), hasOtherApprover: vi.fn(async () => true), isClientReviewer: vi.fn(async () => false), effectivePermissions: vi.fn(async () => new Set(["publish.execute"])) }));
+vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>()), hitRateLimit: vi.fn(async () => ({ allowed: true, count: 1 })) }));
 vi.mock("@/server/services/connections", () => ({ accessToken: vi.fn(async () => "tok"), markReconnect: m.markReconnect, ReconnectNeeded: class extends Error {} }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn(async (job: Row) => { db.jobs.push(job); }) }));
 vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), signedMediaUrl: vi.fn(async (k: string) => `https://signed.example/${k}`) }));

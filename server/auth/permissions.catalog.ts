@@ -21,6 +21,8 @@ const WORKSPACE_ONLY: PermissionKey[] = [
 export const PROJECT_KEYS = ALL.filter((k) => !WORKSPACE_ONLY.includes(k));
 export const permissionScope = (k: PermissionKey) => (WORKSPACE_ONLY.includes(k) ? "WORKSPACE" : "PROJECT");
 const READ: PermissionKey[] = ["brand.read", "agents.read", "analytics.read"];
+/** A client's person on one project: approves, but never publishes, and their approval alone never counts as staff review (hasOtherApprover). */
+export const CLIENT_REVIEWER = "client-reviewer";
 
 /**
  * Seeded per workspace; read-only in the UI. Workspace roles decide who runs the workspace;
@@ -43,7 +45,7 @@ export const SYSTEM_ROLES: ReadonlyArray<{
     name: "Manager",
     scope: "PROJECT",
     description: "Runs agents, strategy, the calendar and publishing",
-    permissions: [...READ, "agents.run", "context.edit", "context.confirm", "content.create", "publish.execute", "integrations.manage"],
+    permissions: [...READ, "agents.run", "context.edit", "context.confirm", "content.create", "content.download", "publish.execute", "integrations.manage", "inbox.read"],
   },
   { slug: "creator", name: "Creator", scope: "PROJECT", description: "Writes and edits drafts", permissions: [...READ, "content.create"] },
   {
@@ -51,7 +53,15 @@ export const SYSTEM_ROLES: ReadonlyArray<{
     name: "Approver",
     scope: "PROJECT",
     description: "Reviews posts, brand rules and strategy",
-    permissions: [...READ, "context.edit", "context.confirm", "rules.approve", "content.approve"],
+    permissions: [...READ, "context.edit", "context.confirm", "rules.approve", "content.approve", "content.download", "inbox.read"],
+  },
+  {
+    slug: CLIENT_REVIEWER,
+    name: "Client reviewer",
+    scope: "PROJECT",
+    description: "Sees the work and reports, approves posts and downloads",
+    // No agents.read (assistant, Translate) and no inbox.read: customer messages stay with the team that answers them.
+    permissions: ["brand.read", "analytics.read", "content.approve", "content.download"],
   },
   {
     slug: "commercial-owner",

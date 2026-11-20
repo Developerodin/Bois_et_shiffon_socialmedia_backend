@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { AccessDeniedError } from "@/server/auth/errors";
 import {
+  CLIENT_REVIEWER,
   LEGACY_ROLE_SLUG,
   SYSTEM_ROLES,
   type PermissionKey,
@@ -72,14 +73,32 @@ export function brandGrant(workspaceId: string, brandId: string, userId: string)
   return prisma.brandMember.findFirst({ where: { brandId, workspaceId, userId }, include: { role: true } });
 }
 
+/** A project grant through the built-in Client reviewer role (a custom role that happens to use the slug isn't one). */
+const isClientGrant = (role: { isSystem: boolean; slug: string }) => role.isSystem && role.slug === CLIENT_REVIEWER;
+
 /**
  * Can someone other than `userId` approve this brand's content? A one-person business can't follow a four-eyes rule.
- * ponytail: checks every workspace member one by one; fine for small teams, a joined query if workspaces get large.
+ * A client reviewer's approval doesn't count here: staff can still approve their own post when only the client could.
+ * Three queries, computed in memory. ponytail: reads every member of the workspace; a joined query if workspaces get large.
  */
 export async function hasOtherApprover(workspaceId: string, brandId: string, userId: string) {
-  const others = await prisma.workspaceMember.findMany({ where: { workspaceId, userId: { not: userId } }, select: { userId: true } });
-  for (const o of others) if ((await effectivePermissions(workspaceId, o.userId, brandId)).has("content.approve")) return true;
-  return false;
+  const [members, legacy, grants] = await Promise.all([
+    prisma.workspaceMember.findMany({ where: { workspaceId, userId: { not: userId } }, select: { userId: true, role: true, roleRef: { select: { permissions: true } } } }),
+    prisma.role.findMany({ where: { workspaceId, slug: { in: Object.values(LEGACY_ROLE_SLUG) } }, select: { slug: true, permissions: true } }),
+    prisma.brandMember.findMany({ where: { workspaceId, brandId, userId: { not: userId } }, select: { userId: true, role: { select: { isSystem: true, slug: true, permissions: true } } } }),
+  ]);
+  const legacyPerms = new Map(legacy.map((r) => [r.slug, r.permissions]));
+  const roleOf = (m: (typeof members)[number]) => m.roleRef?.permissions ?? legacyPerms.get(LEGACY_ROLE_SLUG[m.role]);
+  if (members.some((m) => roleOf(m)?.includes("content.approve"))) return true;
+  // As in effectivePermissions: a grant counts only for someone with a workspace role.
+  const withRole = new Set(members.filter((m) => roleOf(m)).map((m) => m.userId));
+  return grants.some((g) => withRole.has(g.userId) && !isClientGrant(g.role) && g.role.permissions.includes("content.approve"));
+}
+
+/** Does this person approve here only as the client (Client reviewer grant, no content.approve from their workspace role)? */
+export async function isClientReviewer(workspaceId: string, brandId: string, userId: string) {
+  const [found, grant] = await Promise.all([memberRole(workspaceId, userId), brandGrant(workspaceId, brandId, userId)]);
+  return !!grant && isClientGrant(grant.role) && !found?.role?.permissions.includes("content.approve");
 }
 
 export async function requirePermission(

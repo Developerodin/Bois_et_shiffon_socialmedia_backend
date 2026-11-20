@@ -7,7 +7,7 @@ type Params = { params: Promise<BrandRouteParams> };
 /** M02 Inbox: messaging accounts and their latest Instagram / Messenger conversations. */
 export async function GET(request: Request, context: Params) {
   try {
-    const scope = await authorizeBrandRoute(request, context.params, "brand.read");
+    const scope = await authorizeBrandRoute(request, context.params, "inbox.read");
     if (scope instanceof Response) return scope;
     return Response.json(await inbox(scope));
   } catch (error) {

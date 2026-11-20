@@ -35,7 +35,7 @@ const PER_WORKSPACE = { limit: 150, windowMs: 10 * 60_000 };
  */
 export async function POST(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
-    const scope = await authorizeBrandRoute(request, context.params, "brand.read");
+    const scope = await authorizeBrandRoute(request, context.params, "agents.read");
     if (scope instanceof Response) return scope;
     const body = Body.safeParse(await request.json().catch(() => null));
     if (!body.success) {
