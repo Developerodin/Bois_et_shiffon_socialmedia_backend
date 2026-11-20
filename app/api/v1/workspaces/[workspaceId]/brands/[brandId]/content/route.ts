@@ -33,13 +33,14 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     // Unscheduled first (a post just made in the app has no date yet), then by date.
     const orderBy: Prisma.ContentItemOrderByWithRelationInput[] = [{ scheduledFor: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }];
     // ponytail: open posts + 30 days of changes, 200 rows; past 200 open posts add from/to and filter params.
-    // Open posts are read first so a long history (undated, so sorted first) can never push upcoming posts out.
-    const openRows = await prisma.contentItem.findMany({ where: id ? { ...base, id } : { ...base, ...open }, orderBy, take: 200, include });
-    const recentRows = id || openRows.length >= 200
-      ? []
-      : await prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy, take: 200 - openRows.length, include });
+    // Both halves are read at once; open posts fill the 200 first, so a long history (undated, so sorted first) can never
+    // push upcoming posts out. Recent rows past what's left are dropped (at most 200 read for nothing).
+    const [openRows, recentRows] = await Promise.all([
+      prisma.contentItem.findMany({ where: id ? { ...base, id } : { ...base, ...open }, orderBy, take: 200, include }),
+      id ? [] : prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy, take: 200, include }),
+    ]);
     // Each half is sorted on its own; sort the whole once so the list keeps one order (undated first, then date, then creation).
-    const rows = [...openRows, ...recentRows].sort((a, b) => (a.scheduledFor?.getTime() ?? -Infinity) - (b.scheduledFor?.getTime() ?? -Infinity) || a.createdAt.getTime() - b.createdAt.getTime());
+    const rows = [...openRows, ...recentRows.slice(0, 200 - openRows.length)].sort((a, b) => (a.scheduledFor?.getTime() ?? -Infinity) - (b.scheduledFor?.getTime() ?? -Infinity) || a.createdAt.getTime() - b.createdAt.getTime());
     if (id && !rows.length) return problemResponse({ type: "https://api.brandpilot/errors/not-found", title: "Post not found", status: 404 });
     // The draft's pictures (photoKeys, the first is the cover), signed for an hour: Today, Calendar and the post show them.
     // A studio reel has no photoKeys: its first scene's photo stands in as the cover.

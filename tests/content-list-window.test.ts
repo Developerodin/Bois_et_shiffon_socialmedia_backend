@@ -81,6 +81,22 @@ describe("GET /content window", () => {
     expect(items.map((i: { id: string }) => i.id)).toEqual(["undatedPublished", "undated", "past", "future"]);
   });
 
+  it("reads the open and recent halves at once, not one after the other", async () => {
+    let running = 0, most = 0;
+    const plain = db.contentItem.findMany.getMockImplementation()!;
+    db.contentItem.findMany.mockImplementation(async (a: never) => {
+      most = Math.max(most, ++running);
+      await new Promise((r) => setTimeout(r, 5));
+      running--;
+      return plain(a);
+    });
+    db.rows.push(row("open", "PLANNED"), row("hist", "PUBLISHED"));
+    const { items } = await (await call()).json();
+    expect(items.map((i: { id: string }) => i.id).sort()).toEqual(["hist", "open"]);
+    expect(db.contentItem.findMany).toHaveBeenCalledTimes(2);
+    expect(most).toBe(2);
+  });
+
   it("fills the 200 rows with open posts when there are more, with no recent rows", async () => {
     for (let n = 0; n < 230; n++) db.rows.push(row(`o${n}`, "PLANNED", { scheduledFor: new Date(now + n * DAY) }));
     db.rows.push(row("hist", "PUBLISHED"));
