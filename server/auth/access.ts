@@ -2,7 +2,7 @@ import "server-only";
 import { BrandStatus } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { AccessDeniedError, BrandArchivedError } from "@/server/auth/errors";
-import { brandGrant, memberRole, permissionsOf } from "@/server/auth/permissions";
+import { brandGrant, isClientGrant, memberRole, permissionsOf } from "@/server/auth/permissions";
 
 export type BrandAccessOptions = {
   /** Allow read-style access when brand is archived (AT-024 history). */
@@ -74,5 +74,7 @@ export async function brandAccess(
     throw new AccessDeniedError("You don't have access to this project");
   }
 
-  return { brand, perms };
+  // Same test as isClientReviewer, from the reads above: approves only as the client, not through a workspace role.
+  const clientReviewer = !!grant && isClientGrant(grant.role) && !found.role?.permissions.includes("content.approve");
+  return { brand, perms, clientReviewer };
 }

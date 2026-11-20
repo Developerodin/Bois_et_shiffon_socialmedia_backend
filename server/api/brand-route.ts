@@ -27,7 +27,7 @@ export async function authorizeBrandRoute(
   }
   const { workspaceId, brandId } = await params;
   assertWorkspaceHeaderMatchesPath(workspaceId, request.headers.get("X-Workspace-Id"));
-  const { perms } = await brandAccess(workspaceId, brandId, userId);
+  const { perms, clientReviewer } = await brandAccess(workspaceId, brandId, userId);
   if (!perms.has(permission)) throw new AccessDeniedError(`Missing permission ${permission}`);
-  return { userId: userId, workspaceId, brandId };
+  return { userId: userId, workspaceId, brandId, perms, clientReviewer };
 }

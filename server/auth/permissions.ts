@@ -74,7 +74,7 @@ export function brandGrant(workspaceId: string, brandId: string, userId: string)
 }
 
 /** A project grant through the built-in Client reviewer role (a custom role that happens to use the slug isn't one). */
-const isClientGrant = (role: { isSystem: boolean; slug: string }) => role.isSystem && role.slug === CLIENT_REVIEWER;
+export const isClientGrant = (role: { isSystem: boolean; slug: string }) => role.isSystem && role.slug === CLIENT_REVIEWER;
 
 /**
  * Can someone other than `userId` approve this brand's content? A one-person business can't follow a four-eyes rule.

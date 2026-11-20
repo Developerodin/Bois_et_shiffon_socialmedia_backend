@@ -34,7 +34,7 @@ beforeEach(() => {
 
 describe("authorizeBrandRoute", () => {
   it("reads the member and the project grant once each", async () => {
-    await expect(authorizeBrandRoute(request(), params, "content.create")).resolves.toEqual({ userId: "u1", workspaceId: "w1", brandId: "b1" });
+    await expect(authorizeBrandRoute(request(), params, "content.create")).resolves.toMatchObject({ userId: "u1", workspaceId: "w1", brandId: "b1" });
     expect(m.db.workspaceMember.findUnique).toHaveBeenCalledTimes(1);
     expect(m.db.brandMember.findFirst).toHaveBeenCalledTimes(1);
     expect(m.db.brand.findFirst).toHaveBeenCalledTimes(1);
@@ -52,6 +52,37 @@ describe("authorizeBrandRoute", () => {
   it("counts a project grant's permissions", async () => {
     m.db.brandMember.findFirst.mockResolvedValue({ role: { permissions: ["content.approve"] } });
     await expect(authorizeBrandRoute(request(), params, "content.approve")).resolves.toBeTruthy();
+  });
+});
+
+describe("authorizeBrandRoute: what it hands back", () => {
+  const client = { role: { isSystem: true, slug: "client-reviewer", permissions: ["brand.read", "content.approve"] } };
+
+  it("returns the caller's permissions", async () => {
+    const scope = await authorizeBrandRoute(request(), params, "content.create");
+    if (scope instanceof Response) throw new Error("expected a scope");
+    expect([...scope.perms].sort()).toEqual(["brand.read", "content.create"]);
+  });
+
+  it("flags a client reviewer", async () => {
+    m.db.brandMember.findFirst.mockResolvedValue(client);
+    const scope = await authorizeBrandRoute(request(), params, "content.approve");
+    if (scope instanceof Response) throw new Error("expected a scope");
+    expect(scope.clientReviewer).toBe(true);
+  });
+
+  it("does not flag staff who also hold a client grant", async () => {
+    m.db.workspaceMember.findUnique.mockResolvedValue({ id: "m1", role: "MEMBER", roleRef: { permissions: ["brand.read", "content.approve"] } });
+    m.db.brandMember.findFirst.mockResolvedValue(client);
+    const scope = await authorizeBrandRoute(request(), params, "content.approve");
+    if (scope instanceof Response) throw new Error("expected a scope");
+    expect(scope.clientReviewer).toBe(false);
+  });
+
+  it("does not flag staff without a grant", async () => {
+    const scope = await authorizeBrandRoute(request(), params, "content.create");
+    if (scope instanceof Response) throw new Error("expected a scope");
+    expect(scope.clientReviewer).toBe(false);
   });
 });
 

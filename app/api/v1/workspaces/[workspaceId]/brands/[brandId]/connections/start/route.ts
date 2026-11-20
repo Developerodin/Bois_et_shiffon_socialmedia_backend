@@ -17,7 +17,7 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     if (!body.success) {
       return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 422 });
     }
-    const url = await startConnect({ ...scope, provider: body.data.provider, client: body.data.client });
+    const url = await startConnect({ workspaceId: scope.workspaceId, brandId: scope.brandId, userId: scope.userId, provider: body.data.provider, client: body.data.client });
     return Response.json({ url });
   } catch (error) {
     if (error instanceof ConnectionError) {
