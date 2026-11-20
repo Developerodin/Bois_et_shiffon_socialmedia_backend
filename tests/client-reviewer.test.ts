@@ -113,6 +113,18 @@ describe("Client reviewer role", () => {
     expect(inserted).toEqual([...role("client-reviewer").permissions]);
     expect(sql).toMatch(/SET "slug" = 'client-reviewer-custom'[\s\S]*WHERE "slug" = 'client-reviewer' AND NOT "isSystem"/);
   });
+
+  it("the migration gives agents.read only to custom roles that make posts or run agents, never to the renamed client reviewer", () => {
+    const dir = join(__dirname, "../prisma/migrations");
+    const sql = readFileSync(join(dir, readdirSync(dir).find((d) => d.endsWith("_client_reviewer"))!, "migration.sql"), "utf8");
+    const grants = sql.split(/;\s*/).filter((s) => /array_append\("permissions", 'agents\.read'\)/.test(s));
+    expect(grants).toHaveLength(1);
+    const where = grants[0]!.slice(grants[0]!.indexOf("WHERE"));
+    expect(where).toMatch(/NOT "isSystem"/);
+    expect(where).toMatch(/\('content\.create' = ANY\("permissions"\) OR 'agents\.run' = ANY\("permissions"\)\)/);
+    expect(where).toMatch(/"slug" NOT LIKE 'client-reviewer-custom%'/);
+    expect(where).not.toMatch(/'brand\.read'/);
+  });
 });
 
 describe("re-gated routes", () => {

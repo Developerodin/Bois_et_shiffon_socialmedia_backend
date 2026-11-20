@@ -18,9 +18,12 @@ WHERE NOT "isSystem" AND 'publish.execute' = ANY("permissions") AND NOT ('inbox.
 UPDATE "Role" SET "permissions" = array_append("permissions", 'content.download'), "updatedAt" = now()
 WHERE ('publish.execute' = ANY("permissions") OR 'content.approve' = ANY("permissions")) AND NOT ('content.download' = ANY("permissions"));
 
--- 4. Custom roles that could open the brand keep the assistant and Translate (now behind agents.read).
+-- 4. Custom roles that make posts or run agents keep the assistant and Translate (now behind agents.read). Not every
+--    role with brand.read: agents.read also opens the Agent log, the runs lists, context docs and AI spend. Never the
+--    custom role renamed in step 1 (it was meant as a client reviewer).
 UPDATE "Role" SET "permissions" = array_append("permissions", 'agents.read'), "updatedAt" = now()
-WHERE NOT "isSystem" AND 'brand.read' = ANY("permissions") AND NOT ('agents.read' = ANY("permissions"));
+WHERE NOT "isSystem" AND ('content.create' = ANY("permissions") OR 'agents.run' = ANY("permissions"))
+  AND "slug" NOT LIKE 'client-reviewer-custom%' AND NOT ('agents.read' = ANY("permissions"));
 
 -- 5. The "Client reviewer" project role for every existing workspace.
 INSERT INTO "Role" ("id", "workspaceId", "slug", "name", "description", "isSystem", "scope", "permissions", "createdAt", "updatedAt")
