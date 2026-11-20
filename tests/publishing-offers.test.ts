@@ -21,7 +21,7 @@ const enqueueJob = vi.hoisted(() => vi.fn());
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/catalog/linked", () => ({ linkedProducts: linked }));
-vi.mock("@/server/auth/permissions", () => ({ requirePermission: vi.fn(async () => undefined), hasOtherApprover: vi.fn(async () => true), isClientReviewer: vi.fn(async () => false) }));
+vi.mock("@/server/auth/permissions", () => ({ requirePermission: vi.fn(async () => undefined), hasOtherApprover: vi.fn(async () => true) }));
 vi.mock("@/server/services/connections", () => ({ accessToken: vi.fn(), markReconnect: vi.fn(), ReconnectNeeded: class extends Error {} }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob }));
 
@@ -46,8 +46,8 @@ const item = (status: string, over: object = {}) => ({ id: "i1", ...scope, chann
 const approval = (over: object = {}) => ({ id: "d1", verdict: "APPROVED", contentVersionId: "v2", packageHash: packageHash({ id: "i1", channel: "INSTAGRAM_POST" }, latest), productOverride: null, ...over });
 const product = (id: string, name: string, state: string) => ({ id, row: state === "gone" ? null : { id }, group: [], name, state });
 const campaigns = (...rows: object[]) => db.brand.findFirst.mockResolvedValue({ profile: { timeZone: TZ }, campaigns: rows });
-const approveAnyway = () => decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "APPROVED", note: "Fine, it ran", override: true });
-const approve = () => decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "APPROVED" });
+const approveAnyway = () => decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "APPROVED", note: "Fine, it ran", override: true, byClient: false });
+const approve = () => decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "APPROVED", byClient: false });
 const schedule = (runAt: Date) => schedulePublication({ ...scope, userId: "boss", itemId: "i1", version: 2, connectionId: "conn", imageUrl: "https://x.test/a.jpg", runAt });
 
 beforeEach(() => {

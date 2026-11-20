@@ -25,7 +25,7 @@ import { PRESENTER_MODEL } from "@/server/reels/router";
 import { packageHash } from "@/server/services/publishing";
 import { registerPostLink, reelDetail, sendReel } from "@/server/reels/service";
 
-const scope = { workspaceId: "w1", brandId: "b1", userId: "u1" };
+const scope = { workspaceId: "w1", brandId: "b1", userId: "u1", clientReviewer: false };
 const reel = (status: string, body: object = { videoKey: "w1/b1/r.mp4" }) => {
   m.tx.contentItem.findFirst.mockResolvedValue({ id: "i1", channel: "INSTAGRAM_REEL", status, studio: true, versions: [{ id: "v1", version: 3, body }] });
   // Downloading approved this version, so its approval holds.
@@ -63,7 +63,7 @@ describe("registerPostLink", () => {
   it("records an approved reel's post link as published", async () => {
     reel("APPROVED");
     await registerPostLink(scope, "i1", "https://www.instagram.com/reel/abc/");
-    expect(m.tx.contentItem.update).toHaveBeenCalledWith({ where: { id: "i1" }, data: { status: "PUBLISHED", byHand: false, postUrl: "https://www.instagram.com/reel/abc/" } });
+    expect(m.tx.contentItem.update).toHaveBeenCalledWith({ where: { id: "i1" }, data: { status: "PUBLISHED", byHand: false, scheduledFor: expect.any(Date), postUrl: "https://www.instagram.com/reel/abc/" } });
   });
 });
 
@@ -75,6 +75,17 @@ describe("sendReel", () => {
     reel("APPROVED");
     await sendReel(scope, "i1", 3);
     expect(m.decide).toHaveBeenCalledTimes(1);
+  });
+
+  it("reel approval by a client is marked as client", async () => {
+    reel("AWAITING_APPROVAL");
+    await sendReel({ ...scope, clientReviewer: true }, "i1", 3);
+    reel("AWAITING_APPROVAL");
+    await sendReel(scope, "i1", 3);
+    expect(m.decide.mock.calls.map((c) => c[0])).toEqual([
+      { workspaceId: "w1", brandId: "b1", userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED", byClient: true },
+      { workspaceId: "w1", brandId: "b1", userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED", byClient: false },
+    ]);
   });
 
   it("names the download after the first 8 characters of the reel id", async () => {

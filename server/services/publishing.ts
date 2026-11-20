@@ -6,7 +6,7 @@ import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefuse
 import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { CAPTION_LIMITS, safeHttpUrl } from "@/shared";
-import { hasOtherApprover, isClientReviewer, requirePermission } from "@/server/auth/permissions";
+import { hasOtherApprover, requirePermission } from "@/server/auth/permissions";
 import { linkedProducts } from "@/server/catalog/linked";
 import { gateIssues, linkedIds, ProductOverride, snapshotOf } from "@/server/content/product-checks";
 import { campaignsById } from "@/server/catalog/campaigns";
@@ -354,7 +354,12 @@ export async function decide(input: {
   /** CHANGES_REQUESTED: the Creator may link another product instead. */
   switchProducts?: boolean;
   /**
-   * Runs once the decision is known to be possible (a send-back: also within the person's send-back limit), before
+   * Decided as the client (the route's `clientReviewer`): kept on the decision (the writer labels a client's note,
+   * examples skip a client's approvals, the apps say "by client"), and limits what they can send back.
+   */
+  byClient: boolean;
+  /**
+   * Runs once the decision is known to be possible (a send-back: also within the send-back limits), before
    * anything is written: the route spends the workspace's post-AI allowance here, so a made-up id or a send-back that
    * can't happen spends nothing. Throw to refuse.
    */
@@ -376,13 +381,19 @@ export async function decide(input: {
   // draft (and its author) is the same one.
   const ownDraft = input.verdict === "APPROVED" && preLatest.createdBy === input.userId && !pre.item.studio;
   const otherApprover = ownDraft ? await hasOtherApprover(input.workspaceId, input.brandId, input.userId) : false;
-  // Each send-back starts a free rewrite: capped per person, so one reviewer can't loop the writer.
-  if (input.verdict === "CHANGES_REQUESTED" && !(await hitRateLimit(`send-back:${input.userId}`, 30, 3_600_000)).allowed) {
-    throw new PublishingError("You've sent back a lot of posts this hour. Try again later.", 429);
+  // Each send-back starts a free rewrite: capped per brand for its clients (so they can't use up the workspace's post-AI
+  // allowance), then per person, so one reviewer can't loop the writer. One after the other: a send-back refused by the
+  // first cap spends nothing from the second.
+  if (input.verdict === "CHANGES_REQUESTED") {
+    if (input.byClient && !(await hitRateLimit(`client-send-back:${input.workspaceId}:${input.brandId}`, 20, 86_400_000)).allowed) {
+      throw new PublishingError("This project's clients have sent back a lot of posts today. Try again tomorrow.", 429);
+    }
+    if (!(await hitRateLimit(`send-back:${input.userId}`, 30, 3_600_000)).allowed) {
+      throw new PublishingError("You've sent back a lot of posts this hour. Try again later.", 429);
+    }
   }
   await input.beforeWrite?.(pre.item);
-  // Kept on the decision: the writer labels a client's note, examples skip a client's approvals, the apps say "by client".
-  const byClient = await isClientReviewer(input.workspaceId, input.brandId, input.userId);
+  const { byClient } = input;
   return prisma.$transaction(async (tx) => {
     await lock(tx, input.itemId);
     const { item, latest: loaded } = await loadItem(input, input.itemId, tx);
@@ -453,14 +464,18 @@ export async function decide(input: {
 async function assertDecidable<V extends { id: string; version: number; body: unknown }>(
   item: { id: string; status: string; channel: string },
   latest: V | null,
-  input: { version: number; verdict: ApprovalVerdict; override?: boolean },
+  input: { version: number; verdict: ApprovalVerdict; override?: boolean; userId: string; byClient: boolean },
   db: Prisma.TransactionClient = prisma,
 ) {
   if (!latest || latest.version !== input.version) throw new PublishingError("A newer draft exists. Review the latest version.");
   // An approved, not yet scheduled post can still be approved anyway or sent back (a product sold out since),
-  // as long as its approval holds.
+  // as long as its approval holds. A client sends back only what they approved themselves, not the team's approval.
   const afterApproval = item.status === "APPROVED" && (input.override || input.verdict === "CHANGES_REQUESTED");
-  if (afterApproval && !(await currentApproval(item.id, latest, item.channel, db))) throw new PublishingError("The approval no longer holds. Review the latest version.");
+  if (afterApproval) {
+    const approval = await currentApproval(item.id, latest, item.channel, db);
+    if (!approval) throw new PublishingError("The approval no longer holds. Review the latest version.");
+    if (input.byClient && !(approval.byClient && approval.userId === input.userId)) throw new PublishingError("This post was approved by the team. Ask them to reopen it.", 409);
+  }
   if (item.status !== "AWAITING_APPROVAL" && !afterApproval) throw new PublishingError("This post isn't waiting for approval");
   return latest;
 }

@@ -91,7 +91,7 @@ async function seed(status: string) {
     const overall = overallOf(results);
     await prisma.qualityCheck.create({ data: { contentVersionId: version.id, overall, results: results as unknown as Prisma.InputJsonValue } });
     await prisma.contentItem.update({ where: { id: item.id }, data: { status: overall === "BLOCKER" ? "DRAFT_REVIEW" : "AWAITING_APPROVAL" } });
-    if (status === "approved") await decide({ ...scope, userId: approver.id, itemId: item.id, version: saved.version, verdict: "APPROVED" });
+    if (status === "approved") await decide({ ...scope, userId: approver.id, itemId: item.id, version: saved.version, verdict: "APPROVED", byClient: false });
 
     console.log(JSON.stringify({ itemId: item.id, workspaceId: ws.id, brandId: brand.id, status: overall === "BLOCKER" ? "DRAFT_REVIEW" : status === "approved" ? "APPROVED" : "AWAITING_APPROVAL", check: overall }));
   } catch (e) {

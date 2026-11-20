@@ -34,10 +34,11 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const orderBy: Prisma.ContentItemOrderByWithRelationInput[] = [{ scheduledFor: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }];
     // ponytail: open posts + 30 days of changes, 200 rows; past 200 open posts add from/to and filter params.
     // Both halves are read at once; open posts fill the 200 first, so a long history (undated, so sorted first) can never
-    // push upcoming posts out. Recent rows past what's left are dropped (at most 200 read for nothing).
+    // push upcoming posts out. The recent half is read newest change first, so rows past what's left drop the oldest
+    // (at most 200 read for nothing).
     const [openRows, recentRows] = await Promise.all([
       prisma.contentItem.findMany({ where: id ? { ...base, id } : { ...base, ...open }, orderBy, take: 200, include }),
-      id ? [] : prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy, take: 200, include }),
+      id ? [] : prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy: [{ updatedAt: "desc" }], take: 200, include }),
     ]);
     // Each half is sorted on its own; sort the whole once so the list keeps one order (undated first, then date, then creation).
     // Two undated posts give -Infinity - -Infinity = NaN, which is falsy, so `||` falls through to creation time: keep

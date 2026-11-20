@@ -53,7 +53,7 @@ vi.mock("@/server/db/prisma", () => {
 });
 vi.mock("@/server/catalog/linked", () => ({ linkedProducts: vi.fn(async () => []) }));
 vi.mock("@/server/catalog/campaigns", () => ({ campaignsById: vi.fn(async () => ({ campaigns: new Map(), timeZone: "UTC" })) }));
-vi.mock("@/server/auth/permissions", () => ({ requirePermission: vi.fn(), hasOtherApprover: vi.fn(async () => true), isClientReviewer: vi.fn(async () => false), effectivePermissions: vi.fn(async () => new Set(["publish.execute"])) }));
+vi.mock("@/server/auth/permissions", () => ({ requirePermission: vi.fn(), hasOtherApprover: vi.fn(async () => true), effectivePermissions: vi.fn(async () => new Set(["publish.execute"])) }));
 vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>()), hitRateLimit: vi.fn(async () => ({ allowed: true, count: 1 })) }));
 vi.mock("@/server/services/connections", () => ({ accessToken: vi.fn(async () => "tok"), markReconnect: m.markReconnect, ReconnectNeeded: class extends Error {} }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn(async (job: Row) => { db.jobs.push(job); }) }));
@@ -488,7 +488,7 @@ describe("post the rest and mark as done", () => {
 describe("leaving APPROVED", () => {
   it("a send-back of an approved by-hand story ends Post by hand", async () => {
     seed(4, { byHand: true, scheduledFor: new Date("2026-11-20T10:00:00Z") });
-    await decide({ ...scope, userId: "boss", itemId: "s1", version: 1, verdict: "CHANGES_REQUESTED", note: "Frame 2 is blurry" });
+    await decide({ ...scope, userId: "boss", itemId: "s1", version: 1, verdict: "CHANGES_REQUESTED", note: "Frame 2 is blurry", byClient: false });
     expect(item()).toMatchObject({ status: "DRAFT_REVIEW", byHand: false });
   });
 });

@@ -18,7 +18,7 @@ const db = vi.hoisted(() => {
 vi.mock("@/server/db/prisma", () => ({ prisma: db.prisma }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn(async () => ({})) }));
 const approvers = vi.hoisted(() => ({ other: true }));
-vi.mock("@/server/auth/permissions", () => ({ hasOtherApprover: vi.fn(async () => approvers.other), isClientReviewer: vi.fn(async () => false) }));
+vi.mock("@/server/auth/permissions", () => ({ hasOtherApprover: vi.fn(async () => approvers.other) }));
 
 import { hasOtherApprover } from "@/server/auth/permissions";
 import { creatorAgent } from "@/server/agents/definitions/creator";
@@ -137,19 +137,19 @@ describe("studio reels in the publishing flow", () => {
   it("studio author may approve", async () => {
     withLatest(item(), version());
     db.tx.approvalDecision.create.mockResolvedValue({ packageHash: "h" });
-    await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" })).resolves.toBeTruthy();
+    await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED", byClient: false })).resolves.toBeTruthy();
   });
 
   it("non-studio author still may not", async () => {
     withLatest(item({ channel: "INSTAGRAM_POST", studio: false }), version());
-    await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" })).rejects.toThrow(/someone else/);
+    await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED", byClient: false })).rejects.toThrow(/someone else/);
   });
 
   it("non-studio author may when nobody else can approve", async () => {
     approvers.other = false;
     withLatest(item({ channel: "INSTAGRAM_POST", studio: false }), version());
     db.tx.approvalDecision.create.mockResolvedValue({ packageHash: "h" });
-    await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" })).resolves.toBeTruthy();
+    await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED", byClient: false })).resolves.toBeTruthy();
     approvers.other = true;
   });
 
@@ -157,12 +157,12 @@ describe("studio reels in the publishing flow", () => {
     db.tx.approvalDecision.create.mockResolvedValue({ packageHash: "h" });
     vi.mocked(hasOtherApprover).mockClear();
     withLatest(item({ channel: "INSTAGRAM_POST", studio: false }), version({ createdBy: "agent" }));
-    await decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" });
+    await decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED", byClient: false });
     withLatest(item(), version());
-    await decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" });
+    await decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED", byClient: false });
     expect(hasOtherApprover).not.toHaveBeenCalled();
     withLatest(item({ channel: "INSTAGRAM_POST", studio: false }), version());
-    await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" })).rejects.toThrow(/someone else/);
+    await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED", byClient: false })).rejects.toThrow(/someone else/);
     expect(hasOtherApprover).toHaveBeenCalledTimes(1);
   });
 

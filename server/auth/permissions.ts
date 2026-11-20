@@ -95,12 +95,6 @@ export async function hasOtherApprover(workspaceId: string, brandId: string, use
   return grants.some((g) => withRole.has(g.userId) && !isClientGrant(g.role) && g.role.permissions.includes("content.approve"));
 }
 
-/** Does this person approve here only as the client (Client reviewer grant, no content.approve from their workspace role)? */
-export async function isClientReviewer(workspaceId: string, brandId: string, userId: string) {
-  const [found, grant] = await Promise.all([memberRole(workspaceId, userId), brandGrant(workspaceId, brandId, userId)]);
-  return !!grant && isClientGrant(grant.role) && !found?.role?.permissions.includes("content.approve");
-}
-
 export async function requirePermission(
   workspaceId: string,
   userId: string,

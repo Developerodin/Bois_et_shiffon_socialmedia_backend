@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
   workspaceMember: { findMany: vi.fn(), findUnique: vi.fn() },
@@ -219,21 +219,23 @@ describe("a client reviewer's decisions", () => {
   const approve = () => contentPost(req("POST", { action: "decide", version: 2, verdict: "APPROVED" }), { params });
 
   it("reviewer approval never auto-publishes", async () => {
-    m.authorize.mockResolvedValue(scope);
+    m.authorize.mockResolvedValue({ ...scope, clientReviewer: true });
     caller([], clientRole);
     m.decide.mockResolvedValueOnce({ id: "d1", byClient: true });
     expect((await approve()).status).toBe(200);
     expect(m.decide).toHaveBeenCalledTimes(1);
+    expect(m.decide.mock.calls[0]![0]).toMatchObject({ byClient: true });
     expect(m.autoPublish).not.toHaveBeenCalled();
   });
 
   it("staff approval still auto-publishes, also staff holding a client grant on top of a workspace approver role", async () => {
-    m.authorize.mockResolvedValue(scope);
+    m.authorize.mockResolvedValue({ ...scope, clientReviewer: false });
     caller([], { isSystem: true, slug: "approver", permissions: [...role("approver").permissions] });
     await approve();
     caller(["content.approve"], clientRole);
     await approve();
     expect(m.autoPublish).toHaveBeenCalledTimes(2);
+    expect(m.decide.mock.calls.map((c) => (c[0] as { byClient: boolean }).byClient)).toEqual([false, false]);
   });
 
   const waiting = { id: "i1", status: "AWAITING_APPROVAL", channel: "INSTAGRAM_POST", studio: false, versions: [{ id: "v2", version: 2, body: {}, createdBy: "u7", checks: [] }] };
@@ -241,12 +243,12 @@ describe("a client reviewer's decisions", () => {
   it("send-backs are rate-limited: the 31st in an hour by one person is a 429", async () => {
     const { decide } = await vi.importActual<typeof import("@/server/services/publishing")>("@/server/services/publishing");
     db.contentItem.findFirst.mockResolvedValue(waiting);
-    const sendBack = () => decide({ ...scope, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Shorter please" });
+    const sendBack = () => decide({ ...scope, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Shorter please", byClient: false });
     for (let i = 0; i < 30; i++) await sendBack();
     await expect(sendBack()).rejects.toMatchObject({ status: 429 });
     expect(db.$transaction).toHaveBeenCalledTimes(30);
     // Someone else still can.
-    await expect(decide({ ...scope, userId: "u9", itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "x" })).resolves.toBeTruthy();
+    await expect(decide({ ...scope, userId: "u9", itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "x", byClient: false })).resolves.toBeTruthy();
   });
 
   it("send-backs on a made-up post are 404s and spend neither the send-back limit nor the workspace's post-AI allowance", async () => {
@@ -280,7 +282,7 @@ describe("a client reviewer's decisions", () => {
     expect(m.buckets.get("post-ai:w1")).toBe(1);
   });
 
-  it("decide records whether the decision was made as a client reviewer", async () => {
+  it("decide records whether the decision was made as a client reviewer, as the route says", async () => {
     const { decide } = await vi.importActual<typeof import("@/server/services/publishing")>("@/server/services/publishing");
     db.contentItem.findFirst.mockResolvedValue(waiting);
     let written: unknown;
@@ -293,13 +295,101 @@ describe("a client reviewer's decisions", () => {
       };
       return fn(tx);
     }) as never);
-    caller([], clientRole);
-    await decide({ ...scope, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Shorter" });
+    await decide({ ...scope, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Shorter", byClient: true });
     expect(written).toMatchObject({ byClient: true });
-    caller(["content.approve"], clientRole);
-    await decide({ ...scope, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Shorter" });
+    await decide({ ...scope, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Shorter", byClient: false });
     expect(written).toMatchObject({ byClient: false });
     db.$transaction.mockImplementation(async () => ({ id: "d1" }));
+  });
+
+  describe("client send-backs of approved posts", () => {
+    const approved = { ...waiting, status: "APPROVED", scheduledFor: null };
+    const hash = packageHash({ id: "i1", channel: "INSTAGRAM_POST" }, { id: "v2", body: {} });
+    const approval = (over: object) => ({ verdict: "APPROVED", contentVersionId: "v2", packageHash: hash, byClient: false, userId: "u5", ...over });
+    const staff = approval({});
+    const own = approval({ byClient: true, userId: "u1" });
+    /** The transaction sees `inside` as the current approval (the post may have been re-approved since the first check). */
+    function tx(inside: object, item: object = approved) {
+      const written: unknown[] = [];
+      db.$transaction.mockImplementation((async (fn: (tx: unknown) => Promise<unknown>) =>
+        fn({
+          $executeRaw: async () => 0,
+          contentItem: { findFirst: async () => item, update: async () => ({}) },
+          approvalDecision: { findFirst: async () => inside, create: async ({ data }: { data: object }) => (written.push(data), { id: "d1", ...data }) },
+          auditEvent: { create: async () => ({}) },
+        })) as never);
+      return written;
+    }
+    const sendBack = async (byClient: boolean, userId = "u1", beforeWrite = vi.fn(async () => undefined)) => {
+      const { decide } = await vi.importActual<typeof import("@/server/services/publishing")>("@/server/services/publishing");
+      return decide({ ...scope, userId, itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Not this one", byClient, beforeWrite });
+    };
+    const TEAM = "This post was approved by the team. Ask them to reopen it.";
+    beforeEach(() => db.contentItem.findFirst.mockResolvedValue(approved));
+    afterEach(() => db.$transaction.mockImplementation(async () => ({ id: "d1" })));
+
+    it("client send-back of an approved post needs their own approval", async () => {
+      const ai = vi.fn(async () => undefined);
+      // Approved by the team: refused before anything is spent.
+      db.approvalDecision.findFirst.mockResolvedValue(staff);
+      let written = tx(staff);
+      await expect(sendBack(true, "u1", ai)).rejects.toMatchObject({ status: 409, message: TEAM });
+      expect(db.$transaction).not.toHaveBeenCalled();
+      expect(ai).not.toHaveBeenCalled();
+      expect(m.buckets.size).toBe(0);
+      // Approved by another client: still not theirs.
+      db.approvalDecision.findFirst.mockResolvedValue(approval({ byClient: true, userId: "u8" }));
+      await expect(sendBack(true)).rejects.toMatchObject({ status: 409, message: TEAM });
+      // Their own approval: they can reopen it.
+      db.approvalDecision.findFirst.mockResolvedValue(own);
+      written = tx(own);
+      await expect(sendBack(true, "u1", ai)).resolves.toMatchObject({ byClient: true, verdict: "CHANGES_REQUESTED" });
+      expect(written).toHaveLength(1);
+      expect(ai).toHaveBeenCalledTimes(1);
+      // The team re-approved it between the first check and the write: refused inside the transaction, nothing written.
+      written = tx(staff);
+      await expect(sendBack(true)).rejects.toMatchObject({ status: 409, message: TEAM });
+      expect(written).toHaveLength(0);
+      // Staff can send back anyone's approval.
+      db.approvalDecision.findFirst.mockResolvedValue(own);
+      written = tx(own);
+      await expect(sendBack(false, "u5")).resolves.toMatchObject({ byClient: false });
+    });
+
+    it("a client can't send back a scheduled post", async () => {
+      db.approvalDecision.findFirst.mockResolvedValue(own);
+      db.contentItem.findFirst.mockResolvedValue({ ...approved, status: "SCHEDULED", scheduledFor: new Date(Date.now() + 86_400_000) });
+      await expect(sendBack(true)).rejects.toMatchObject({ status: 409 });
+      expect(db.$transaction).not.toHaveBeenCalled();
+      expect(m.buckets.size).toBe(0);
+    });
+
+    it("client send-backs are capped per brand", async () => {
+      db.contentItem.findFirst.mockResolvedValue(waiting);
+      tx({}, waiting);
+      // 20 a day across the brand's clients, whoever sends them.
+      for (let i = 0; i < 20; i++) await sendBack(true, `c${i % 3}`);
+      const ai = vi.fn(async () => undefined);
+      await expect(sendBack(true, "c9", ai)).rejects.toMatchObject({ status: 429 });
+      expect(ai).not.toHaveBeenCalled();
+      expect(m.buckets.has("send-back:c9")).toBe(false);
+      expect(m.buckets.get("client-send-back:w1:b1")).toBe(21);
+      // Staff aren't counted against it.
+      await expect(sendBack(false, "u5")).resolves.toBeTruthy();
+      expect(m.buckets.get("client-send-back:w1:b1")).toBe(21);
+      // Another brand's clients have their own cap.
+      const { decide } = await vi.importActual<typeof import("@/server/services/publishing")>("@/server/services/publishing");
+      await expect(decide({ ...scope, brandId: "b2", userId: "c1", itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "x", byClient: true })).resolves.toBeTruthy();
+    });
+
+    it("refused client send-backs spend no cap", async () => {
+      db.approvalDecision.findFirst.mockResolvedValue(staff);
+      for (let i = 0; i < 25; i++) await expect(sendBack(true)).rejects.toMatchObject({ status: 409 });
+      expect(m.buckets.has("client-send-back:w1:b1")).toBe(false);
+      db.contentItem.findFirst.mockResolvedValue(waiting);
+      tx({}, waiting);
+      await expect(sendBack(true)).resolves.toBeTruthy();
+    });
   });
 
   it("a client reviewer's change request reaches the writer as labelled data", () => {

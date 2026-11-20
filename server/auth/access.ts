@@ -74,7 +74,7 @@ export async function brandAccess(
     throw new AccessDeniedError("You don't have access to this project");
   }
 
-  // Same test as isClientReviewer, from the reads above: approves only as the client, not through a workspace role.
+  // Approves here only as the client (Client reviewer grant, no content.approve from their workspace role).
   const clientReviewer = !!grant && isClientGrant(grant.role) && !found.role?.permissions.includes("content.approve");
   return { brand, perms, clientReviewer };
 }

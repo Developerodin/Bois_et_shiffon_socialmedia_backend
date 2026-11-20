@@ -140,6 +140,18 @@ describe("registerManualPost on any channel", () => {
     expect(db.accountReads).toEqual([false]);
     expect(item()).toMatchObject({ status: "PUBLISHED", postUrl: "https://www.instagram.com/stories/shop/1234567890/" });
   });
+  it.each([
+    ["future", new Date(Date.now() + 5 * 86_400_000)],
+    ["past", new Date(Date.now() - 5 * 86_400_000)],
+    ["no", null],
+  ])("posting by hand dates the post (%s date before)", async (_label, scheduledFor) => {
+    seed({ scheduledFor });
+    const before = Date.now();
+    await registerManualPost(user, "p1", undefined);
+    const at = (item().scheduledFor as Date).getTime();
+    expect(at).toBeGreaterThanOrEqual(before);
+    expect(at).toBeLessThanOrEqual(Date.now());
+  });
   it("is 404 for another brand's post", async () => {
     seed({ brandId: "other" });
     await expect(registerManualPost(user, "p1", undefined)).rejects.toMatchObject({ status: 404 });

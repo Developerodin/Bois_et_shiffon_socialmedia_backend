@@ -22,7 +22,7 @@ const accessToken = vi.hoisted(() => vi.fn());
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/catalog/linked", () => ({ linkedProducts: linked }));
-vi.mock("@/server/auth/permissions", () => ({ requirePermission, hasOtherApprover: vi.fn(async () => true), isClientReviewer: vi.fn(async () => false), effectivePermissions: vi.fn(async () => new Set()) }));
+vi.mock("@/server/auth/permissions", () => ({ requirePermission, hasOtherApprover: vi.fn(async () => true), effectivePermissions: vi.fn(async () => new Set()) }));
 vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>()), hitRateLimit: vi.fn(async () => ({ allowed: true, count: 1 })) }));
 vi.mock("@/server/services/connections", () => ({ accessToken, markReconnect: vi.fn(), ReconnectNeeded: class extends Error {} }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn() }));
@@ -40,7 +40,7 @@ const latest = { id: "v2", version: 2, body: { caption: "Our Milo sofa", product
 const item = (status: string) => ({ id: "i1", ...scope, channel: "INSTAGRAM_POST", status, studio: false, title: "Milo", productIds: ["p1", "p2"], versions: [latest] });
 const approval = (over: object = {}) => ({ id: "d1", verdict: "APPROVED", contentVersionId: "v2", packageHash: packageHash({ id: "i1", channel: "INSTAGRAM_POST" }, latest), productOverride: null, ...over });
 const product = (id: string, name: string, state: string) => ({ id, row: state === "gone" ? null : { id }, group: [], name, state });
-const approveAnyway = () => decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "APPROVED", note: "Back in stock Monday", override: true });
+const approveAnyway = () => decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "APPROVED", note: "Back in stock Monday", override: true, byClient: false });
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -58,7 +58,7 @@ describe("decide with a product override", () => {
 
   it("a plain approval is refused while a product is out of stock", async () => {
     db.contentItem.findFirst.mockResolvedValue(item("AWAITING_APPROVAL"));
-    await expect(decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "APPROVED" })).rejects.toThrow("Milo Sofa is out of stock");
+    await expect(decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "APPROVED", byClient: false })).rejects.toThrow("Milo Sofa is out of stock");
   });
 
   it("on an approved, not scheduled post, adds a decision with the products and their states, and audits it", async () => {
@@ -99,7 +99,7 @@ describe("decide with a product override", () => {
   it("CHANGES_REQUESTED on an approved post sends it back with the switch flag", async () => {
     db.contentItem.findFirst.mockResolvedValue(item("APPROVED"));
     db.approvalDecision.findFirst.mockResolvedValue(approval());
-    await decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Milo Sofa is out of stock", switchProducts: true });
+    await decide({ ...scope, userId: "boss", itemId: "i1", version: 2, verdict: "CHANGES_REQUESTED", note: "Milo Sofa is out of stock", switchProducts: true, byClient: false });
     expect(db.approvalDecision.create).toHaveBeenCalledWith({ data: expect.objectContaining({ verdict: "CHANGES_REQUESTED", switchProducts: true }) });
     expect(db.contentItem.update).toHaveBeenCalledWith({ where: { id: "i1" }, data: { status: "DRAFT_REVIEW" } });
   });

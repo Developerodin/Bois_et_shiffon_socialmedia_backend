@@ -32,10 +32,11 @@ const call = (qs = "") => GET(new Request(`http://x/content${qs}`), { params: Pr
 
 beforeEach(() => {
   db.rows = [];
-  db.contentItem.findMany.mockImplementation(async (a: { where: Where; take?: number }) =>
+  // Honours the one other order the route asks for: newest change first.
+  db.contentItem.findMany.mockImplementation(async (a: { where: Where; take?: number; orderBy?: object[] }) =>
     db.rows
       .filter((r) => matches(r, a.where))
-      .sort((x, y) => time(x) - time(y) || x.createdAt.getTime() - y.createdAt.getTime())
+      .sort(JSON.stringify(a.orderBy?.[0]) === '{"updatedAt":"desc"}' ? (x, y) => y.updatedAt.getTime() - x.updatedAt.getTime() : (x, y) => time(x) - time(y) || x.createdAt.getTime() - y.createdAt.getTime())
       .slice(0, a.take)
       .map((r) => ({ ...r, opportunity: null, versions: [], decisions: [], publications: [] })),
   );
@@ -100,6 +101,19 @@ describe("GET /content window", () => {
     expect(items.map((i: { id: string }) => i.id).sort()).toEqual(["hist", "open"]);
     expect(db.contentItem.findMany).toHaveBeenCalledTimes(2);
     expect(most).toBe(2);
+  });
+
+  it("recent history keeps the newest at the ceiling", async () => {
+    // Made in the order of their last change: by creation the oldest changes would come first.
+    for (let n = 0; n < 250; n++) db.rows.push(row(`h${n}`, "PUBLISHED", { createdAt: new Date(now - 60 * DAY + n), updatedAt: new Date(now - 20 * DAY + n * 60_000) }));
+    db.rows.push(row("open", "PLANNED"));
+    const { items } = await (await call()).json();
+    const ids = new Set(items.map((i: { id: string }) => i.id));
+    expect(items).toHaveLength(200);
+    expect(ids.has("open")).toBe(true);
+    // The 199 most recently changed (h51..h249) stay; the oldest changes drop.
+    for (let n = 51; n < 250; n++) expect(ids.has(`h${n}`)).toBe(true);
+    expect(ids.has("h50")).toBe(false);
   });
 
   it("fills the 200 rows with open posts when there are more, with no recent rows", async () => {

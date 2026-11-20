@@ -84,7 +84,8 @@ export async function registerManualPost(scope: { workspaceId: string; brandId: 
     }
     const live = await tx.publicationAttempt.findFirst({ where: { contentItemId: item.id, status: { in: ["SCHEDULED", "PUBLISHING", "PENDING_VERIFY", "PARTIAL"] } }, select: { id: true } });
     if (live) throw new PublishingError(`This ${noun} is being posted or its result is still unconfirmed. Settle that first.`, 409, code("story.cancelScheduledFirst"));
-    await tx.contentItem.update({ where: { id: itemId }, data: { status: "PUBLISHED", byHand: false, ...(link ? { postUrl: link } : {}) } });
+    // Dated when it went out, so the calendar and history show it on that day (not its old plan, or nowhere).
+    await tx.contentItem.update({ where: { id: itemId }, data: { status: "PUBLISHED", byHand: false, scheduledFor: new Date(), ...(link ? { postUrl: link } : {}) } });
     await tx.auditEvent.create({
       data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "content.publish.manual", entityType: "ContentItem", entityId: itemId, metadata: story ? { kind: "story", ...(link ? { url: link } : {}) } : { channel: item.channel, ...(link ? { url: link } : {}) } },
     });

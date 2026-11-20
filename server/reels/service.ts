@@ -306,12 +306,12 @@ export async function editPlan(scope: Scope, itemId: string, input: { version: n
 }
 
 /** Download = the approval act (studio reels: the maker may approve). Approves once; later sends reuse it. */
-export async function sendReel(scope: Scope, itemId: string, version: number) {
+export async function sendReel(scope: Scope & { clientReviewer: boolean }, itemId: string, version: number) {
   const { item, latest } = await loadReel(scope, itemId);
   const body = latest?.body as { videoKey?: string } | undefined;
   if (!latest || latest.version !== version) throw new PublishingError("A newer version exists. Review it first.");
   if (!body?.videoKey) throw new PublishingError("This reel has no video yet", 400);
-  if (item.status === "AWAITING_APPROVAL") await decide({ ...scope, itemId, version, verdict: "APPROVED" });
+  if (item.status === "AWAITING_APPROVAL") await decide({ workspaceId: scope.workspaceId, brandId: scope.brandId, userId: scope.userId, itemId, version, verdict: "APPROVED", byClient: scope.clientReviewer });
   else if (!["APPROVED", "SCHEDULED", "PUBLISHED"].includes(item.status)) throw new PublishingError("The checks are still running. Try again in a moment.", 409);
   return { videoUrl: await signedMediaUrl(body.videoKey, 3600), downloadUrl: await signedMediaUrl(body.videoKey, 3600, `reel-${itemId.slice(0, 8)}.mp4`) };
 }

@@ -54,11 +54,11 @@ async function main() {
     // 1. Approval rules
     const a = await prisma.contentItem.create({ data: { workspaceId: ws.id, brandId: brand.id, title: "A", channel: "PINTEREST_PIN", status: "AWAITING_APPROVAL" } });
     await addVersion(a.id, 1, user.id);
-    await refused(decide({ ...scope, itemId: a.id, version: 1, verdict: "APPROVED" }), /someone else/);
-    await refused(decide({ ...scope, itemId: a.id, version: 1, verdict: "CHANGES_REQUESTED" }), /what needs to change/);
+    await refused(decide({ ...scope, itemId: a.id, version: 1, verdict: "APPROVED", byClient: false }), /someone else/);
+    await refused(decide({ ...scope, itemId: a.id, version: 1, verdict: "CHANGES_REQUESTED", byClient: false }), /what needs to change/);
     await addVersion(a.id, 2, "agent");
-    await refused(decide({ ...scope, itemId: a.id, version: 1, verdict: "APPROVED" }), /newer draft/);
-    await decide({ ...scope, itemId: a.id, version: 2, verdict: "APPROVED" });
+    await refused(decide({ ...scope, itemId: a.id, version: 1, verdict: "APPROVED", byClient: false }), /newer draft/);
+    await decide({ ...scope, itemId: a.id, version: 2, verdict: "APPROVED", byClient: false });
     assert.equal(await status(a.id), "APPROVED");
     console.log("1 creator can't approve own draft, notes required for changes, approval binds to the latest version ✓");
 
@@ -83,7 +83,7 @@ async function main() {
 
     // 4. Unknown outcome → PENDING_VERIFY, never retried; a person settles it, then retry is allowed
     const b = await newItem("B");
-    await decide({ ...scope, itemId: b.id, version: 1, verdict: "APPROVED" });
+    await decide({ ...scope, itemId: b.id, version: 1, verdict: "APPROVED", byClient: false });
     await schedulePublication({ ...scope, itemId: b.id, version: 1, ...pin });
     platform = { status: 503, body: { message: "unavailable" } };
     await executePublication({ attemptId: (await attempt(b.id)).id });
@@ -115,7 +115,7 @@ async function main() {
     console.log("6 a new draft after scheduling voids the approval; nothing is posted ✓");
 
     // 7. Cancel a future post
-    await decide({ ...scope, itemId: b.id, version: 2, verdict: "APPROVED" });
+    await decide({ ...scope, itemId: b.id, version: 2, verdict: "APPROVED", byClient: false });
     await schedulePublication({ ...scope, itemId: b.id, version: 2, ...pin, runAt: new Date(Date.now() + 86_400_000) });
     await settlePublication({ ...scope, attemptId: (await attempt(b.id)).id, action: "cancel" });
     assert.equal((await attempt(b.id)).status, "CANCELLED");
@@ -138,7 +138,7 @@ async function main() {
     await refused(saveDraft({ ...scope, itemId: b.id, version: 3, body: draft }), /Nothing changed/);
     await prisma.qualityCheck.create({ data: { contentVersionId: v3.id, overall: "PASS", results: [] } });
     await prisma.contentItem.update({ where: { id: b.id }, data: { status: "AWAITING_APPROVAL" } });
-    await refused(decide({ ...scope, itemId: b.id, version: 3, verdict: "APPROVED" }), /someone else/);
+    await refused(decide({ ...scope, itemId: b.id, version: 3, verdict: "APPROVED", byClient: false }), /someone else/);
     console.log("8 a person's edit is a new version that voids approval; stale, empty, no-op and scheduled edits refused ✓");
 
     // 9. "Request changes" reaches the Creator with the note; agents skip posts that changed under them.
@@ -149,7 +149,7 @@ async function main() {
       log: async () => {},
       ai: { generateObject: async (i) => { prompts.push(i.prompt); return i.mock!; } },
     };
-    await decide({ ...scope, itemId: b.id, version: 3, verdict: "CHANGES_REQUESTED", note: "Mention the oil finish" });
+    await decide({ ...scope, itemId: b.id, version: 3, verdict: "CHANGES_REQUESTED", note: "Mention the oil finish", byClient: false });
     await creatorAgent.run(ctx, {});
     assert.match(prompts.at(-1)!, /Mention the oil finish/);
     assert.equal((await prisma.contentVersion.count({ where: { contentItemId: b.id } })), 4);
@@ -173,7 +173,7 @@ async function main() {
     });
     const approvedPin = async (title: string) => {
       const it = await newItem(title);
-      await decide({ ...scope, itemId: it.id, version: 1, verdict: "APPROVED" });
+      await decide({ ...scope, itemId: it.id, version: 1, verdict: "APPROVED", byClient: false });
       return it;
     };
     platform = { status: 200, body: { id: "pin-3" } };
