@@ -14,8 +14,9 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get("limit") ?? "100", 10) || 100, 1), 200);
 
     const where = { workspaceId: scope.workspaceId, brandId: scope.brandId };
-    // ?runId= reads one run's events, oldest first (a run's log is short; no cursor). ?agentKey= (with runId) also
-    // requires the events to be that agent's, so a run id from another agent's page shows nothing.
+    // ?runId= reads one run's events, oldest first (a run's log is short; no cursor). ?agentKey= is read only with
+    // runId (ignored without it); it must be a known agent key (else 400) and narrows that run's events to that
+    // agent's, so a run id from another agent's page shows nothing.
     const runId = url.searchParams.get("runId");
     if (runId !== null && !RUN_ID_PATTERN.test(runId)) return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 400, detail: "runId: up to 40 letters, digits, - or _" });
     const agentKey = url.searchParams.get("agentKey");

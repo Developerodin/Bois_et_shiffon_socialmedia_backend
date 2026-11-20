@@ -59,7 +59,12 @@ export async function redactStoryChecks(opts: { apply: boolean; workspaceId?: st
     }
   } finally {
     for (const [workspaceId, count] of rewritten) {
-      await prisma.auditEvent.create({ data: { workspaceId, action: "story-checks.redacted", entityType: "Workspace", entityId: workspaceId, metadata: { count } } });
+      // Its own try/catch: a failed audit write is logged and never replaces the error that got us here.
+      try {
+        await prisma.auditEvent.create({ data: { workspaceId, action: "story-checks.redacted", entityType: "Workspace", entityId: workspaceId, metadata: { count } } });
+      } catch (e) {
+        log(`Could not write the audit event for workspace ${workspaceId} (${count} rewritten): ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
   log(`${opts.apply ? "Done" : "Dry run (pass --apply to write)"}: ${counts.scanned} story checks read, ${counts.withEmail} with an email in the rights note, ${counts.updated} rewritten, ${counts.skipped} skipped (email in the note but the body is not a story body).`);

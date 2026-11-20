@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { isHiddenName } from "@/server/content/person-name";
+import { isHiddenName, TEAM_MEMBER } from "@/server/content/person-name";
 import { PublishingError } from "@/server/services/publishing";
 
 export const STORY_LIMITS = { frames: [3, 5], maxFrames: 5, label: 30, headline: 60, body: 120, cta: 40, composition: 100, clipSeconds: 15, link: 2000 } as const;
@@ -65,6 +65,9 @@ export function storySlides(body: Pick<StoryBody, "frames" | "cta">): string[] {
 /** The story check row that says who confirmed each frame's rights (stories/checks.ts). */
 export const ASSET_RIGHTS = "Asset rights";
 
+/** TEAM_MEMBER inside a sentence ("Confirmed by a team member"). */
+const MID_SENTENCE_TEAM_MEMBER = TEAM_MEMBER.toLowerCase();
+
 type Rights = { kind: string; by?: string; name?: string };
 
 /**
@@ -76,7 +79,8 @@ export function rightsLines(frames: { rights?: Rights }[], nameOf: (r: Rights) =
     const r = f.rights;
     if (!r) return null;
     const name = nameOf(r)?.trim();
-    const who = r.kind === "owned" ? "Brand's own" : `Confirmed by ${isHiddenName(name) ? "a team member" : name}`;
+    // ponytail: "Confirmed by X; …" is the note format both here and in revealRightsNote's regex: change them together.
+    const who = r.kind === "owned" ? "Brand's own" : `Confirmed by ${isHiddenName(name) ? MID_SENTENCE_TEAM_MEMBER : name}`;
     return `Frame ${i + 1}: ${who}`;
   });
 }
@@ -86,9 +90,16 @@ export function rightsLines(frames: { rights?: Rights }[], nameOf: (r: Rights) =
  * project.members.manage, and for the AI. `body` is the checked version's. Other rows, and non-story checks, as they are.
  */
 export function hideRightsNote<R>(results: R, body: unknown): R {
-  if (!isStoryBody(body) || !Array.isArray(results)) return results;
-  const note = rightsLines(body.frames, () => undefined).join("; ");
-  return results.map((r: { check?: unknown; status?: unknown }) => (r?.check === ASSET_RIGHTS && r.status === "pass" ? { ...r, note } : r)) as R;
+  if (!Array.isArray(results)) return results;
+  const note = isStoryBody(body) ? rightsLines(body.frames, () => undefined).join("; ") : null;
+  return results.map((r: { check?: unknown; status?: unknown; note?: unknown }) => {
+    if (r?.check !== ASSET_RIGHTS || r.status !== "pass") return r;
+    if (note !== null) return { ...r, note };
+    // Not a story body (nothing to rebuild from): reword only the names that hold an email.
+    return typeof r.note === "string" && r.note.includes("@")
+      ? { ...r, note: r.note.replace(/Confirmed by ([^;]+)/g, (m, n: string) => (n.includes("@") ? `Confirmed by ${MID_SENTENCE_TEAM_MEMBER}` : m)) }
+      : r;
+  }) as R;
 }
 
 /**
@@ -102,12 +113,12 @@ export function hideRightsNames<T>(body: T): T {
 }
 
 /** An older body or note may hold a whole email as the name: only its local part goes out, to anyone (API_CONTRACTS: the whole email is never returned). */
-const localPart = (name: string) => (name.includes("@") ? name.split("@")[0]!.trim() || "a team member" : name);
+const localPart = (name: string) => (name.includes("@") ? name.split("@")[0]!.trim() || MID_SENTENCE_TEAM_MEMBER : name);
 
 /** What people who manage members get of a story body: as stored, except a rights name that is an email shows its local part. A copy. */
 export function revealRightsNames<T>(body: T): T {
   if (!isStoryBody(body)) return body;
-  return { ...body, frames: body.frames.map((f) => (f.rights?.kind === "confirmed" ? { ...f, rights: { ...f.rights, name: localPart(f.rights.name) } } : f)) } as T;
+  return { ...body, frames: body.frames.map((f) => (f.rights?.kind === "confirmed" ? { ...f, rights: { ...f.rights, name: typeof f.rights.name === "string" ? localPart(f.rights.name) : TEAM_MEMBER } } : f)) } as T;
 }
 
 /** The same for a check's "Asset rights" pass note: "Confirmed by ana@x.com" reads "Confirmed by ana". */

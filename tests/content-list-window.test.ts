@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = { id: string; workspaceId: string; brandId: string; status: string; channel: string; scheduledFor: Date | null; ownerId?: string | null; createdAt: Date; updatedAt: Date };
-const db = vi.hoisted(() => ({ perms: new Set<string>(["brand.read"]), rows: [] as Row[], contentItem: { findMany: vi.fn() }, user: { findMany: vi.fn(async (_a: object) => [] as { id: string; name: string | null; email: string }[]) }, publicationAttempt: { findMany: vi.fn(async () => []) }, job: { findMany: vi.fn(async () => []) } }));
+const db = vi.hoisted(() => ({ perms: new Set<string>(["brand.read"]), rows: [] as Row[], contentItem: { findMany: vi.fn() }, users: [] as { id: string; name: string | null; email: string }[], user: { findMany: vi.fn() }, publicationAttempt: { findMany: vi.fn(async () => []) }, job: { findMany: vi.fn(async () => []) } }));
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: async () => ({ userId: "u1", workspaceId: "w1", brandId: "b1", perms: db.perms }) }));
@@ -32,6 +32,7 @@ const call = (qs = "") => GET(new Request(`http://x/content${qs}`), { params: Pr
 
 beforeEach(() => {
   db.rows = [];
+  db.users = [];
   db.user.findMany.mockClear();
   // Honours the one other order the route asks for: newest change first.
   db.contentItem.findMany.mockImplementation(async (a: { where: Where; take?: number; orderBy?: object[] }) =>
@@ -39,7 +40,7 @@ beforeEach(() => {
       .filter((r) => matches(r, a.where))
       .sort(JSON.stringify(a.orderBy?.[0]) === '{"updatedAt":"desc"}' ? (x, y) => y.updatedAt.getTime() - x.updatedAt.getTime() : (x, y) => time(x) - time(y) || x.createdAt.getTime() - y.createdAt.getTime())
       .slice(0, a.take)
-      .map((r) => ({ ...r, opportunity: null, versions: [], decisions: [], publications: [] })),
+      .map((r) => ({ ...r, owner: db.users.find((u) => u.id === r.ownerId) ?? null, opportunity: null, versions: [], decisions: [], publications: [] })),
   );
 });
 
@@ -53,25 +54,17 @@ describe("GET /content window", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("the list reads owners once, over the distinct owner ids", async () => {
-    db.rows.push(row("a", "SCHEDULED", { ownerId: "u2" }), row("b", "SCHEDULED", { ownerId: "u2" }), row("c", "SCHEDULED", { ownerId: "u3" }), row("d", "SCHEDULED"));
-    db.user.findMany.mockResolvedValue([{ id: "u2", name: "Bea", email: "bea@x.com" }]);
+  it("the owner comes with the item read: no separate read of users", async () => {
+    db.rows.push(row("a", "SCHEDULED", { ownerId: "u2" }), row("c", "SCHEDULED", { ownerId: "u3" }), row("d", "SCHEDULED"));
+    db.users = [{ id: "u2", name: "Bea", email: "bea@x.com" }];
     const { items } = await (await call()).json();
-    expect(db.user.findMany).toHaveBeenCalledTimes(1);
-    const arg = db.user.findMany.mock.calls[0]![0] as { where: { id: { in: string[] } }; select: object };
-    expect(arg.where.id.in.sort()).toEqual(["u2", "u3"]);
-    expect(arg.select).toEqual({ id: true, name: true, email: true });
+    expect(db.user.findMany).not.toHaveBeenCalled();
     const owner = (id: string) => items.find((i: { id: string }) => i.id === id).owner;
     expect(owner("a")).toEqual({ id: "u2", name: "Bea" });
     expect(owner("c")).toBeNull();
     expect(owner("d")).toBeNull();
-    for (const c of db.contentItem.findMany.mock.calls) expect((c[0] as { include: object }).include).not.toHaveProperty("owner");
-  });
-
-  it("reads no owners when no post has one", async () => {
-    db.rows.push(row("a", "SCHEDULED"));
-    await call();
-    expect(db.user.findMany).not.toHaveBeenCalled();
+    // Both halves ask for the owner with only the fields needed to name them.
+    for (const c of db.contentItem.findMany.mock.calls) expect((c[0] as { include: { owner: object } }).include.owner).toEqual({ select: { id: true, name: true, email: true } });
   });
 
   it("opens one post by id even when it is 90 days old", async () => {
@@ -85,7 +78,7 @@ describe("GET /content window", () => {
     db.rows.push(row("named", "PLANNED"), row("unnamed", "PLANNED", { createdAt: new Date(now) }), row("nobody", "PLANNED", { createdAt: new Date(now + 1) }));
     db.rows[0]!.ownerId = "u1";
     db.rows[1]!.ownerId = "u2";
-    db.user.findMany.mockResolvedValue([{ id: "u1", name: "Ann", email: "ann@x.com" }, { id: "u2", name: null, email: "bo@x.com" }]);
+    db.users = [{ id: "u1", name: "Ann", email: "ann@x.com" }, { id: "u2", name: null, email: "bo@x.com" }];
     const { items } = await (await call()).json();
     expect(items.map((i: { owner: unknown }) => i.owner)).toEqual([{ id: "u1", name: "Ann" }, { id: "u2", name: "A team member" }, null]);
     expect(JSON.stringify(items)).not.toMatch(/@|"bo"/);
@@ -125,7 +118,7 @@ describe("GET /content window", () => {
     expect(most).toBe(2);
   });
 
-  it("reads story attempts, in-flight renders and owners at once, after the rows and not one by one", async () => {
+  it("reads story attempts and in-flight renders at once, after the rows and not one by one", async () => {
     let running = 0, most = 0;
     const slow = (value: unknown) => async () => {
       most = Math.max(most, ++running);
@@ -135,13 +128,13 @@ describe("GET /content window", () => {
     };
     db.publicationAttempt.findMany.mockImplementation(slow([]) as never);
     db.job.findMany.mockImplementation(slow([]) as never);
-    db.user.findMany.mockImplementation(slow([{ id: "u2", name: "Bea", email: "bea@x.com" }]) as never);
+    db.users = [{ id: "u2", name: "Bea", email: "bea@x.com" }];
     db.rows.push(row("s1", "PLANNED", { channel: "INSTAGRAM_STORY", ownerId: "u2" }));
     const { items } = await (await call()).json();
     expect(items[0].owner).toEqual({ id: "u2", name: "Bea" });
     expect(db.publicationAttempt.findMany).toHaveBeenCalledTimes(1);
     expect(db.job.findMany).toHaveBeenCalledTimes(1);
-    expect(most).toBe(3);
+    expect(most).toBe(2);
     db.publicationAttempt.findMany.mockImplementation(async () => []);
     db.job.findMany.mockImplementation(async () => []);
   });

@@ -23,8 +23,10 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     // Spreading `open` after `base` replaces base.status safely (open never holds CANCELLED); ?id= of a cancelled post is a 404 on purpose.
     const base = { workspaceId: scope.workspaceId, brandId: scope.brandId, status: { not: "CANCELLED" as const } };
     const [open, recent] = contentWindow(new Date()).OR;
+    // The owner joins the item read: a separate read after the rows would add a round trip for a brand with posts and no stories.
     const include = {
       opportunity: { select: { title: true } },
+      owner: { select: { id: true, name: true, email: true } },
       versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } },
       decisions: { orderBy: { createdAt: "desc" }, take: 1, select: { verdict: true, note: true, contentVersionId: true } },
       publications: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, error: true } },
@@ -57,18 +59,15 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const storyIds = rows.filter((r) => r.channel === "INSTAGRAM_STORY").map((r) => r.id);
     // Stories whose frames are being prepared (a first save has no version until its render ends). One read of the
     // brand's in-flight renders, matched here. ponytail: fine while renders in flight are few; filter by item in SQL if not.
-    // Owners by one read of the distinct ids, not a join on each half. The three reads are independent: run them together.
-    const ownerIds = [...new Set(rows.flatMap((r) => (r.ownerId ? [r.ownerId] : [])))];
-    const [openAttempts, renders, ownerRows] = await Promise.all([
+    // The two reads are independent: run them together.
+    const [openAttempts, renders] = await Promise.all([
       storyIds.length
         ? prisma.publicationAttempt.findMany({ where: { contentItemId: { in: storyIds }, status: { in: ["PARTIAL", "PENDING_VERIFY"] } }, select: { contentItemId: true, status: true } })
         : [],
       storyIds.length
         ? prisma.job.findMany({ where: { type: STORY_RENDER_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["PENDING", "RUNNING"] } }, select: { payload: true } })
         : [],
-      ownerIds.length ? prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, name: true, email: true } }) : [],
     ]);
-    const owners = new Map(ownerRows.map((u) => [u.id, u]));
     const rendering = new Set(renders.map((j) => (j.payload as { itemId?: unknown } | null)?.itemId));
     const story = async (r: (typeof rows)[number]) => {
       if (r.channel !== "INSTAGRAM_STORY") return {};
@@ -88,10 +87,10 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       return !c ? null : { ...c, results: reveal ? revealRightsNote(c.results) : hideRightsNote(c.results, v.body) };
     };
     return Response.json({
-      items: rows.map(({ versions, decisions, publications, ...i }, n) => ({
+      items: rows.map(({ versions, decisions, publications, owner, ...i }, n) => ({
         ...i,
         // Named as the owners list names them, never the email itself.
-        owner: owners.has(i.ownerId ?? "") ? { id: i.ownerId, name: personName(owners.get(i.ownerId!)!, { reveal }) } : null,
+        owner: owner ? { id: owner.id, name: personName(owner, { reveal }) } : null,
         ...stories[n],
         // The last publish went wrong: "FAILED" (back to Approved, reason in publishError) or "CHECK" (may have posted).
         publishIssue: publications[0]?.status === "PENDING_VERIFY" ? "CHECK" : publications[0]?.status === "FAILED" && i.status === "APPROVED" ? "FAILED" : null,

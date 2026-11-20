@@ -75,4 +75,17 @@ describe("redact-story-checks", () => {
     expect(await redactStoryChecks({ apply: true }, silent)).toEqual({ scanned: 2, withEmail: 0, updated: 0, skipped: 1 });
     expect(db.auditEvent.create).not.toHaveBeenCalled();
   });
+
+  it("a failed audit write is logged and does not mask the original error or stop the other workspaces", async () => {
+    db.rows = [leaked, { ...leaked, id: "q5", version: { ...leaked.version, item: { workspaceId: "w2" } } }];
+    const lines: string[] = [];
+    db.auditEvent.create.mockRejectedValueOnce(new Error("audit down"));
+    await redactStoryChecks({ apply: true }, (l) => lines.push(l));
+    expect(db.auditEvent.create).toHaveBeenCalledTimes(2);
+    expect(lines.some((l) => l.includes("w1") && l.includes("audit down"))).toBe(true);
+    // The page itself fails after rewriting: the original error is what surfaces, audit failing too.
+    db.qualityCheck.findMany.mockResolvedValueOnce([leaked, ...Array.from({ length: 499 }, (_, i) => clean(`b${i}`))]).mockRejectedValueOnce(new Error("page 2 failed"));
+    db.auditEvent.create.mockRejectedValueOnce(new Error("audit down"));
+    await expect(redactStoryChecks({ apply: true }, silent)).rejects.toThrow("page 2 failed");
+  });
 });

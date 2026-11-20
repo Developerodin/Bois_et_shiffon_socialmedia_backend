@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { parseStoryInput, storySlides, isStoryBody, revealRightsNames, revealRightsNote } from "@/server/stories/body";
+import { parseStoryInput, storySlides, isStoryBody, revealRightsNames, revealRightsNote, hideRightsNote } from "@/server/stories/body";
 
 vi.mock("@/server/db/prisma", () => ({ prisma: {} }));
 
@@ -54,5 +54,18 @@ describe("reveal helpers: no whole email goes out, even to people who manage mem
   it("rewrites email names in the Asset rights pass note only", () => {
     const results = [{ check: "Frames", status: "pass", note: "a@b.c" }, { check: "Asset rights", status: "pass", note: "Frame 1: Confirmed by zoe@x.com; Frame 2: Confirmed by Yan; Frame 3: Brand's own" }, { check: "Asset rights", status: "blocker", note: "q@x.com" }];
     expect(revealRightsNote(results).map((r) => r.note)).toEqual(["a@b.c", "Frame 1: Confirmed by zoe; Frame 2: Confirmed by Yan; Frame 3: Brand's own", "q@x.com"]);
+  });
+  it("a rights entry with no name (or a non-string one) reads as a team member, not an error", () => {
+    const frame = (rights: object) => ({ label: "", headline: "", body: "", rights });
+    const odd = { ...body, frames: [frame({ kind: "confirmed", by: "u1" }), frame({ kind: "confirmed", by: "u2", name: 7 })] };
+    expect(revealRightsNames(odd).frames.map((f) => (f.rights as { name?: unknown }).name)).toEqual(["A team member", "A team member"]);
+  });
+  it("hideRightsNote with a body that is not a story body still rewords an email in a passing rights note", () => {
+    const results = [{ check: "Asset rights", status: "pass", note: "Frame 1: Confirmed by zoe@x.com; Frame 2: Confirmed by Yan" }, { check: "Frames", status: "pass", note: "a@b.c" }];
+    const out = hideRightsNote(results, { caption: "post" });
+    expect(out.map((r) => r.note)).toEqual(["Frame 1: Confirmed by a team member; Frame 2: Confirmed by Yan", "a@b.c"]);
+    // No email: left as it is.
+    const plain = [{ check: "Asset rights", status: "pass", note: "Frame 1: Confirmed by Yan" }];
+    expect(hideRightsNote(plain, null)).toEqual(plain);
   });
 });

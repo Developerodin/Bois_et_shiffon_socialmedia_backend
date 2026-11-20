@@ -453,7 +453,7 @@ The tables above are the original design; the built routes live under `/api/v1/w
 | GET | `connections` | any of `CONNECTIONS_READ` | `inbox.read`, `publish.execute`, `integrations.manage` (`shared/permissions.ts`). |
 | GET | `/workspaces/:workspaceId/credits?history=1` | `members.read` | The ledger lines need `members.read`; without it the call is refused. |
 | GET | `agents` | `agents.read` | `{ agents: [{ key, name, description, enabled, lastRun }] }`; `lastRun` is the agent's newest run `{ id, status, startedAt, finishedAt, error }` (`error` only when FAILED, up to 300 chars) or null. One query, not every run. |
-| GET | `agent-events` | `agents.read` | `?after=<id>&limit=` as before. New `?runId=<id>` (`[A-Za-z0-9_-]{1,40}`, else 400) returns that run's events oldest first, up to 200; `after` and `limit` are ignored. Events carry `runId`. |
+| GET | `agent-events` | `agents.read` | `?after=<id>&limit=` as before. New `?runId=<id>` (`[A-Za-z0-9_-]{1,40}`, else 400) returns that run's events oldest first, up to 200; `after` and `limit` are ignored. Events carry `runId`. `agentKey=<key>` is read only together with `runId`: it must be a known agent key (else 400) and narrows that run's events to that agent's; without `runId` it is ignored. |
 
 New permission keys: `inbox.read` (customer inbox and Google reviews; Owner, Admin, Project admin, Manager, Approver and
 custom roles with `publish.execute`) and `content.download` (CSV exports). New system project role `client-reviewer`:
