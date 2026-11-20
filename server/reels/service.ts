@@ -346,7 +346,7 @@ export async function recheckQuality(scope: Omit<Scope, "userId">, itemId: strin
 }
 
 /** After a manual post: the link the person pasted back, so the reel's results can be followed. */
-export const registerPostLink = (scope: Scope, itemId: string, url: string) => registerManualPost(scope, itemId, url);
+export const registerPostLink = (scope: Scope, itemId: string, url: string) => registerManualPost(scope, itemId, url, { studioOnly: true });
 
 // ponytail: scans the brand's content items (no studio index); add @@index([workspaceId, brandId, studio, createdAt]) if a brand passes a few thousand.
 export async function listReels(scope: Omit<Scope, "userId">) {

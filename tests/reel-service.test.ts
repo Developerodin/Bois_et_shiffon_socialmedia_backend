@@ -53,6 +53,13 @@ describe("registerPostLink", () => {
     await expect(registerPostLink(scope, "i1", "https://www.instagram.com/reel/abc/")).rejects.toThrow(/scheduled/);
   });
 
+  it("is a 404 for a post that isn't a studio reel", async () => {
+    reel("APPROVED");
+    m.tx.contentItem.findFirst.mockResolvedValue({ id: "i1", channel: "INSTAGRAM_POST", status: "APPROVED", studio: false, versions: [{ id: "v1", version: 3, body: {} }] });
+    await expect(registerPostLink(scope, "i1", "https://www.instagram.com/p/abc/")).rejects.toMatchObject({ status: 404 });
+    expect(m.tx.contentItem.update).not.toHaveBeenCalled();
+  });
+
   it("records an approved reel's post link as published", async () => {
     reel("APPROVED");
     await registerPostLink(scope, "i1", "https://www.instagram.com/reel/abc/");

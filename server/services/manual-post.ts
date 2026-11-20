@@ -8,8 +8,10 @@ const NAME = "[A-Za-z0-9._-]{1,100}";
 const ID = "[A-Za-z0-9_-]{1,100}";
 
 /**
- * The one place that says which addresses count as a post's link: https only, no login details or port, a host from the
- * channel's list, a path of the channel's own post shape. Every pattern is anchored and has no nested repeats.
+ * Which addresses count as a post's link, per channel: https only, no login details or port, a host from the channel's
+ * list, a path of the channel's own post shape. Every pattern is anchored and has no nested repeats. Stories are not in
+ * this table: a story's link (and its own length cap) is checked by checkStoryLink in stories/by-hand.ts, which also
+ * matches it against the brand's Instagram account.
  */
 const LINKS: Partial<Record<ContentChannel, { host: RegExp; path: RegExp; hint: string }>> = {
   INSTAGRAM_POST: { host: /^(www\.)?instagram\.com$/, path: new RegExp(`^/(reel|reels|p)/${ID}/?$`), hint: "instagram.com/p/…" },
@@ -44,8 +46,9 @@ export function postLinkFor(channel: ContentChannel, url: string): string | null
  * Someone posted an approved post by hand and says so. Any channel: it must still be approved with its approval holding,
  * no attempt may be live, and (except a studio reel, approved when downloaded) no product or offer issue may refuse it.
  * The link is optional, except a studio reel's (its results are followed from it). A story's is checked by checkStoryLink.
+ * `studioOnly`: the Reels module's call, which only knows studio reels (anything else is a 404 there).
  */
-export async function registerManualPost(scope: { workspaceId: string; brandId: string; userId: string }, itemId: string, url: string | undefined) {
+export async function registerManualPost(scope: { workspaceId: string; brandId: string; userId: string }, itemId: string, url: string | undefined, opts: { studioOnly?: boolean } = {}) {
   const raw = url?.trim();
   // A story's link is checked against the brand's Instagram account before the transaction: it reads with the global
   // client, which must never wait inside a transaction holding the pool's connection. A post's channel never changes.
@@ -59,6 +62,7 @@ export async function registerManualPost(scope: { workspaceId: string; brandId: 
       include: { versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } } },
     });
     if (!item) throw new PublishingError("Post not found", 404);
+    if (opts.studioOnly && !item.studio) throw new PublishingError("Reel not found", 404);
     const story = item.channel === "INSTAGRAM_STORY";
     const code = (c: string) => (story ? c : undefined);
     const noun = story ? "story" : item.studio ? "reel" : "post";
