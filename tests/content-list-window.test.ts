@@ -9,7 +9,7 @@ vi.mock("@/server/agents/engine", () => ({ startAgentRun: vi.fn() }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
 vi.mock("@/server/services/publishing", () => ({ createPost: vi.fn(), ownMediaKey: () => true, postAiAllowed: vi.fn(), PublishingError: class extends Error {} }));
 vi.mock("@/server/storage/media", () => ({ signedMediaUrl: vi.fn() }));
-vi.mock("@/server/stories/service", () => ({ coverUrl: vi.fn(), createStory: vi.fn(), failStoryStart: vi.fn(), STORY_RENDER_JOB: "story.render", STORY_START_NOTE: "", storyForRequest: vi.fn(), storyTab: vi.fn() }));
+vi.mock("@/server/stories/service", () => ({ coverUrl: vi.fn(), createStory: vi.fn(), failStoryStart: vi.fn(), STORY_RENDER_JOB: "story.render", STORY_START_NOTE: "", itemForRequest: vi.fn(), storyTab: vi.fn() }));
 
 import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/route";
 

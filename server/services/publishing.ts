@@ -164,29 +164,51 @@ export async function postAiAllowed(workspaceId: string) {
   return (await hitRateLimit(`post-ai:${workspaceId}`, 60, 86_400_000)).allowed;
 }
 
-export type NewPost = { channel: "INSTAGRAM_POST" | "INSTAGRAM_CAROUSEL"; goal: keyof typeof APP_GOALS; product: { title: string; photoKey: string }; direction?: string };
+export type NewPost = { channel: "INSTAGRAM_POST" | "INSTAGRAM_CAROUSEL"; goal: keyof typeof APP_GOALS; product: { title: string; photoKey: string }; direction?: string; requestId?: string };
+
+/**
+ * The post or story already made for this request id in this brand, if it still exists. Posts and stories share one
+ * request-id space per brand; `channel` narrows it (a story lookup never finds a post's id, and the other way round).
+ */
+export async function itemForRequest(scope: { workspaceId: string; brandId: string }, requestId: string, opts: { channel?: ContentChannel | ContentChannel[] } = {}, db: Prisma.TransactionClient | typeof prisma = prisma) {
+  const { channel } = opts;
+  return db.contentItem.findFirst({
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, ...(channel ? { channel: Array.isArray(channel) ? { in: channel } : channel } : {}), brief: { path: ["requestId"], equals: requestId } },
+    select: { id: true },
+  });
+}
+
+/** One lock per (brand, request id) for new posts and stories alike, so two requests with one id at once make one item. */
+export const requestLockKey = (scope: { workspaceId: string; brandId: string }, requestId: string) => `content-request:${scope.workspaceId}:${scope.brandId}:${requestId}`;
 
 /**
  * A post the person asks for in the app (P06): its brief is what they chose, so it skips the Brief writer;
  * the caller starts the Creator on it. Unscheduled until they pick a slot (P05).
+ * With a requestId (the web sends one), a repeat gets the same post back (`repeated`) and the caller starts no second run.
+ * A post deleted since is gone: its requestId then makes a new one. Without a requestId nothing is looked up (the app's old behaviour).
  */
-export async function createPost(input: { workspaceId: string; brandId: string; userId: string } & NewPost) {
+export async function createPost(input: { workspaceId: string; brandId: string; userId: string } & NewPost): Promise<{ item: { id: string }; repeated: boolean }> {
   if (!ownMediaKey(input, input.product.photoKey)) throw new PublishingError("Unknown image", 400);
   const direction = input.direction?.trim() || null;
   const productIds = await productIdsForPhoto(input.workspaceId, input.brandId, input.product.photoKey);
   // A special offer links the live offer covering the photo's product, so the Creator gets its facts.
   const campaignId = input.goal === "specialOffer" ? await liveOfferFor(input, productIds) : null;
   return prisma.$transaction(async (tx) => {
+    if (input.requestId) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${requestLockKey(input, input.requestId)}))`;
+      const existing = await itemForRequest(input, input.requestId, { channel: ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL"] }, tx);
+      if (existing) return { item: existing, repeated: true };
+    }
     const item = await tx.contentItem.create({
       data: {
         workspaceId: input.workspaceId, brandId: input.brandId, title: input.product.title, channel: input.channel, status: "BRIEF_READY", productIds, campaignId, ownerId: input.userId,
-        brief: { goal: APP_GOALS[input.goal], products: [input.product.title], keyMessage: direction ?? "", angle: input.goal, photoKeys: [input.product.photoKey] },
+        brief: { goal: APP_GOALS[input.goal], products: [input.product.title], keyMessage: direction ?? "", angle: input.goal, photoKeys: [input.product.photoKey], ...(input.requestId ? { requestId: input.requestId } : {}) },
       },
     });
     await tx.auditEvent.create({
-      data: { workspaceId: input.workspaceId, brandId: input.brandId, actorUserId: input.userId, action: "content.create", entityType: "ContentItem", entityId: item.id, metadata: { channel: input.channel, goal: input.goal } },
+      data: { workspaceId: input.workspaceId, brandId: input.brandId, actorUserId: input.userId, action: "content.create", entityType: "ContentItem", entityId: item.id, metadata: { channel: input.channel, goal: input.goal, ...(input.requestId ? { requestId: input.requestId } : {}) } },
     });
-    return item;
+    return { item, repeated: false };
   }, TX);
 }
 

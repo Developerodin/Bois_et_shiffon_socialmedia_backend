@@ -5,7 +5,7 @@ vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async ()
 vi.mock("@/server/agents/engine", async (orig) => ({ ...(await orig<object>()), startAgentRun: m.run }));
 vi.mock("@/server/services/competitor-audits", () => ({ startCompetitorAudit: m.audit }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
-vi.mock("@/server/stories/service", async (orig) => ({ ...(await orig<object>()), createStory: m.story, storyForRequest: vi.fn(async () => null) }));
+vi.mock("@/server/stories/service", async (orig) => ({ ...(await orig<object>()), createStory: m.story, itemForRequest: vi.fn(async () => null) }));
 vi.mock("@/server/services/publishing", async (orig) => ({ ...(await orig<object>()), postAiAllowed: vi.fn(async () => true) }));
 
 import { AgentStartError } from "@/server/agents/engine";

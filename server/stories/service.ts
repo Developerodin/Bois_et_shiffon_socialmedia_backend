@@ -8,7 +8,8 @@ import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
 import { liveOfferFor } from "@/server/content/knowledge";
 import { CREDIT_COSTS, InsufficientCreditsError, refundCharge, spendCredits } from "@/server/services/credits";
-import { APP_GOALS, EDITABLE, lock, PublishingError, TX } from "@/server/services/publishing";
+import type { ContentGoal } from "@/shared";
+import { APP_GOALS, EDITABLE, itemForRequest, lock, PublishingError, requestLockKey, TX } from "@/server/services/publishing";
 import { getMediaBytes, signedMediaUrl } from "@/server/storage/media";
 import { isStoryBody, LOGO_MAX_BYTES, MIN_CLIP_SECONDS, REEL_SIZE, type StoryBody, type StoryFrame, type StoryFrameInput, type StoryInput } from "@/server/stories/body";
 import { posterKeyFor, renderClipFrame, renderPhotoFrame, type RenderOpts, textFits } from "@/server/stories/render";
@@ -414,20 +415,14 @@ export async function deleteStory(scope: Scope, itemId: string) {
   }, TX);
 }
 
-const STORY_GOALS = ["newArrival", "productFeature", "specialOffer"] as const;
 export const STORY_START_NOTE = "Writing didn't start. Try again.";
 /** Keeps the story.credits code the phone reads and adds the shape the web opens its paywall on. */
 const noCredits = (e: InsufficientCreditsError) => new PublishingError("Not enough credits to write a story.", 402, "story.credits", { insufficientCredits: true, balance: e.balance, needed: e.needed });
 /** Brand-scoped and prefixed, so another brand's (or feature's) id can never match this charge in spendCredits/refundCharge. */
 const chargeRef = (brandId: string, requestId: string) => `story:${brandId}:${requestId}`;
 
-/** The story already made for this request id in this brand, if it still exists. */
-export async function storyForRequest(scope: BrandScope, requestId: string, db: Db = prisma) {
-  return db.contentItem.findFirst({
-    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, channel: "INSTAGRAM_STORY", brief: { path: ["requestId"], equals: requestId } },
-    select: { id: true },
-  });
-}
+// Lives in publishing.ts (createPost uses it too); re-exported so the story code and its mocks keep one home.
+export { itemForRequest };
 
 /**
  * The app's "New story": 5 credits, charged once per request id (refId is brand-scoped), so a double tap or a retried
@@ -437,7 +432,7 @@ export async function storyForRequest(scope: BrandScope, requestId: string, db: 
  * get a free story on the old charge). A crash between the charge and the item is picked up by the same request id;
  * a crash between the item and the run leaves a BRIEF_READY story whose "Fix it" prepays with the held charge.
  */
-export async function createStory(scope: Scope, input: { goal: (typeof STORY_GOALS)[number]; productId: string; direction?: string; requestId: string }) {
+export async function createStory(scope: Scope, input: { goal: ContentGoal; productId: string; direction?: string; requestId: string }) {
   const product = await prisma.product.findFirst({ where: { id: input.productId, workspaceId: scope.workspaceId, brandId: scope.brandId, archivedAt: null }, select: { id: true, title: true } });
   if (!product) throw new PublishingError("That product isn't in this brand.", 400, "story.product");
   const campaignId = input.goal === "specialOffer" ? await liveOfferFor(scope, [product.id]) : null;
@@ -445,8 +440,8 @@ export async function createStory(scope: Scope, input: { goal: (typeof STORY_GOA
   const refId = chargeRef(scope.brandId, input.requestId);
   return prisma.$transaction(async (tx) => {
     // Two requests with one id at once: the second waits here, then finds the first's item.
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`story-create:${scope.workspaceId}:${refId}`}))`;
-    const existing = await storyForRequest(scope, input.requestId, tx);
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${requestLockKey(scope, input.requestId)}))`;
+    const existing = await itemForRequest(scope, input.requestId, { channel: "INSTAGRAM_STORY" }, tx);
     if (existing) return { id: existing.id, chargeId: refId, repeated: true };
     const charged = await tx.creditEntry.findFirst({ where: { workspaceId: scope.workspaceId, reason: "story-write", refId }, select: { id: true } });
     if (charged) {
