@@ -111,7 +111,7 @@ describe("Client reviewer role", () => {
     }
     const inserted = sql.match(/ARRAY\[([^\]]*)\]::TEXT\[\]/)![1]!.match(/'[^']+'/g)!.map((s) => s.slice(1, -1));
     expect(inserted).toEqual([...role("client-reviewer").permissions]);
-    expect(sql).toMatch(/SET "slug" = 'client-reviewer-custom'[\s\S]*WHERE "slug" = 'client-reviewer' AND NOT "isSystem"/);
+    expect(sql).toMatch(/SET "slug" = 'client-reviewer-custom-' \|\| "id"[\s\S]*WHERE "slug" = 'client-reviewer' AND NOT "isSystem"/);
   });
 
   it("the migration gives agents.read only to custom roles that make posts or run agents, never to the renamed client reviewer", () => {

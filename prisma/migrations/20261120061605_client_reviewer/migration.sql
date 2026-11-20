@@ -3,7 +3,8 @@
 -- guarded, so running it on a workspace that already has a key changes nothing.
 
 -- 1. A custom role that happens to use the slug keeps working under another slug; the slug belongs to the system role.
-UPDATE "Role" SET "slug" = 'client-reviewer-custom', "updatedAt" = now()
+--    Suffixed with the role's id, so it can't collide with a slug the workspace already has.
+UPDATE "Role" SET "slug" = 'client-reviewer-custom-' || "id", "updatedAt" = now()
 WHERE "slug" = 'client-reviewer' AND NOT "isSystem";
 
 -- 2. Customer messages and reviews: the roles that answer customers. Owner too: existing Owner rows only track the
