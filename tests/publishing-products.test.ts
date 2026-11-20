@@ -35,6 +35,7 @@ import { decide, executePublication, packageHash, releaseState, saveDraft } from
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/[contentId]/route";
 
 const scope = { workspaceId: "w1", brandId: "b1" };
+const staff = new Set(["publish.execute", "project.members.manage"]);
 const latest = { id: "v2", version: 2, body: { caption: "Our Milo sofa", productIds: ["p1", "p2"] }, createdBy: "writer", checks: [{ overall: "PASS", results: [] }] };
 const item = (status: string) => ({ id: "i1", ...scope, channel: "INSTAGRAM_POST", status, studio: false, title: "Milo", productIds: ["p1", "p2"], versions: [latest] });
 const approval = (over: object = {}) => ({ id: "d1", verdict: "APPROVED", contentVersionId: "v2", packageHash: packageHash({ id: "i1", channel: "INSTAGRAM_POST" }, latest), productOverride: null, ...over });
@@ -178,7 +179,7 @@ describe("decision history", () => {
     const override = approval({ id: "d2", productOverride: { productIds: ["p1"], states: { p1: "out" } } });
     db.approvalDecision.findFirst.mockResolvedValue(override);
     db.approvalDecision.findMany.mockResolvedValue([{ ...override, userId: "boss", note: "ok", createdAt: new Date() }, { ...approval(), userId: "boss", note: null, createdAt: new Date() }]);
-    const state = await releaseState(scope, "i1");
+    const state = await releaseState(scope, "i1", staff);
     expect(state.decisions.map((d) => [d.override, d.current])).toEqual([[["Milo Sofa"], true], [null, true]]);
     expect(state.productIssues).toEqual([expect.objectContaining({ productId: "p1", refuses: false })]);
     expect(linked).toHaveBeenCalledTimes(1); // the override's names come from the gate's read
@@ -188,7 +189,7 @@ describe("decision history", () => {
     db.contentItem.findFirst.mockResolvedValue(item("PUBLISHED"));
     db.approvalDecision.findFirst.mockResolvedValue(null);
     db.approvalDecision.findMany.mockResolvedValue([{ ...approval({ productOverride: { productIds: ["p1"], states: { p1: "out" } } }), userId: "boss", note: "ok", createdAt: new Date() }]);
-    const state = await releaseState(scope, "i1");
+    const state = await releaseState(scope, "i1", staff);
     expect(state.productIssues).toEqual([]);
     expect(state.decisions[0]?.override).toEqual(["Milo Sofa"]);
     expect(linked).toHaveBeenCalledWith(db, scope, ["p1"]);
@@ -200,8 +201,8 @@ describe("release state: studio flag", () => {
     db.approvalDecision.findFirst.mockResolvedValue(null);
     db.approvalDecision.findMany.mockResolvedValue([]);
     db.contentItem.findFirst.mockResolvedValue({ ...item("DRAFT_REVIEW"), channel: "INSTAGRAM_REEL", studio: true });
-    expect((await releaseState(scope, "i1")).requirements).toMatchObject({ needsVideo: true, studio: true });
+    expect((await releaseState(scope, "i1", staff)).requirements).toMatchObject({ needsVideo: true, studio: true });
     db.contentItem.findFirst.mockResolvedValue(item("DRAFT_REVIEW"));
-    expect((await releaseState(scope, "i1")).requirements).toMatchObject({ studio: false });
+    expect((await releaseState(scope, "i1", staff)).requirements).toMatchObject({ studio: false });
   });
 });

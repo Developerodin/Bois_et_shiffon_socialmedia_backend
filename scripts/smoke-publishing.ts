@@ -111,7 +111,7 @@ async function main() {
     await executePublication({ attemptId: (await attempt(b.id)).id });
     assert.equal(calls.length, before, "nothing sent to the platform");
     assert.match((await attempt(b.id)).error!, /changed after approval/);
-    assert.equal((await releaseState(scope, b.id)).approvalValid, false);
+    assert.equal((await releaseState(scope, b.id, new Set(["publish.execute"]))).approvalValid, false);
     console.log("6 a new draft after scheduling voids the approval; nothing is posted ✓");
 
     // 7. Cancel a future post
@@ -134,7 +134,7 @@ async function main() {
     assert.equal(v3.version, 3);
     assert.deepEqual((v3.body as { hashtags: string[] }).hashtags, ["#bois", "#chêne"]);
     assert.equal(await status(b.id), "DRAFT_REVIEW");
-    assert.equal((await releaseState(scope, b.id)).approvalValid, false);
+    assert.equal((await releaseState(scope, b.id, new Set(["publish.execute"]))).approvalValid, false);
     await refused(saveDraft({ ...scope, itemId: b.id, version: 3, body: draft }), /Nothing changed/);
     await prisma.qualityCheck.create({ data: { contentVersionId: v3.id, overall: "PASS", results: [] } });
     await prisma.contentItem.update({ where: { id: b.id }, data: { status: "AWAITING_APPROVAL" } });

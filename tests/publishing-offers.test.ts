@@ -10,8 +10,8 @@ const db = vi.hoisted(() => {
     approvalDecision: { findFirst: vi.fn(), findMany: vi.fn(async (): Promise<object[]> => []), create: vi.fn(async ({ data }: { data: object }) => ({ id: "d-new", ...data })) },
     auditEvent: { create: vi.fn(async () => ({})) },
     publicationAttempt: { updateMany: vi.fn(), findUniqueOrThrow: vi.fn(), findFirst: vi.fn(async () => null), create: vi.fn(async ({ data }: { data: object }) => ({ id: "a-new", ...data })), update: vi.fn(async () => ({})), findMany: vi.fn(async (): Promise<object[]> => []) },
-    integrationConnection: { findFirst: vi.fn(), findMany: vi.fn(async () => []) },
-    user: { findMany: vi.fn(async () => []) },
+    integrationConnection: { findFirst: vi.fn(), findMany: vi.fn(async (): Promise<object[]> => []) },
+    user: { findMany: vi.fn(async (): Promise<object[]> => []) },
     brand: { findFirst: vi.fn() },
   };
   return d;
@@ -28,6 +28,7 @@ vi.mock("@/server/jobs/queue", () => ({ enqueueJob }));
 import { decide, executePublication, packageHash, releaseState, schedulePublication } from "@/server/services/publishing";
 
 const scope = { workspaceId: "w1", brandId: "b1" };
+const staff = new Set(["publish.execute", "project.members.manage"]);
 const TZ = "Europe/Paris";
 const ENDS = new Date("2026-11-30T19:00:00Z"); // 20:00 Paris
 const STARTS = new Date("2026-11-27T07:00:00Z"); // 08:00 Paris
@@ -153,7 +154,7 @@ describe("releaseState", () => {
     const override = approval({ productOverride: { productIds: [], states: {}, offers: ["c1"] } });
     db.approvalDecision.findFirst.mockResolvedValue(override);
     db.approvalDecision.findMany.mockResolvedValue([{ ...override, userId: "boss", note: "ok", createdAt: new Date() }]);
-    const state = await releaseState(scope, "i1");
+    const state = await releaseState(scope, "i1", staff);
     expect(state.campaign).toEqual({
       kind: "offer", name: "Black Friday", offer: "-20 % on everything", discountPercent: 20, code: null,
       starts: "2026-11-27 08:00", ends: "2026-11-30 20:00", timeZone: TZ, withdrawn: false,
@@ -167,8 +168,25 @@ describe("releaseState", () => {
     db.contentItem.findFirst.mockResolvedValue(item("SCHEDULED"));
     db.approvalDecision.findFirst.mockResolvedValue(approval());
     db.publicationAttempt.findMany.mockResolvedValue([{ id: "a1", status: "SCHEDULED", runAt: new Date("2026-12-01T10:00:00Z"), createdByUserId: "boss", connectionId: "conn", updatedAt: new Date() }]);
-    const state = await releaseState(scope, "i1");
+    const state = await releaseState(scope, "i1", staff);
     expect(state.productIssues).toEqual([expect.objectContaining({ state: "ended", refuses: true })]);
+  });
+
+  it("names people without a name by their email's local part only for people who manage the project, and lists accounts only for people who publish", async () => {
+    db.contentItem.findFirst.mockResolvedValue(item("APPROVED"));
+    db.approvalDecision.findFirst.mockResolvedValue(approval());
+    db.approvalDecision.findMany.mockResolvedValue([{ ...approval(), userId: "u2", note: null, createdAt: new Date() }]);
+    db.publicationAttempt.findMany.mockResolvedValue([{ id: "a1", status: "PUBLISHED", runAt: new Date(), createdByUserId: "u3", connectionId: "conn", updatedAt: new Date() }]);
+    db.user.findMany.mockResolvedValue([{ id: "u2", name: null, email: "dana@shop.com" }, { id: "u3", name: "Eli", email: "eli@shop.com" }]);
+    db.integrationConnection.findMany.mockResolvedValue([{ id: "conn", displayName: "Shop" }]);
+    const reviewer = await releaseState(scope, "i1", new Set(["brand.read", "content.approve"]));
+    expect(reviewer.decisions[0]?.by).toBe("A team member");
+    expect(reviewer.attempts[0]).toMatchObject({ by: "Eli", account: "Shop" });
+    expect(reviewer.accounts).toEqual([]);
+    expect(JSON.stringify(reviewer)).not.toContain("@");
+    const admin = await releaseState(scope, "i1", staff);
+    expect(admin.decisions[0]?.by).toBe("dana");
+    expect(admin.accounts).toEqual([{ id: "conn", displayName: "Shop" }]);
   });
 
   it("a standing priority reads as a priority with no end", async () => {
@@ -176,7 +194,7 @@ describe("releaseState", () => {
     db.contentItem.findFirst.mockResolvedValue(item("PUBLISHED"));
     db.approvalDecision.findFirst.mockResolvedValue(null);
     campaigns(sale({ name: "Oak dining", offer: null, discountPercent: null, endsAt: null }));
-    const state = await releaseState(scope, "i1");
+    const state = await releaseState(scope, "i1", staff);
     expect(state.campaign).toMatchObject({ kind: "priority", name: "Oak dining", ends: null });
   });
 });

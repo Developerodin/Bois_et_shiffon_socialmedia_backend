@@ -942,7 +942,11 @@ export async function markDone(input: AttemptRef) {
 }
 
 /** Everything the post view needs: history, whether approval still holds, and where it can go. */
-export async function releaseState(scope: { workspaceId: string; brandId: string }, itemId: string) {
+/**
+ * `perms`: the caller's brand permissions. Someone without a name shows as their email's local part to people who
+ * manage the project, else as "A team member"; the accounts to publish to go only to people who publish.
+ */
+export async function releaseState(scope: { workspaceId: string; brandId: string }, itemId: string, perms: ReadonlySet<string>) {
   const { item, latest } = await loadItem(scope, itemId);
   const [decisions, attempts, approval] = await Promise.all([
     prisma.approvalDecision.findMany({ where: { contentItemId: item.id }, orderBy: { createdAt: "desc" }, take: 20 }),
@@ -986,7 +990,12 @@ export async function releaseState(scope: { workspaceId: string; brandId: string
   const productNames = new Map(linked.map((l) => [l.id, l.name]));
   const missing = [...new Set([...overrides.values()].flatMap((o) => o.productIds))].filter((id) => !productNames.has(id));
   for (const l of missing.length ? await linkedProducts(prisma, scope, missing) : []) productNames.set(l.id, l.name);
-  const who = (id: string) => { const u = users.find((x) => x.id === id); return u?.name || u?.email || "Someone"; };
+  const emails = perms.has("project.members.manage");
+  const who = (id: string) => {
+    const u = users.find((x) => x.id === id);
+    if (!u) return "Someone";
+    return u.name || (emails ? u.email.split("@")[0]! : "A team member");
+  };
   const accountName = new Map(accounts.map((a) => [a.id, a.displayName]));
   const overrideNames = (o: ProductOverride) => [...o.productIds.map((id) => productNames.get(id) ?? id), ...(o.offers ?? []).map((id) => `${campaigns.get(id)?.name ?? "an offer"} (offer ended)`)];
   const c = item.campaignId ? campaigns.get(item.campaignId) : undefined;
@@ -998,7 +1007,8 @@ export async function releaseState(scope: { workspaceId: string; brandId: string
     approvedVersionId: approval?.contentVersionId ?? null,
     approvalValid: Boolean(approval),
     requirements: { ...req, studio: item.studio },
-    accounts,
+    // Where it can go: for people who publish (attempts below still name their account).
+    accounts: perms.has("publish.execute") ? accounts : [],
     // An earlier approval of the same package (before an "approve anyway") still holds too.
     decisions: decisions.map((d) => ({
       id: d.id, verdict: d.verdict, note: d.note, by: who(d.userId), at: d.createdAt, current: d.verdict === "APPROVED" && d.packageHash === approval?.packageHash,
