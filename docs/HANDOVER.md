@@ -18,6 +18,9 @@ pure-function level only (focus restore, the slide, the flash, the Recent menu a
   (both saved), then the page scrolls to it and flashes it. No toast is involved.
 - A **Recent** menu beside Layout lists the last 8 items opened here; R reopens the last closed one.
 - Unsaved work is guarded per editor, so a post's caption and its release form each count and the person is asked once.
+- Every Overview panel has an X in its header (same as Hide panel; it comes back from Layout).
+- The sidebar's "Your agents" can be reordered by dragging or Alt+Up/Down; the order is kept per browser
+  (`nav.agentOrder.v1`, ids only, `lib/agent-order.ts`). Drag doesn't work on touch.
 
 ### URL rules (`lib/workspace-view.ts`)
 - `?post=` and `?competitor=` match `^[A-Za-z0-9_-]{1,64}$`; `?agent=` matches `^[a-z][a-z0-9-]{0,39}$`; `?doc=` must be in
