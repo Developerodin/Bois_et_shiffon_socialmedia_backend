@@ -75,6 +75,8 @@ export function brandGrant(workspaceId: string, brandId: string, userId: string)
 
 /** A project grant through the built-in Client reviewer role (a custom role that happens to use the slug isn't one). */
 export const isClientGrant = (role: { isSystem: boolean; slug: string }) => role.isSystem && role.slug === CLIENT_REVIEWER;
+/** The same rule as a Prisma filter on Role (`NOT: CLIENT_GRANT_WHERE` leaves client grants out). It and isClientGrant must change together. */
+export const CLIENT_GRANT_WHERE = { isSystem: true, slug: CLIENT_REVIEWER } as const;
 
 /**
  * Can someone other than `userId` approve this brand's content? A one-person business can't follow a four-eyes rule.

@@ -47,6 +47,7 @@ import { plannerAgent } from "@/server/agents/definitions/planner";
 import { GET as ownersGet } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/owners/route";
 import { createReel } from "@/server/reels/service";
 import { toVersionBody } from "@/server/reels/plan";
+import { CLIENT_GRANT_WHERE, isClientGrant } from "@/server/auth/permissions";
 import { brandOwners, createPost, PublishingError, setOwner } from "@/server/services/publishing";
 import { createStory, duplicateStory } from "@/server/stories/service";
 
@@ -136,16 +137,27 @@ describe("setOwner", () => {
     expect(db.contentItem.update).not.toHaveBeenCalled();
   });
 
-  it("setOwner refuses a client reviewer and a no-read grant, asking the database for brand.read and not the client-reviewer role", async () => {
+  it("setOwner refuses a client reviewer and a no-read grant, asking the database for brand.read, an active person and not the client-reviewer role", async () => {
     db.workspaceMember.findFirst.mockResolvedValue(null);
     db.brandMember.findFirst.mockResolvedValue(null);
     db.workspaceMember.findFirst.mockClear();
     db.brandMember.findFirst.mockClear();
     await expect(setOwner(scope, "i1", "u9")).rejects.toMatchObject({ status: 400, message: "Pick someone who works on this brand." });
     expect(db.workspaceMember.findFirst.mock.calls[0]![0]!.where).toMatchObject({ workspaceId: "w1", userId: "u9", roleRef: { permissions: { has: "brand.read" } } });
-    expect(db.brandMember.findFirst.mock.calls[0]![0]!.where).toMatchObject({ workspaceId: "w1", brandId: "b1", userId: "u9", role: { permissions: { has: "brand.read" }, NOT: { isSystem: true, slug: "client-reviewer" } } });
+    // The mock cannot filter: it only shows the question put to the database. That the filtering itself is right is the
+    // Prisma query's job, not the mock's. The client-grant filter is the literal slug here on purpose: it must equal CLIENT_GRANT_WHERE.
+    const active = { status: "ACTIVE", deletedAt: null };
+    expect(db.workspaceMember.findFirst.mock.calls[0]![0]!.where).toMatchObject({ user: active });
+    expect(db.brandMember.findFirst.mock.calls[0]![0]!.where).toMatchObject({ workspaceId: "w1", brandId: "b1", userId: "u9", user: active, role: { permissions: { has: "brand.read" }, NOT: { isSystem: true, slug: "client-reviewer" } } });
     expect(db.contentItem.update).not.toHaveBeenCalled();
     expect(m.people).not.toHaveBeenCalled();
+  });
+
+  it("setOwner leaves out client grants with the shared filter, the same rule as isClientGrant", async () => {
+    await setOwner(scope, "i1", "u3");
+    expect((db.brandMember.findFirst.mock.calls[0]![0]!.where as { role: { NOT: unknown } }).role.NOT).toBe(CLIENT_GRANT_WHERE);
+    expect(isClientGrant(CLIENT_GRANT_WHERE)).toBe(true);
+    expect(isClientGrant({ ...CLIENT_GRANT_WHERE, isSystem: false })).toBe(false);
   });
 
   it("setOwner null unassigns", async () => {

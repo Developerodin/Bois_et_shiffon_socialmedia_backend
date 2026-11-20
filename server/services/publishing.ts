@@ -6,8 +6,7 @@ import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefuse
 import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { CAPTION_LIMITS, safeHttpUrl } from "@/shared";
-import { hasOtherApprover, requirePermission } from "@/server/auth/permissions";
-import { CLIENT_REVIEWER } from "@/server/auth/permissions.catalog";
+import { CLIENT_GRANT_WHERE, hasOtherApprover, requirePermission } from "@/server/auth/permissions";
 import { linkedProducts } from "@/server/catalog/linked";
 import { gateIssues, linkedIds, ProductOverride, snapshotOf } from "@/server/content/product-checks";
 import { campaignsById } from "@/server/catalog/campaigns";
@@ -251,7 +250,7 @@ export async function setOwner(scope: { workspaceId: string; brandId: string; us
     const user = { status: "ACTIVE" as const, deletedAt: null };
     const [viaWorkspace, viaGrant] = await Promise.all([
       prisma.workspaceMember.findFirst({ where: { workspaceId: scope.workspaceId, userId, roleRef: { permissions: { has: "brand.read" } }, user }, select: { id: true } }),
-      prisma.brandMember.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId, role: { permissions: { has: "brand.read" }, NOT: { isSystem: true, slug: CLIENT_REVIEWER } }, user }, select: { id: true } }),
+      prisma.brandMember.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId, role: { permissions: { has: "brand.read" }, NOT: CLIENT_GRANT_WHERE }, user }, select: { id: true } }),
     ]);
     if (!viaWorkspace && !viaGrant) throw new PublishingError("Pick someone who works on this brand.", 400, "owner.invalid");
   }

@@ -1,7 +1,6 @@
 import { fromAccessError } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { AccessDeniedError } from "@/server/auth/errors";
-import { effectivePermissions } from "@/server/auth/permissions";
 import { CONNECTIONS_READ } from "@/shared";
 import { listConnections, listProviders, toConnectionDto } from "@/server/services/connections";
 
@@ -13,8 +12,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
   try {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");
     if (scope instanceof Response) return scope;
-    const perms = await effectivePermissions(scope.workspaceId, scope.userId, scope.brandId);
-    if (!CONNECTIONS_READ.some((k) => perms.has(k))) throw new AccessDeniedError(`Missing one of ${CONNECTIONS_READ.join(", ")}`);
+    if (!CONNECTIONS_READ.some((k) => scope.perms.has(k))) throw new AccessDeniedError(`Missing one of ${CONNECTIONS_READ.join(", ")}`);
     const rows = await listConnections(scope.workspaceId, scope.brandId);
     return Response.json({ providers: listProviders(), connections: rows.map(toConnectionDto) });
   } catch (error) {

@@ -1,6 +1,8 @@
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
+import { AGENTS } from "@/server/agents/registry";
 import { prisma } from "@/server/db/prisma";
+import { RUN_ID_PATTERN } from "@/shared";
 
 /** Agent Log feed for one brand (REQ-PLAT-005). Poll with ?after=<last id>. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
@@ -12,12 +14,16 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get("limit") ?? "100", 10) || 100, 1), 200);
 
     const where = { workspaceId: scope.workspaceId, brandId: scope.brandId };
-    // ?runId= reads one run's events, oldest first (a run's log is short; no cursor).
+    // ?runId= reads one run's events, oldest first (a run's log is short; no cursor). ?agentKey= (with runId) also
+    // requires the events to be that agent's, so a run id from another agent's page shows nothing.
     const runId = url.searchParams.get("runId");
-    if (runId !== null && !/^[A-Za-z0-9_-]{1,40}$/.test(runId)) return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 400, detail: "runId: up to 40 letters, digits, - or _" });
+    if (runId !== null && !RUN_ID_PATTERN.test(runId)) return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 400, detail: "runId: up to 40 letters, digits, - or _" });
+    const agentKey = url.searchParams.get("agentKey");
+    if (agentKey !== null && !AGENTS.some((a) => a.key === agentKey)) return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 400, detail: "agentKey: not an agent" });
     // First load: latest `limit` events; later polls: everything after the cursor.
     const rows = runId !== null
-      ? await prisma.agentEvent.findMany({ where: { ...where, runId }, orderBy: { id: "asc" }, take: 200 })
+      // ponytail: the first 200 events of a run; a longer run is cut. Upgrade: page by ?after= like the unscoped feed.
+      ? await prisma.agentEvent.findMany({ where: { ...where, runId, ...(agentKey !== null ? { agentKey } : {}) }, orderBy: { id: "asc" }, take: 200 })
       : Number.isFinite(after)
       ? await prisma.agentEvent.findMany({ where: { ...where, id: { gt: after } }, orderBy: { id: "asc" }, take: limit })
       : (await prisma.agentEvent.findMany({ where, orderBy: { id: "desc" }, take: limit })).reverse();

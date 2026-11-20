@@ -4,6 +4,7 @@ const db = vi.hoisted(() => ({ agentEvent: { findMany: vi.fn(async (_a: { where:
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: async () => ({ userId: "u1", workspaceId: "w1", brandId: "b1", perms: new Set(["agents.read"]) }) }));
 
+import { RUN_ID_PATTERN } from "@/shared";
 import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/agent-events/route";
 
 const call = (qs: string) => GET(new Request(`http://x/agent-events${qs}`), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) });
@@ -31,5 +32,18 @@ describe("GET /agent-events?runId", () => {
     db.agentEvent.findMany.mockClear();
     await call("?after=7");
     expect(db.agentEvent.findMany).toHaveBeenCalledWith({ where: { workspaceId: "w1", brandId: "b1", id: { gt: 7 } }, orderBy: { id: "asc" }, take: 100 });
+  });
+
+  it("with agentKey, only that agent's events of the run; an unknown agent is a 400", async () => {
+    await call("?runId=run_1&agentKey=quality");
+    expect(db.agentEvent.findMany).toHaveBeenCalledWith({ where: { workspaceId: "w1", brandId: "b1", runId: "run_1", agentKey: "quality" }, orderBy: { id: "asc" }, take: 200 });
+    db.agentEvent.findMany.mockClear();
+    expect((await call("?runId=run_1&agentKey=nope")).status).toBe(400);
+    expect(db.agentEvent.findMany).not.toHaveBeenCalled();
+  });
+
+  it("checks runId with the shared pattern", () => {
+    expect(RUN_ID_PATTERN.test("a".repeat(40))).toBe(true);
+    for (const bad of ["a".repeat(41), "a b", "", "é", "a/b"]) expect(RUN_ID_PATTERN.test(bad)).toBe(false);
   });
 });
