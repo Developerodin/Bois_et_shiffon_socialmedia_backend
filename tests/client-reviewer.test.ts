@@ -12,7 +12,7 @@ const db = vi.hoisted(() => ({
 const m = vi.hoisted(() => ({
   authorize: vi.fn(),
   autoPublish: vi.fn(),
-  decide: vi.fn(async (_input: unknown): Promise<unknown> => ({ id: "d1" })),
+  decide: vi.fn<(input: unknown) => Promise<unknown>>(async () => ({ id: "d1" })),
   people: vi.fn(),
   buckets: new Map<string, number>(),
 }));
