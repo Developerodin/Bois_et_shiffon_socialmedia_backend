@@ -36,8 +36,11 @@ pure-function level only (focus restore, the slide, the flash, the Recent menu a
 - Reads are strict: entries are rebuilt, never spread, and each must parse through `parseViewParts`. Reads happen on menu
   open and on push, not in render. Re-opening the item already on top writes nothing.
 - Titles come from data the Overview holds (shared content cache, docs, agents); competitor names are fetched only when
-  the menu opens. "No longer available" shows only when the relevant list loaded and lacks it; a failed fetch purges nothing.
-- Sign-out removes every `recent:` key in the browser. A brand switch clears the last-closed item (so R and Reopen cannot
+  the menu opens. "No longer available" covers documents, agents and competitors only, and only when the relevant list loaded
+  and lacks it; a failed fetch purges nothing. Posts are never marked gone (the list is only the calendar window); the peek
+  says so on a real 404. An item is recorded only once it has resolved (doc/agent in the loaded list, post/competitor loaded by its view).
+- Sign-out removes every `recent:` key in the browser, and so does a session expiry (`redirectToLogin` and the login page
+  on `?expired=1`; the middleware redirect for a missing cookie does not carry `expired`, sign-out already cleared it). A brand switch clears the last-closed item (so R and Reopen cannot
   carry it across). Reopen and R open by kind and id alone.
 
 ### Deferred
@@ -49,7 +52,7 @@ pure-function level only (focus restore, the slide, the flash, the Recent menu a
   guard is off, but opening another item inside that window can ask again; picking the already-active brand leaves
   nothing to strip; a post outside the calendar window is titled "Post" in the peek header (its own h1 has the real title);
   the peek's views keep their own h1 under the header; import order in `workspace.tsx`; the reveal closure is untested
-  (DOM); reveal before the saved layout loads; Recent's post "No longer available" depends on the content cache being loaded.
+  (DOM); reveal before the saved layout loads.
 
 ## Phase 0: B&C quick wins (2026-11-20)
 
