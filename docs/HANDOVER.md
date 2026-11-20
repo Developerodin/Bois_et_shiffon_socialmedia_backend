@@ -188,13 +188,20 @@ staff-approved posts), names on the calendar and the CSV, a hand-posted post's d
 
 ### Deferred minors
 - Server: a refused client send-back can still spend a cap slot (the cap is spent before the per-person limit); the 409
-  says "the team" even when another client approved; members GET for managers also returns a `client` flag and still
-  reads `effectivePermissions` rather than `scope.perms`.
+  says "the team" even when another client approved; members GET for managers also returns a `client` flag.
 - Names: owners numbering ("A team member (2)") shifts with membership and can differ from the list's plain
   "A team member"; a real display name containing `@` is treated as an email and hidden.
 - Web and phone: Send back to clients can show on team-approved posts (the server answers 409 readably); the mobile
   `StoryFrame` type (`api/endpoints.ts`) still says confirmed rights are `{ kind, by, name }`; the redact script logs no
   progress.
+- Left after the final review (2026-11-20): a refused send-back (per-person limit, AI allowance or in-transaction
+  refusal) can still spend one client-cap slot; 409 says "approved by the team" when another client approved it; new story
+  bodies store "A team member" even for viewers who are managers; one more DB grep for `@` in older QualityCheck notes
+  outside "Asset rights"; a no-change story re-save may create a new version once stored names differ from re-resolved
+  names (confirm when touched); `decide` with override still re-reads permissions via requirePermission (rare path).
+- RunEvents shows at most 200 events and does not refresh mid-run (upgrade: page by `after`); the toast timer restarts
+  after hover; the watcher baseline can come from a cached response.
+- Redaction script: one-by-one updates (about 150 ms each); add a prefilter or batching if a table is very large.
 - The Phase 0 minors above still stand.
 
 ## End of day 2026-11-19 — start here tomorrow
