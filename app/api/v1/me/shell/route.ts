@@ -11,7 +11,7 @@ import { loadShellContext } from "@/server/shell/load-shell-context";
 export async function GET(request: Request) {
   const userId = await requestUserId(request);
   const user = userId
-    ? await prisma.user.findUnique({ where: { id: userId }, select: { name: true, email: true, image: true } })
+    ? await prisma.user.findUnique({ where: { id: userId }, select: { id: true, name: true, email: true, image: true } })
     : null;
   if (!userId || !user) {
     return problemResponse({

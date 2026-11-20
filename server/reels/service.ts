@@ -210,7 +210,7 @@ async function planReel(scope: Scope, input: { opportunityId?: string; prompt?: 
   const item = await prisma.contentItem.create({
     data: {
       ...(input.requestId && { id: input.requestId }),
-      workspaceId: scope.workspaceId, brandId: scope.brandId, opportunityId: idea?.id ?? null, title: ready.title, channel: "INSTAGRAM_REEL", studio: true, status: "PLANNED",
+      workspaceId: scope.workspaceId, brandId: scope.brandId, opportunityId: idea?.id ?? null, title: ready.title, channel: "INSTAGRAM_REEL", studio: true, status: "PLANNED", ownerId: scope.userId,
       brief: { reelChat: chat } as Prisma.InputJsonValue,
       versions: { create: { version: 1, body: toVersionBody(ready), createdBy: scope.userId } },
     },

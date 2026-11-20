@@ -7,7 +7,7 @@ import { pinterestBoards } from "@/server/integrations/publishers";
 import { kickRunner } from "@/server/jobs/runner";
 import { accessToken } from "@/server/services/connections";
 import { autoPublish } from "@/server/services/automations";
-import { decide, markDone, postAiAllowed, postRest, PublishingError, releaseState, saveDraft, schedulePublication, settleFrame, settlePublication } from "@/server/services/publishing";
+import { decide, markDone, postAiAllowed, postRest, PublishingError, releaseState, saveDraft, schedulePublication, setOwner, settleFrame, settlePublication } from "@/server/services/publishing";
 import { registerManualPost } from "@/server/services/manual-post";
 import { setByHand } from "@/server/stories/by-hand";
 import { parseStoryInput } from "@/server/stories/body";
@@ -55,11 +55,13 @@ const Action = z.discriminatedUnion("action", [
   // Post a story by hand: `at` is when it is due (null turns it off); postedByHand says it was posted (url: the story's link, checked and kept).
   z.object({ action: z.literal("byHand"), at: z.string().datetime({ offset: true }).nullable() }),
   z.object({ action: z.literal("postedByHand"), url: z.string().max(2000).optional() }),
+  // Give the post to someone who works on the brand, or to nobody (null).
+  z.object({ action: z.literal("setOwner"), userId: z.string().min(1).max(100).nullable() }),
   z.object({ action: z.literal("duplicate") }),
   z.object({ action: z.literal("delete") }),
 ]);
 
-const PERMISSION = { rewrite: "content.create", edit: "content.create", editStory: "content.create", duplicate: "content.create", delete: "content.create", decide: "content.approve", publish: "publish.execute", postRest: "publish.execute", markDone: "publish.execute", byHand: "publish.execute", postedByHand: "publish.execute", settleFrame: "publish.execute", cancel: "publish.execute", posted: "publish.execute", "not-posted": "publish.execute" } as const;
+const PERMISSION = { rewrite: "content.create", edit: "content.create", editStory: "content.create", duplicate: "content.create", setOwner: "content.create", delete: "content.create", decide: "content.approve", publish: "publish.execute", postRest: "publish.execute", markDone: "publish.execute", byHand: "publish.execute", postedByHand: "publish.execute", settleFrame: "publish.execute", cancel: "publish.execute", posted: "publish.execute", "not-posted": "publish.execute" } as const;
 
 /** Approval history, publishing history, and where this post can go (with Pinterest boards). */
 export async function GET(request: Request, context: Params) {
@@ -101,6 +103,10 @@ export async function POST(request: Request, context: Params) {
       body.action === "rewrite" ||
       (body.action === "decide" && body.verdict === "CHANGES_REQUESTED" && !(await prisma.contentItem.findFirst({ where: { id: itemId, brandId: scope.brandId }, select: { studio: true } }))?.studio);
     if (startsAi && !(await postAiAllowed(scope.workspaceId))) throw new PublishingError("Too many posts written today. Try again tomorrow.", 429);
+    if (body.action === "setOwner") {
+      await setOwner(scope, itemId, body.userId);
+      return new Response(null, { status: 204 });
+    }
     if (body.action === "duplicate") {
       const copy = await duplicateStory(scope, itemId);
       return Response.json({ id: copy.id }, { status: 201 });

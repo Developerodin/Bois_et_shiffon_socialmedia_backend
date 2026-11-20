@@ -48,6 +48,7 @@ model User {
   brandMembers    BrandMember[]
   ownedWorkspaces Workspace[]          @relation("WorkspacePrimaryOwner")
   pushDevices     PushDevice[]
+  ownedContent    ContentItem[]        @relation("ContentOwner")
 }
 
 /// A phone that gets push notifications (reel ready / couldn't be made). messages: the notification texts in the
@@ -858,12 +859,15 @@ model ContentItem {
   studio        Boolean        @default(false) // made in the mobile Reels studio: the writing agents leave it alone
   postUrl       String? // posted by hand after a download; the link the person pasted back
   byHand        Boolean        @default(false) // a story the person posts themselves from a downloaded package
+  // Who the post is for: whoever made it (or started the Planner run), else unassigned; the team can reassign it.
+  ownerId       String?
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
 
   brand        Brand                @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   opportunity  Opportunity?         @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
   campaign     Campaign?            @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  owner        User?                @relation("ContentOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   versions     ContentVersion[]
   decisions    ApprovalDecision[]
   publications PublicationAttempt[]
@@ -873,6 +877,7 @@ model ContentItem {
   @@index([workspaceId, brandId, status])
   @@index([brandId, scheduledFor])
   @@index([campaignId])
+  @@index([brandId, ownerId])
 }
 
 enum ReelRenderStep {

@@ -149,6 +149,7 @@ export const plannerAgent: AgentDefinition = {
         data: {
           workspaceId: brand.workspaceId,
           brandId: brand.brandId,
+          ownerId: ctx.userId ?? null,
           opportunityId: p.opportunityId || null,
           campaignId: campaign?.id ?? null,
           title: p.title,

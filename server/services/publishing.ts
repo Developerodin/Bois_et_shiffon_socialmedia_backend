@@ -13,6 +13,7 @@ import { campaignsById } from "@/server/catalog/campaigns";
 import { campaignKind, isWithdrawn, offerIssues, offerSnapshotOf, wallTime } from "@/server/content/offer-checks";
 import { liveOfferFor, productIdsForPhoto } from "@/server/content/knowledge";
 import { hitRateLimit } from "@/server/auth/rate-limit";
+import { listProjectPeople } from "@/server/services/project-members";
 import { signedMediaUrl } from "@/server/storage/media";
 import type { StoryBody } from "@/server/stories/body";
 import { attemptOutcome, expiredFrames, type FrameProgress, nextFramesToPublish, publishingLimitRoom, settleStoryFrame, unconfirmedMessage, withFrame } from "@/server/stories/publish";
@@ -178,7 +179,7 @@ export async function createPost(input: { workspaceId: string; brandId: string; 
   return prisma.$transaction(async (tx) => {
     const item = await tx.contentItem.create({
       data: {
-        workspaceId: input.workspaceId, brandId: input.brandId, title: input.product.title, channel: input.channel, status: "BRIEF_READY", productIds, campaignId,
+        workspaceId: input.workspaceId, brandId: input.brandId, title: input.product.title, channel: input.channel, status: "BRIEF_READY", productIds, campaignId, ownerId: input.userId,
         brief: { goal: APP_GOALS[input.goal], products: [input.product.title], keyMessage: direction ?? "", angle: input.goal, photoKeys: [input.product.photoKey] },
       },
     });
@@ -186,6 +187,37 @@ export async function createPost(input: { workspaceId: string; brandId: string; 
       data: { workspaceId: input.workspaceId, brandId: input.brandId, actorUserId: input.userId, action: "content.create", entityType: "ContentItem", entityId: item.id, metadata: { channel: input.channel, goal: input.goal } },
     });
     return item;
+  }, TX);
+}
+
+/**
+ * The people a post can be given to: everyone with brand.read on the brand (workspace roles and project grants), once each.
+ * Names only, never emails: the list is open to anyone who can create posts. ponytail: reads every member of the workspace; fine for small teams.
+ */
+export async function brandOwners(scope: { workspaceId: string; brandId: string }) {
+  const { viaWorkspace, people } = await listProjectPeople(scope.workspaceId, scope.brandId);
+  const byId = new Map<string, { id: string; name: string; named: boolean }>();
+  for (const p of [...viaWorkspace, ...people]) {
+    const name = p.name?.trim();
+    const seen = byId.get(p.userId);
+    // The same person on both lists: keep a real name over the email's local part.
+    if (!seen || (!seen.named && name)) byId.set(p.userId, { id: p.userId, name: name || p.email.split("@")[0]!, named: !!name });
+  }
+  return [...byId.values()].map(({ id, name }) => ({ id, name }));
+}
+
+/** Give a post to someone with access to the brand, or to nobody (null). An unknown user and one without access get the same 400. */
+export async function setOwner(scope: { workspaceId: string; brandId: string; userId: string }, itemId: string, userId: string | null) {
+  if (userId && !(await brandOwners(scope)).some((o) => o.id === userId)) throw new PublishingError("Pick someone who works on this brand.", 400, "owner.invalid");
+  await prisma.$transaction(async (tx) => {
+    await lock(tx, itemId);
+    const item = await tx.contentItem.findFirst({ where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { id: true, ownerId: true } });
+    if (!item) throw new PublishingError("Post not found", 404);
+    if (item.ownerId === userId) return;
+    await tx.contentItem.update({ where: { id: item.id }, data: { ownerId: userId } });
+    await tx.auditEvent.create({
+      data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "content.owner", entityType: "ContentItem", entityId: item.id, metadata: { from: item.ownerId, to: userId } },
+    });
   }, TX);
 }
 

@@ -387,7 +387,7 @@ export async function duplicateStory(scope: Scope, itemId: string) {
   const body = isStoryBody(latest?.body) ? latest.body : null;
   return prisma.$transaction(async (tx) => {
     const copy = await tx.contentItem.create({
-      data: { workspaceId: scope.workspaceId, brandId: scope.brandId, title: item.title, channel: item.channel, status: "PLANNED", productIds: item.productIds, opportunityId: item.opportunityId },
+      data: { workspaceId: scope.workspaceId, brandId: scope.brandId, title: item.title, channel: item.channel, status: "PLANNED", productIds: item.productIds, opportunityId: item.opportunityId, ownerId: scope.userId },
     });
     if (body) {
       const frames = body.frames.map(({ renderedKey: _r, file: _f, ...f }) => f);
@@ -466,7 +466,7 @@ export async function createStory(scope: Scope, input: { goal: (typeof STORY_GOA
     }
     const item = await tx.contentItem.create({
       data: {
-        workspaceId: scope.workspaceId, brandId: scope.brandId, title: product.title, channel: "INSTAGRAM_STORY", status: "BRIEF_READY", productIds: [product.id], campaignId,
+        workspaceId: scope.workspaceId, brandId: scope.brandId, title: product.title, channel: "INSTAGRAM_STORY", status: "BRIEF_READY", productIds: [product.id], campaignId, ownerId: scope.userId,
         brief: { goal: APP_GOALS[input.goal], products: [product.title], keyMessage: direction, angle: input.goal, requestId: input.requestId },
       },
     });

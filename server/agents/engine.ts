@@ -186,6 +186,7 @@ export async function executeAgentRun(rawPayload: unknown, lease?: Lease) {
   const language = languageLine(brand);
   const ctx: AgentContext = {
     runId: run.id,
+    userId: run.triggeredByUserId ?? undefined,
     brand,
     chargeId: (run.input as { chargeId?: string } | null)?.chargeId,
     log,

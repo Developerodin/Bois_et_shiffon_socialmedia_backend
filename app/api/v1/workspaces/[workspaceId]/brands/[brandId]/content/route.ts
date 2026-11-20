@@ -23,6 +23,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const [open, recent] = contentWindow(new Date()).OR;
     const include = {
       opportunity: { select: { title: true } },
+      owner: { select: { id: true, name: true } },
       versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } },
       decisions: { orderBy: { createdAt: "desc" }, take: 1, select: { verdict: true, note: true, contentVersionId: true } },
       publications: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, error: true } },

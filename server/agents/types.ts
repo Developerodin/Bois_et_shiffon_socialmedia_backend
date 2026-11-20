@@ -10,6 +10,8 @@ import type { GenerateObjectInput } from "@/server/ai/provider";
  */
 export type AgentContext = {
   runId: string;
+  /** The person who started the run (a manual or app-started one); none for scheduled runs. Posts the run makes are theirs. */
+  userId?: string;
   brand: BrandContext;
   /** The run's paid charge, if any (billing bookkeeping, never agent input): a story writer refunds it when nothing was saved. */
   chargeId?: string;
