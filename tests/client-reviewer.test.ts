@@ -6,7 +6,11 @@ const db = vi.hoisted(() => ({
   workspaceMember: { findMany: vi.fn(), findUnique: vi.fn() },
   brandMember: { findMany: vi.fn(), findFirst: vi.fn() },
   role: { findMany: vi.fn(), findUnique: vi.fn() },
-  contentItem: { findFirst: vi.fn() },
+  contentItem: { findFirst: vi.fn(), findMany: vi.fn(async (): Promise<unknown[]> => []) },
+  contentVersion: { update: vi.fn(), updateMany: vi.fn() },
+  approvalDecision: { findFirst: vi.fn() },
+  publicationAttempt: { findMany: vi.fn(async () => []) },
+  job: { findMany: vi.fn(async () => []) },
   $transaction: vi.fn(async () => ({ id: "d1" })),
 }));
 const m = vi.hoisted(() => ({
@@ -41,6 +45,7 @@ vi.mock("@/server/services/connections", async (orig) => ({
   listProviders: vi.fn(() => []),
   toConnectionDto: vi.fn((c: { id: string }) => ({ id: c.id })),
 }));
+vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), signedMediaUrl: vi.fn(async (k: string) => `https://signed/${k}`) }));
 vi.mock("@/server/services/publishing", async (orig) => ({
   ...(await orig<object>()),
   decide: m.decide,
@@ -51,6 +56,8 @@ import { SYSTEM_ROLES } from "@/server/auth/permissions.catalog";
 import { hasOtherApprover } from "@/server/auth/permissions";
 import { changeRequest } from "@/server/stories/writer";
 import { POST as contentPost } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/[contentId]/route";
+import { GET as contentGet } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/route";
+import { currentApproval, packageHash } from "@/server/services/publishing";
 import { GET as membersGet } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/members/route";
 import { GET as creditsGet } from "@/app/api/v1/workspaces/[workspaceId]/credits/route";
 import { GET as packageGet } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/stories/[contentId]/package/route";
@@ -327,9 +334,65 @@ describe("project members", () => {
     expect(JSON.stringify(body)).not.toMatch(/@|permissions|active/);
   });
 
+  it("names a nameless member \"A team member\" for someone who can't manage members", async () => {
+    caller([], clientRole);
+    m.people.mockResolvedValue({ ...listed, viaWorkspace: [{ userId: "u0", name: null, email: "ana.private@x.com", role: "Owner", active: true }], people: [{ ...listed.people[0]!, name: " " }] });
+    const body = await (await membersGet(req(), { params })).json();
+    expect(body.viaWorkspace[0].name).toBe("A team member");
+    expect(body.people[0].name).toBe("A team member");
+    expect(JSON.stringify(body)).not.toMatch(/@|ana\.private|bob/);
+  });
+
   it("people who manage the project still see everything", async () => {
     caller([], { isSystem: true, slug: "project-admin", permissions: ["brand.read", "project.members.manage"] });
     const body = await (await membersGet(req(), { params })).json();
     expect(body).toEqual({ ...listed, roles: [{ id: "r1", name: "Approver", description: null }] });
+  });
+});
+
+describe("story rights never expose an email", () => {
+  const rights = { kind: "confirmed", by: "u7", name: "zoe.private@x.com" };
+  const frame = (r: object) => ({ label: "L", headline: "H", body: "B", mediaKey: "w1/b1/a.jpg", renderedKey: "w1/b1/r.jpg", mediaKind: "photo", rights: r });
+  const storyBody = () => ({ frames: [frame(rights), frame({ kind: "owned" }), frame({ kind: "confirmed", by: "u8", name: "Yan Named" })], cta: "Shop", link: "https://shop.test", hook: "h", productIds: [], brandMark: false });
+  const note = "Frame 1: Confirmed by zoe.private@x.com; Frame 2: Brand's own; Frame 3: Confirmed by Yan Named";
+  let body = storyBody();
+  const row = () => ({
+    id: "i1", workspaceId: "w1", brandId: "b1", title: "Story", channel: "INSTAGRAM_STORY", status: "APPROVED", scheduledFor: null, createdAt: new Date(), updatedAt: new Date(),
+    opportunity: null, owner: { id: "o1", name: null, email: "zoe.private@x.com" }, publications: [], decisions: [{ verdict: "APPROVED", note: null, contentVersionId: "v2" }],
+    versions: [{ id: "v2", version: 2, body, createdAt: new Date(), createdBy: "u7", checks: [{ id: "q1", overall: "PASS", results: [{ check: "Frames", status: "pass", note: "3 frames, all rendered." }, { check: "Asset rights", status: "pass", note }] }] }],
+  });
+  const list = async (qs = "") => (await contentGet(req("GET", undefined, `http://x/api/content${qs}`), { params })).json();
+  beforeEach(() => {
+    body = storyBody();
+    db.contentItem.findMany.mockImplementation(async () => [row()]);
+  });
+
+  it("a client reviewer gets no email or local part in the list, ?id=, or the check, and the approval still holds", async () => {
+    m.authorize.mockResolvedValue({ ...scope, perms: new Set(clientRole.permissions), clientReviewer: true });
+    const hash = packageHash({ id: "i1", channel: "INSTAGRAM_STORY" }, { id: "v2", body });
+    const stored = structuredClone(body);
+    for (const out of [await list(), await list("?id=i1")]) {
+      const text = JSON.stringify(out);
+      expect(text).not.toMatch(/@|zoe|private|Yan Named|"u7"|"u8"/);
+      const item = out.items[0];
+      expect(item.owner).toEqual({ id: "o1", name: "A team member" });
+      expect(item.latest.body.frames.map((f: { rights: unknown }) => f.rights)).toEqual([{ kind: "confirmed" }, { kind: "owned" }, { kind: "confirmed" }]);
+      expect(item.latest.check.results[1]).toEqual({ check: "Asset rights", status: "pass", note: "Frame 1: Confirmed by a team member; Frame 2: Brand's own; Frame 3: Confirmed by a team member" });
+      expect(item.latest.check.results[0].note).toBe("3 frames, all rendered.");
+    }
+    // Read-side only: the stored body is untouched, so its hash (and the approval it backs) still holds.
+    expect(body).toEqual(stored);
+    expect(db.contentVersion.update).not.toHaveBeenCalled();
+    expect(db.contentVersion.updateMany).not.toHaveBeenCalled();
+    db.approvalDecision.findFirst.mockResolvedValue({ verdict: "APPROVED", contentVersionId: "v2", packageHash: hash });
+    expect(await currentApproval("i1", { id: "v2", body }, "INSTAGRAM_STORY")).not.toBeNull();
+  });
+
+  it("people who manage members see the stored rights and note", async () => {
+    m.authorize.mockResolvedValue({ ...scope, perms: new Set(["brand.read", "project.members.manage"]), clientReviewer: false });
+    const item = (await list()).items[0];
+    expect(item.owner).toEqual({ id: "o1", name: "zoe.private" });
+    expect(item.latest.body.frames[0].rights).toEqual(rights);
+    expect(item.latest.check.results[1].note).toBe(note);
   });
 });

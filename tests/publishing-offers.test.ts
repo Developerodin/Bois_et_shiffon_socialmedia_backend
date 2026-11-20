@@ -189,6 +189,17 @@ describe("releaseState", () => {
     expect(admin.accounts).toEqual([{ id: "conn", displayName: "Shop" }]);
   });
 
+  it("a blank name counts as no name, and someone no longer there is \"Someone\"", async () => {
+    db.contentItem.findFirst.mockResolvedValue(item("APPROVED"));
+    db.approvalDecision.findFirst.mockResolvedValue(approval());
+    db.approvalDecision.findMany.mockResolvedValue([{ ...approval(), userId: "u2", note: null, createdAt: new Date() }, { ...approval(), id: "d0", userId: "gone", note: null, createdAt: new Date() }]);
+    db.user.findMany.mockResolvedValue([{ id: "u2", name: "   ", email: "dana@shop.com" }]);
+    const reviewer = await releaseState(scope, "i1", new Set(["brand.read", "content.approve"]));
+    expect(reviewer.decisions.map((d) => d.by)).toEqual(["A team member", "Someone"]);
+    expect(JSON.stringify(reviewer)).not.toMatch(/@|dana/);
+    expect((await releaseState(scope, "i1", staff)).decisions[0]?.by).toBe("dana");
+  });
+
   it("a standing priority reads as a priority with no end", async () => {
     latest = version([], []);
     db.contentItem.findFirst.mockResolvedValue(item("PUBLISHED"));

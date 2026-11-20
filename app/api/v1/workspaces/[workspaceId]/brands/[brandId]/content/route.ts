@@ -10,7 +10,7 @@ import { signedMediaUrl } from "@/server/storage/media";
 import { CONTENT_GOALS } from "@/shared";
 import { contentWindow } from "@/server/content/window";
 import { personName } from "@/server/content/person-name";
-import { isStoryBody } from "@/server/stories/body";
+import { hideRightsNames, hideRightsNote, isStoryBody } from "@/server/stories/body";
 import { coverUrl, createStory, failStoryStart, itemForRequest, STORY_RENDER_JOB, STORY_START_NOTE, storyTab } from "@/server/stories/service";
 
 /** Calendar items with their latest draft and its latest quality check. */
@@ -74,11 +74,18 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       };
     };
     const stories = await Promise.all(rows.map(story));
+    // Who confirmed a story frame's rights (in the body and the check's note) is for people who manage members; the
+    // stored version is never rewritten (packageHash covers it), only what is sent.
+    const reveal = scope.perms.has("project.members.manage");
+    const check = (v: (typeof rows)[number]["versions"][number]) => {
+      const c = v.checks[0];
+      return !c || reveal ? (c ?? null) : { ...c, results: hideRightsNote(c.results, v.body) };
+    };
     return Response.json({
       items: rows.map(({ versions, decisions, publications, owner, ...i }, n) => ({
         ...i,
-        // Named as the owners list names them (the email's local part when there is no name), never the email itself.
-        owner: owner ? { id: owner.id, name: personName(owner) } : null,
+        // Named as the owners list names them, never the email itself.
+        owner: owner ? { id: owner.id, name: personName(owner, { reveal }) } : null,
         ...stories[n],
         // The last publish went wrong: "FAILED" (back to Approved, reason in publishError) or "CHECK" (may have posted).
         publishIssue: publications[0]?.status === "PENDING_VERIFY" ? "CHECK" : publications[0]?.status === "FAILED" && i.status === "APPROVED" ? "FAILED" : null,
@@ -86,11 +93,11 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
         latest: versions[0]
           ? {
               version: versions[0].version,
-              body: versions[0].body,
+              body: reveal ? versions[0].body : hideRightsNames(versions[0].body),
               createdAt: versions[0].createdAt,
               byPerson: versions[0].createdBy !== "agent",
               photoUrls: photoUrls[n],
-              check: versions[0].checks[0] ?? null,
+              check: check(versions[0]),
               // The approver's last word on this exact draft (e.g. the changes they asked for).
               review: decisions[0]?.contentVersionId === versions[0].id ? { verdict: decisions[0].verdict, note: decisions[0].note } : null,
             }

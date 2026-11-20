@@ -15,7 +15,7 @@ const db = vi.hoisted(() => {
   d.$transaction.mockImplementation(async (fn: (tx: typeof d) => unknown) => fn(d));
   return d;
 });
-const m = vi.hoisted(() => ({ people: vi.fn(), write: vi.fn(), direct: vi.fn(), planning: vi.fn() }));
+const m = vi.hoisted(() => ({ people: vi.fn(), write: vi.fn(), direct: vi.fn(), planning: vi.fn(), perms: new Set<string>(["brand.read", "content.create"]) }));
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/services/project-members", () => ({ listProjectPeople: m.people }));
@@ -39,7 +39,7 @@ vi.mock("@/server/reels/presenters", () => ({ donePresenter: vi.fn() }));
 vi.mock("@/server/reels/ownership", () => ({ planOwnershipProblems: vi.fn(async () => []) }));
 vi.mock("@/server/reels/recordings", () => ({ settleRecordings: vi.fn() }));
 vi.mock("@/server/reels/render", async (orig) => ({ ...(await orig<object>()), renderView: vi.fn(), renderFailure: vi.fn() }));
-vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1", userId: "u1" })) }));
+vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1", userId: "u1", perms: m.perms })) }));
 
 import { plannerAgent } from "@/server/agents/definitions/planner";
 import { GET as ownersGet } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/owners/route";
@@ -144,9 +144,29 @@ describe("setOwner", () => {
 
 describe("owners list", () => {
   it("merges workspace and project people by id, names without emails", async () => {
-    expect(await brandOwners(scope)).toEqual([{ id: "u1", name: "Ana" }, { id: "u2", name: "Bob" }, { id: "u3", name: "Cy" }]);
+    expect(await brandOwners(scope, { reveal: false })).toEqual([{ id: "u1", name: "Ana" }, { id: "u2", name: "Bob" }, { id: "u3", name: "Cy" }]);
     m.people.mockResolvedValue({ ...people(), people: [] });
-    expect((await brandOwners(scope)).find((o) => o.id === "u2")!.name).toBe("bob.smith");
+    expect((await brandOwners(scope, { reveal: true })).find((o) => o.id === "u2")!.name).toBe("bob.smith");
+    expect((await brandOwners(scope, { reveal: false })).find((o) => o.id === "u2")!.name).toBe("A team member");
+  });
+
+  it("numbers nameless people for someone who can't manage members, so the picker can tell them apart", async () => {
+    m.people.mockResolvedValue({
+      viaWorkspace: [{ userId: "u1", name: "Ana", email: "ana@x.com", role: "Owner", active: true }, { userId: "u2", name: null, email: "bob@x.com", role: "Admin", active: true }],
+      people: [{ id: "g2", userId: "u3", name: "  ", email: "cy@x.com", role: { id: "r", name: "Viewer", permissions: ["brand.read"] }, active: true, client: false }],
+      invitations: [],
+    });
+    expect(await brandOwners(scope, { reveal: false })).toEqual([{ id: "u1", name: "Ana" }, { id: "u2", name: "A team member" }, { id: "u3", name: "A team member (2)" }]);
+    expect(await brandOwners(scope, { reveal: true })).toEqual([{ id: "u1", name: "Ana" }, { id: "u2", name: "bob" }, { id: "u3", name: "cy" }]);
+  });
+
+  it("client reviewers are not offered as owners, and can't be given a post", async () => {
+    const p = people();
+    m.people.mockResolvedValue({ ...p, people: [...p.people, { id: "g9", userId: "u9", name: "Client Carl", email: "carl@client.com", role: { id: "rc", name: "Client reviewer", permissions: ["brand.read", "content.approve"] }, active: true, client: true }] });
+    expect((await brandOwners(scope, { reveal: true })).map((o) => o.id)).toEqual(["u1", "u2", "u3"]);
+    db.contentItem.findFirst.mockResolvedValue({ id: "i1", ownerId: "u1" });
+    await expect(setOwner(scope, "i1", "u9")).rejects.toMatchObject({ status: 400 });
+    expect(db.contentItem.update).not.toHaveBeenCalled();
   });
 
   it("leaves out grants whose role lacks brand.read and people who are disabled or deleted", async () => {
@@ -154,7 +174,7 @@ describe("owners list", () => {
     p.people.push({ id: "g3", userId: "u4", name: "Dee", email: "dee@x.com", role: { id: "r2", name: "Nothing", permissions: ["content.create"] }, active: true });
     p.people.push({ id: "g4", userId: "u5", name: "Eve", email: "eve@x.com", role: { id: "r", name: "Viewer", permissions: ["brand.read"] }, active: false });
     m.people.mockResolvedValue(p);
-    expect((await brandOwners(scope)).map((o) => o.id)).toEqual(["u1", "u2", "u3"]);
+    expect((await brandOwners(scope, { reveal: true })).map((o) => o.id)).toEqual(["u1", "u2", "u3"]);
     db.contentItem.findFirst.mockResolvedValue({ id: "i1", ownerId: "u1" });
     const errs: PublishingError[] = [];
     for (const who of ["u4", "u5", "u-nobody"]) await setOwner(scope, "i1", who).catch((e) => errs.push(e));
@@ -163,10 +183,14 @@ describe("owners list", () => {
     expect(db.contentItem.update).not.toHaveBeenCalled();
   });
 
-  it("GET /content/owners lists names without emails", async () => {
-    const res = await ownersGet(new Request("http://x"), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) });
-    const body = await res.json();
-    expect(body.owners).toHaveLength(3);
-    expect(JSON.stringify(body)).not.toContain("@");
+  it("GET /content/owners lists names without emails, and local parts only for people who manage members", async () => {
+    m.people.mockResolvedValue({ ...people(), people: [] });
+    const get = async () => (await ownersGet(new Request("http://x"), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) })).json();
+    const body = await get();
+    expect(body.owners).toEqual([{ id: "u1", name: "Ana" }, { id: "u2", name: "A team member" }]);
+    expect(JSON.stringify(body)).not.toMatch(/@|bob/);
+    m.perms = new Set(["brand.read", "content.create", "project.members.manage"]);
+    expect((await get()).owners).toEqual([{ id: "u1", name: "Ana" }, { id: "u2", name: "bob.smith" }]);
+    m.perms = new Set(["brand.read", "content.create"]);
   });
 });

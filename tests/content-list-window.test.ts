@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = { id: string; workspaceId: string; brandId: string; status: string; channel: string; scheduledFor: Date | null; createdAt: Date; updatedAt: Date };
-const db = vi.hoisted(() => ({ rows: [] as Row[], contentItem: { findMany: vi.fn() }, publicationAttempt: { findMany: vi.fn(async () => []) }, job: { findMany: vi.fn(async () => []) } }));
+const db = vi.hoisted(() => ({ perms: new Set<string>(["brand.read"]), rows: [] as Row[], contentItem: { findMany: vi.fn() }, publicationAttempt: { findMany: vi.fn(async () => []) }, job: { findMany: vi.fn(async () => []) } }));
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
-vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: async () => ({ userId: "u1", workspaceId: "w1", brandId: "b1" }) }));
+vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: async () => ({ userId: "u1", workspaceId: "w1", brandId: "b1", perms: db.perms }) }));
 vi.mock("@/server/agents/engine", () => ({ startAgentRun: vi.fn() }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
 vi.mock("@/server/services/publishing", () => ({ createPost: vi.fn(), ownMediaKey: () => true, postAiAllowed: vi.fn(), PublishingError: class extends Error {} }));
@@ -58,14 +58,19 @@ describe("GET /content window", () => {
     expect((await res.json()).items.map((i: { id: string }) => i.id)).toEqual(["old"]);
   });
 
-  it("names an owner without a name by their email's local part, never the email", async () => {
+  it("names an owner without a name by their email's local part to people who manage members, else \"A team member\"; never the email", async () => {
     db.rows.push(row("named", "PLANNED"), row("unnamed", "PLANNED", { createdAt: new Date(now) }), row("nobody", "PLANNED", { createdAt: new Date(now + 1) }));
     const owners: Record<string, unknown> = { named: { id: "u1", name: "Ann", email: "ann@x.com" }, unnamed: { id: "u2", name: null, email: "bo@x.com" }, nobody: null };
     const plain = db.contentItem.findMany.getMockImplementation()!;
     db.contentItem.findMany.mockImplementation(async (a: never) => (await plain(a)).map((r: Row) => ({ ...r, owner: owners[r.id] })));
     const { items } = await (await call()).json();
-    expect(items.map((i: { owner: unknown }) => i.owner)).toEqual([{ id: "u1", name: "Ann" }, { id: "u2", name: "bo" }, null]);
-    expect(JSON.stringify(items)).not.toContain("@");
+    expect(items.map((i: { owner: unknown }) => i.owner)).toEqual([{ id: "u1", name: "Ann" }, { id: "u2", name: "A team member" }, null]);
+    expect(JSON.stringify(items)).not.toMatch(/@|"bo"/);
+    db.perms = new Set(["brand.read", "project.members.manage"]);
+    const managed = (await (await call()).json()).items;
+    db.perms = new Set(["brand.read"]);
+    expect(managed.map((i: { owner: unknown }) => i.owner)).toEqual([{ id: "u1", name: "Ann" }, { id: "u2", name: "bo" }, null]);
+    expect(JSON.stringify(managed)).not.toContain("@");
   });
 
   it("answers 404 for a post of another brand", async () => {

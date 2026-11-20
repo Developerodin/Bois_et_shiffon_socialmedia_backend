@@ -7,7 +7,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
   try {
     const scope = await authorizeBrandRoute(request, context.params, "content.create");
     if (scope instanceof Response) return scope;
-    return Response.json({ owners: await brandOwners(scope) });
+    return Response.json({ owners: await brandOwners(scope, { reveal: scope.perms.has("project.members.manage") }) });
   } catch (error) {
     return fromAccessError(error);
   }

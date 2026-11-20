@@ -88,6 +88,14 @@ describe("resolveSource", () => {
     expect(await resolveSource(scope, { kind: "upload", id: "x" })).toMatchObject({ mediaKind: "video", durationSec: 12, rights: { kind: "confirmed", by: "u9", name: "Ann" } });
   });
 
+  it("never stores the confirmer's email as their name", async () => {
+    m.upload.mockResolvedValue({ key: "k", kind: "photo", durationSec: null, rightsConfirmedBy: "u9", rightsConfirmedAt: new Date() });
+    m.user.mockResolvedValue({ name: null, email: "ann.private@x.test" });
+    expect((await resolveSource(scope, { kind: "upload", id: "x" })).rights).toEqual({ kind: "confirmed", by: "u9", name: "A team member" });
+    m.user.mockResolvedValue(null);
+    expect((await resolveSource(scope, { kind: "upload", id: "x" })).rights).toEqual({ kind: "confirmed", by: "u9", name: "A team member" });
+  });
+
   it("refuses clips when only photos are allowed", async () => {
     await expect(resolveSource(scope, { kind: "reel", id: "k" }, { photosOnly: true })).rejects.toMatchObject({ code: "story.source" });
     m.upload.mockResolvedValue({ key: "k", kind: "video", durationSec: 5, rightsConfirmedBy: null, rightsConfirmedAt: null });

@@ -1,5 +1,5 @@
 import type { Prisma } from "@prisma/client";
-import { memberRole } from "@/server/auth/permissions";
+import { isClientGrant, memberRole } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { AccountFlowError, createInvitation } from "@/server/services/accounts";
 
@@ -24,7 +24,8 @@ export async function listProjectPeople(workspaceId: string, brandId: string) {
     viaWorkspace: members
       .filter((m) => m.roleRef?.permissions.includes("brand.read"))
       .map((m) => ({ userId: m.userId, name: m.user.name, email: m.user.email, role: m.roleRef!.name, active: isActive(m.user) })),
-    people: grants.map((g) => ({ id: g.id, userId: g.userId, name: g.user.name, email: g.user.email, role: { id: g.role.id, name: g.role.name, permissions: g.role.permissions }, active: isActive(g.user) })),
+    // client: the grant is the system client-reviewer role (brandOwners leaves those out).
+    people: grants.map((g) => ({ id: g.id, userId: g.userId, name: g.user.name, email: g.user.email, role: { id: g.role.id, name: g.role.name, permissions: g.role.permissions }, active: isActive(g.user), client: isClientGrant(g.role) })),
     invitations: invites.map((i) => ({ id: i.id, email: i.email, role: { id: i.role.id, name: i.role.name }, expiresAt: i.expiresAt.toISOString() })),
   };
 }

@@ -1,10 +1,10 @@
 import type { CheckResult } from "@/server/content/rules";
-import { FRAME_MAX_BYTES, STORY_LIMITS, type StoryBody } from "@/server/stories/body";
+import { ASSET_RIGHTS, FRAME_MAX_BYTES, rightsLines, STORY_LIMITS, type StoryBody } from "@/server/stories/body";
 import { textFits } from "@/server/stories/render";
 
 /** Story check rows about the frames' media, not their text: the Creator can't fix these, so it doesn't rewrite for them. */
-export const STORY_MEDIA_CHECKS = ["Frames", "Frame files", "Asset rights"] as const;
-const [FRAMES, FRAME_FILES, ASSET_RIGHTS] = STORY_MEDIA_CHECKS;
+export const STORY_MEDIA_CHECKS = ["Frames", "Frame files", ASSET_RIGHTS] as const;
+const [FRAMES, FRAME_FILES] = STORY_MEDIA_CHECKS;
 
 const MAX_CLIP_SECONDS = STORY_LIMITS.clipSeconds + 0.5; // the window plus encoder slack
 
@@ -39,11 +39,8 @@ export function checkStory(body: StoryBody): CheckResult[] {
   const missing = !body.link.trim() ? ["link"] : [];
   if (!body.cta.trim()) missing.push("CTA");
 
-  const rights = frames.map((f, i) => {
-    const r = f.rights;
-    const who = !r ? null : r.kind === "owned" ? "Brand's own" : `Confirmed by ${r.name.trim() || "a team member"}`;
-    return who ? `Frame ${i + 1}: ${who}` : null;
-  });
+  // Bodies stored before 2026-11-20 may hold the confirmer's email as their name: rightsLines never writes it.
+  const rights = rightsLines(frames, (r) => r.name);
   const noRights = rights.flatMap((r, i) => (r ? [] : [i + 1]));
 
   return [

@@ -15,7 +15,7 @@ vi.mock("@/server/api/brand-route", async () => {
   return {
     authorizeBrandRoute: async (_r: Request, _p: unknown, key: string) => {
       if (!m.perms.has(key)) throw new AccessDeniedError(`Missing permission ${key}`);
-      return { userId: "u1", workspaceId: "w1", brandId: "b1" };
+      return { userId: "u1", workspaceId: "w1", brandId: "b1", perms: m.perms };
     },
   };
 });
@@ -72,12 +72,24 @@ describe("GET /content/export", () => {
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
     const text = await res.text();
     expect(text).toContain("'=evil");
-    // An owner without a name: the email's local part, as in the app.
+    // An owner without a name: "A team member" to someone who can't manage members, as in the app.
     expect(text).toContain(",Ann,");
-    expect(text).toContain(",bo,");
-    expect(text).not.toContain("@");
+    expect(text).toContain(",A team member,");
+    expect(text).not.toMatch(/@|,bo,/);
     expect(m.queryRaw).toHaveBeenCalledTimes(1);
     expect(m.auditEvent.create).toHaveBeenCalled();
+  });
+});
+
+describe("CSV owner names", () => {
+  it("give a nameless owner's email local part only to people who manage members", async () => {
+    m.perms = new Set(["content.download", "project.members.manage"]);
+    m.contentItem.findMany.mockResolvedValueOnce([
+      { id: "i2", title: "U", channel: "INSTAGRAM_POST", status: "APPROVED", scheduledFor: new Date("2026-11-22T10:00:00Z"), postUrl: null, owner: { name: "  ", email: "bo@x.com" }, campaign: null },
+    ] as never);
+    const text = await (await call()).text();
+    expect(text).toContain(",bo,");
+    expect(text).not.toContain("@");
   });
 });
 

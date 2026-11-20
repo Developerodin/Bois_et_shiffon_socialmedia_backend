@@ -5,6 +5,7 @@ import { effectivePermissions } from "@/server/auth/permissions";
 import { accountErrorResponse, invalid } from "@/server/api/workspace-route";
 import { kickRunner } from "@/server/jobs/runner";
 import { prisma } from "@/server/db/prisma";
+import { personName } from "@/server/content/person-name";
 import { addToProject, listProjectPeople } from "@/server/services/project-members";
 
 type Ctx = { params: Promise<BrandRouteParams> };
@@ -28,8 +29,8 @@ export async function GET(request: Request, context: Ctx) {
     ]);
     if (perms.has("project.members.manage")) return Response.json({ ...people, roles });
     return Response.json({
-      viaWorkspace: people.viaWorkspace.map((m) => ({ userId: m.userId, name: m.name, role: m.role })),
-      people: people.people.map((g) => ({ id: g.id, userId: g.userId, name: g.name, role: { id: g.role.id, name: g.role.name } })),
+      viaWorkspace: people.viaWorkspace.map((m) => ({ userId: m.userId, name: personName(m, { reveal: false }), role: m.role })),
+      people: people.people.map((g) => ({ id: g.id, userId: g.userId, name: personName(g, { reveal: false }), role: { id: g.role.id, name: g.role.name } })),
       invitations: [],
       roles,
     });

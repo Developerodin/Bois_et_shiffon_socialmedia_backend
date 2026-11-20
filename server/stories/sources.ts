@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { personName, TEAM_MEMBER } from "@/server/content/person-name";
 import { prisma } from "@/server/db/prisma";
 import { needsAiDisclosure } from "@/server/reels/plan";
 import { safeFetchBytes } from "@/server/research/crawl";
@@ -73,7 +74,8 @@ async function uploadResolved(u: UploadRow): Promise<Resolved> {
   const base = owned(u.key, mediaKind, false, u.durationSec ?? undefined);
   if (!u.rightsConfirmedAt || !u.rightsConfirmedBy) return base;
   const user = await prisma.user.findUnique({ where: { id: u.rightsConfirmedBy }, select: { name: true, email: true } });
-  return { ...base, rights: { kind: "confirmed", by: u.rightsConfirmedBy, name: user?.name ?? user?.email ?? "" } };
+  // Stored in the version body, which everyone on the brand can read: a name, never the email (nor its local part).
+  return { ...base, rights: { kind: "confirmed", by: u.rightsConfirmedBy, name: user ? personName(user, { reveal: false }) : TEAM_MEMBER } };
 }
 
 /**

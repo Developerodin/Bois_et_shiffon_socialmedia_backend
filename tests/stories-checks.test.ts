@@ -67,6 +67,10 @@ describe("checkStory", () => {
     expect(r.note).toContain("Confirmed by a team member");
     expect(row(story({ frames: [frame(), frame(), frame({ rights: undefined })] }), "Asset rights").status).toBe("blocker");
   });
+  it("never writes an email into the rights note (older bodies stored the email as the name)", () => {
+    const r = row(story({ frames: [frame(), frame({ rights: { kind: "confirmed", by: "u7", name: "zoe.private@x.com" } }), frame()] }), "Asset rights");
+    expect(r.note).toBe("Frame 1: Brand's own; Frame 2: Confirmed by a team member; Frame 3: Brand's own");
+  });
 });
 
 describe("Quality on a story", () => {
@@ -95,5 +99,17 @@ describe("Quality on a story", () => {
     await qualityAgent.run(ctx, {});
     const init = (fetchMock.mock.calls[0] as unknown as [string, { body: URLSearchParams }])[1];
     expect(init.body.get("text")).toBe(storySlides(story()).join("\n"));
+  });
+  it("never sends who confirmed a file's rights to the AI, but stores the check with the name", async () => {
+    const body = story({ frames: [frame({ rights: { kind: "confirmed", by: "u7", name: "Zoe Private" } }), frame({ rights: { kind: "confirmed", by: "u8", name: "yan.secret@x.com" } }), frame(), frame()] });
+    db.contentItem.findMany.mockResolvedValue([{ id: "i1", title: "Milo story", channel: "INSTAGRAM_STORY", status: "DRAFT_REVIEW", brief: {}, campaignId: null, scheduledFor: null, productIds: [], versions: [{ id: "v1", version: 1, body, checks: [] }] }]);
+    await qualityAgent.run(ctx, {});
+    const prompt = String(ai.mock.calls[0][0].prompt);
+    for (const s of ["Zoe Private", "\"u7\"", "\"u8\"", "yan.secret", "@x.com"]) expect(prompt).not.toContain(s);
+    expect(prompt).toContain("Confirmed by a team member");
+    const stored = (db.qualityCheck.create.mock.calls[0][0].data.results as { check: string; note: string }[]).find((r) => r.check === "Asset rights")!;
+    expect(stored.note).toBe("Frame 1: Confirmed by Zoe Private; Frame 2: Confirmed by a team member; Frame 3: Brand's own; Frame 4: Brand's own");
+    // The stored body itself is left as it was (its hash backs approvals).
+    expect(body.frames[0]!.rights).toEqual({ kind: "confirmed", by: "u7", name: "Zoe Private" });
   });
 });

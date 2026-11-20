@@ -14,7 +14,7 @@ import { campaignKind, isWithdrawn, offerIssues, offerSnapshotOf, wallTime } fro
 import { liveOfferFor, productIdsForPhoto } from "@/server/content/knowledge";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { listProjectPeople } from "@/server/services/project-members";
-import { personName } from "@/server/content/person-name";
+import { personName, TEAM_MEMBER } from "@/server/content/person-name";
 import { signedMediaUrl } from "@/server/storage/media";
 import type { StoryBody } from "@/server/stories/body";
 import { attemptOutcome, expiredFrames, type FrameProgress, nextFramesToPublish, publishingLimitRoom, settleStoryFrame, unconfirmedMessage, withFrame } from "@/server/stories/publish";
@@ -217,26 +217,34 @@ export async function createPost(input: { workspaceId: string; brandId: string; 
 
 /**
  * The people a post can be given to: everyone with brand.read on the brand (workspace roles and project grants), once each.
- * Names only, never emails: the list is open to anyone who can create posts. ponytail: reads every member of the workspace; fine for small teams.
+ * Names only, never emails: the list is open to anyone who can create posts. `reveal` (the caller holds
+ * project.members.manage): nameless people by their email's local part; else "A team member", "A team member (2)", …
+ * so the picker can tell them apart. Client reviewers review the work, they don't own it: their grants are left out.
+ * ponytail: reads every member of the workspace; fine for small teams.
  */
-export async function brandOwners(scope: { workspaceId: string; brandId: string }) {
+export async function brandOwners(scope: { workspaceId: string; brandId: string }, { reveal }: { reveal: boolean }) {
   const { viaWorkspace, people } = await listProjectPeople(scope.workspaceId, scope.brandId);
   const byId = new Map<string, { id: string; name: string; named: boolean }>();
   // Project roles are free-form: a grant counts only when its role holds brand.read. Disabled and deleted people never do.
-  const reach = [...viaWorkspace, ...people.filter((g) => g.role.permissions.includes("brand.read"))].filter((p) => p.active);
+  const reach = [...viaWorkspace, ...people.filter((g) => g.role.permissions.includes("brand.read") && !g.client)].filter((p) => p.active);
   for (const p of reach) {
     const named = !!p.name?.trim();
     const seen = byId.get(p.userId);
-    // The same person on both lists: keep a real name over the email's local part.
-    if (!seen || (!seen.named && named)) byId.set(p.userId, { id: p.userId, name: personName(p), named });
+    // The same person on both lists: keep a real name over the fallback.
+    if (!seen || (!seen.named && named)) byId.set(p.userId, { id: p.userId, name: personName(p, { reveal }), named });
   }
-  return [...byId.values()].map(({ id, name }) => ({ id, name }));
+  let nameless = 0;
+  return [...byId.values()].map(({ id, name, named }) => {
+    if (named || reveal) return { id, name };
+    nameless++;
+    return { id, name: nameless === 1 ? TEAM_MEMBER : `${TEAM_MEMBER} (${nameless})` };
+  });
 }
 
 /** Give a post to someone with access to the brand, or to nobody (null). An unknown user and one without access get the same 400. */
 export async function setOwner(scope: { workspaceId: string; brandId: string; userId: string }, itemId: string, userId: string | null) {
   // ponytail: checked outside the transaction, so removing the member in the same instant can still let one assignment through; a lock on membership if that matters.
-  if (userId && !(await brandOwners(scope)).some((o) => o.id === userId)) throw new PublishingError("Pick someone who works on this brand.", 400, "owner.invalid");
+  if (userId && !(await brandOwners(scope, { reveal: false })).some((o) => o.id === userId)) throw new PublishingError("Pick someone who works on this brand.", 400, "owner.invalid");
   await prisma.$transaction(async (tx) => {
     await lock(tx, itemId);
     const item = await tx.contentItem.findFirst({ where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { id: true, ownerId: true } });
@@ -999,11 +1007,10 @@ export async function releaseState(scope: { workspaceId: string; brandId: string
   const productNames = new Map(linked.map((l) => [l.id, l.name]));
   const missing = [...new Set([...overrides.values()].flatMap((o) => o.productIds))].filter((id) => !productNames.has(id));
   for (const l of missing.length ? await linkedProducts(prisma, scope, missing) : []) productNames.set(l.id, l.name);
-  const emails = perms.has("project.members.manage");
+  const reveal = perms.has("project.members.manage");
   const who = (id: string) => {
     const u = users.find((x) => x.id === id);
-    if (!u) return "Someone";
-    return u.name || (emails ? u.email.split("@")[0]! : "A team member");
+    return u ? personName(u, { reveal }) : "Someone";
   };
   const accountName = new Map(accounts.map((a) => [a.id, a.displayName]));
   const overrideNames = (o: ProductOverride) => [...o.productIds.map((id) => productNames.get(id) ?? id), ...(o.offers ?? []).map((id) => `${campaigns.get(id)?.name ?? "an offer"} (offer ended)`)];

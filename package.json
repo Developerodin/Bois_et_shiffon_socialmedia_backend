@@ -25,6 +25,7 @@
     "platform-admin": "tsx --conditions=react-server --env-file=.env scripts/platform-admin.ts",
     "set-password": "tsx --conditions=react-server --env-file=.env scripts/set-password.ts",
     "usage": "tsx --conditions=react-server --env-file=.env scripts/usage-report.ts",
+    "redact:story-checks": "tsx --conditions=react-server --env-file=.env scripts/redact-story-checks.ts",
     "eval": "tsx --conditions=react-server --env-file=.env scripts/evals/run.ts",
     "smoke:auth": "tsx --conditions=react-server --env-file=.env scripts/smoke-auth.ts",
     "smoke:rbac": "tsx --conditions=react-server --env-file=.env scripts/smoke-rbac.ts",

@@ -27,6 +27,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to < from) return bad("from and to must be ISO dates, from before to");
     if (to.getTime() - from.getTime() > 366 * DAY) return bad("The range can be at most 366 days");
     if (!(await exportAllowed(scope.userId))) return tooManyExports();
+    const reveal = scope.perms.has("project.members.manage");
     const items = await prisma.contentItem.findMany({
       where: { workspaceId: scope.workspaceId, brandId: scope.brandId, status: { not: "CANCELLED" }, scheduledFor: { gte: from, lte: to } },
       select: { id: true, title: true, channel: true, status: true, scheduledFor: true, postUrl: true, owner: { select: { name: true, email: true } }, campaign: { select: { name: true } } },
@@ -48,7 +49,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
         Channel: i.channel,
         Status: i.status,
         Title: i.title,
-        Owner: i.owner ? personName(i.owner) : "",
+        Owner: i.owner ? personName(i.owner, { reveal }) : "",
         Campaign: i.campaign?.name ?? "",
         Caption: caption.get(i.id) ?? "",
         "Post link": i.postUrl,

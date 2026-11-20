@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TEAM_MEMBER } from "@/server/content/person-name";
 import { PublishingError } from "@/server/services/publishing";
 
 export const STORY_LIMITS = { frames: [3, 5], maxFrames: 5, label: 30, headline: 60, body: 120, cta: 40, composition: 100, clipSeconds: 15, link: 2000 } as const;
@@ -59,6 +60,45 @@ export function parseStoryInput(raw: unknown): StoryInput {
 export function storySlides(body: Pick<StoryBody, "frames" | "cta">): string[] {
   const frames = body.frames.map((f) => [f.label, f.headline, f.body].filter(Boolean).join("\n"));
   return [...frames, body.cta].filter(Boolean);
+}
+
+/** The story check row that says who confirmed each frame's rights (stories/checks.ts). */
+export const ASSET_RIGHTS = "Asset rights";
+
+type Rights = { kind: string; by?: string; name?: string };
+
+/**
+ * The "Asset rights" pass note's parts, one per frame ("Frame 2: Confirmed by Ana"), null for a frame without rights.
+ * `nameOf` names who confirmed; whatever it returns, anything that looks like an email reads as "a team member".
+ */
+export function rightsLines(frames: { rights?: Rights }[], nameOf: (r: Rights) => string | undefined) {
+  return frames.map((f, i) => {
+    const r = f.rights;
+    if (!r) return null;
+    const name = nameOf(r)?.trim();
+    const who = r.kind === "owned" ? "Brand's own" : `Confirmed by ${!name || name === TEAM_MEMBER || name.includes("@") ? "a team member" : name}`;
+    return `Frame ${i + 1}: ${who}`;
+  });
+}
+
+/**
+ * A check's rows with the "Asset rights" pass note reworded so who confirmed reads "a team member": for people without
+ * project.members.manage, and for the AI. `body` is the checked version's. Other rows, and non-story checks, as they are.
+ */
+export function hideRightsNote<R>(results: R, body: unknown): R {
+  if (!isStoryBody(body) || !Array.isArray(results)) return results;
+  const note = rightsLines(body.frames, () => undefined).join("; ");
+  return results.map((r: { check?: unknown; status?: unknown }) => (r?.check === ASSET_RIGHTS && r.status === "pass" ? { ...r, note } : r)) as R;
+}
+
+/**
+ * A story body without who confirmed each frame's rights (`by`, `name`; the kind stays): what people without
+ * project.members.manage, and the AI, get. A copy: stored version bodies are never rewritten (packageHash covers them).
+ * Anything that isn't a story body comes back as it is.
+ */
+export function hideRightsNames<T>(body: T): T {
+  if (!isStoryBody(body)) return body;
+  return { ...body, frames: body.frames.map(({ rights, ...f }) => ({ ...f, rights: rights && { kind: rights.kind } })) } as T;
 }
 
 export function isStoryBody(x: unknown): x is StoryBody {
