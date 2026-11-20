@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
@@ -17,6 +18,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     if (scope instanceof Response) return scope;
     // ?id= opens one post whatever its age (a link to an old post); otherwise the calendar window.
     const id = new URL(request.url).searchParams.get("id");
+    // Spreading `open` after `base` replaces base.status safely (open never holds CANCELLED); ?id= of a cancelled post is a 404 on purpose.
     const base = { workspaceId: scope.workspaceId, brandId: scope.brandId, status: { not: "CANCELLED" as const } };
     const [open, recent] = contentWindow(new Date()).OR;
     const include = {
@@ -26,14 +28,15 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       publications: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, error: true } },
     } as const;
     // Unscheduled first (a post just made in the app has no date yet), then by date.
-    const orderBy = [{ scheduledFor: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }] as const;
+    const orderBy: Prisma.ContentItemOrderByWithRelationInput[] = [{ scheduledFor: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }];
     // ponytail: open posts + 30 days of changes, 200 rows; past 200 open posts add from/to and filter params.
     // Open posts are read first so a long history (undated, so sorted first) can never push upcoming posts out.
-    const openRows = await prisma.contentItem.findMany({ where: id ? { ...base, id } : { ...base, ...open }, orderBy: [...orderBy], take: 200, include });
+    const openRows = await prisma.contentItem.findMany({ where: id ? { ...base, id } : { ...base, ...open }, orderBy, take: 200, include });
     const recentRows = id || openRows.length >= 200
       ? []
-      : await prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy: [...orderBy], take: 200 - openRows.length, include });
-    const rows = [...openRows, ...recentRows];
+      : await prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy, take: 200 - openRows.length, include });
+    // Each half is sorted on its own; sort the whole once so the list keeps one order (undated first, then date, then creation).
+    const rows = [...openRows, ...recentRows].sort((a, b) => (a.scheduledFor?.getTime() ?? -Infinity) - (b.scheduledFor?.getTime() ?? -Infinity) || a.createdAt.getTime() - b.createdAt.getTime());
     if (id && !rows.length) return problemResponse({ type: "https://api.brandpilot/errors/not-found", title: "Post not found", status: 404 });
     // The draft's pictures (photoKeys, the first is the cover), signed for an hour: Today, Calendar and the post show them.
     // A studio reel has no photoKeys: its first scene's photo stands in as the cover.

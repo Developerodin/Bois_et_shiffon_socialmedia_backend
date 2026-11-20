@@ -62,4 +62,20 @@ describe("GET /content window", () => {
     db.rows.push(row("other", "PUBLISHED", { brandId: "b2" }));
     expect((await call("?id=other")).status).toBe(404);
   });
+  it("returns one global order across open and recent posts", async () => {
+    db.rows.push(row("future", "SCHEDULED", { scheduledFor: new Date(now + 2 * DAY) }));
+    db.rows.push(row("past", "PUBLISHED", { scheduledFor: new Date(now - 3 * DAY) }));
+    db.rows.push(row("undated", "PLANNED"));
+    db.rows.push(row("undatedPublished", "PUBLISHED", { createdAt: new Date(now - 2 * DAY) }));
+    const { items } = await (await call()).json();
+    expect(items.map((i: { id: string }) => i.id)).toEqual(["undatedPublished", "undated", "past", "future"]);
+  });
+
+  it("fills the 200 rows with open posts when there are more, with no recent rows", async () => {
+    for (let n = 0; n < 230; n++) db.rows.push(row(`o${n}`, "PLANNED", { scheduledFor: new Date(now + n * DAY) }));
+    db.rows.push(row("hist", "PUBLISHED"));
+    const { items } = await (await call()).json();
+    expect(items).toHaveLength(200);
+    expect(items.some((i: { id: string }) => i.id === "hist")).toBe(false);
+  });
 });
