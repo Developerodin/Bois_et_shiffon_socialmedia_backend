@@ -59,10 +59,19 @@ describe("new post requests", () => {
     expect(m.allowed).not.toHaveBeenCalled();
   });
 
-  it("a post's requestId is not a story's", async () => {
+  it("a post's requestId is not a story's: the lookup's where names the channel", async () => {
+    // The real query, not the in-memory match above: what itemForRequest asks the database for.
+    const scope = { workspaceId: "w1", brandId: "b1" };
+    const brief = { path: ["requestId"], equals: RID };
+    await itemForRequest(scope, RID, { channel: "INSTAGRAM_STORY" });
+    expect(db.contentItem.findFirst).toHaveBeenLastCalledWith({ where: { ...scope, channel: "INSTAGRAM_STORY", brief }, select: { id: true } });
+    await itemForRequest(scope, RID, { channel: ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL"] });
+    expect(db.contentItem.findFirst).toHaveBeenLastCalledWith({ where: { ...scope, channel: { in: ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL"] }, brief }, select: { id: true } });
+    // A new post's repeat check asks for posts only.
+    db.contentItem.findFirst.mockClear();
     await post(body({ requestId: RID }));
-    expect(await itemForRequest({ workspaceId: "w1", brandId: "b1" }, RID, { channel: "INSTAGRAM_STORY" })).toBeNull();
-    expect(await itemForRequest({ workspaceId: "w1", brandId: "b1" }, RID)).toMatchObject({ id: "i1" });
+    for (const [args] of db.contentItem.findFirst.mock.calls) expect(args.where.channel).toEqual({ in: ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL"] });
+    expect(db.contentItem.findFirst).toHaveBeenCalled();
   });
 
   it("no requestId keeps today's behaviour", async () => {
