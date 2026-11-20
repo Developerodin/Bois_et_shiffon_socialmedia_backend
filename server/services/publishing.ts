@@ -197,7 +197,9 @@ export async function createPost(input: { workspaceId: string; brandId: string; 
 export async function brandOwners(scope: { workspaceId: string; brandId: string }) {
   const { viaWorkspace, people } = await listProjectPeople(scope.workspaceId, scope.brandId);
   const byId = new Map<string, { id: string; name: string; named: boolean }>();
-  for (const p of [...viaWorkspace, ...people]) {
+  // Project roles are free-form: a grant counts only when its role holds brand.read. Disabled and deleted people never do.
+  const reach = [...viaWorkspace, ...people.filter((g) => g.role.permissions.includes("brand.read"))].filter((p) => p.active);
+  for (const p of reach) {
     const name = p.name?.trim();
     const seen = byId.get(p.userId);
     // The same person on both lists: keep a real name over the email's local part.
@@ -208,6 +210,7 @@ export async function brandOwners(scope: { workspaceId: string; brandId: string 
 
 /** Give a post to someone with access to the brand, or to nobody (null). An unknown user and one without access get the same 400. */
 export async function setOwner(scope: { workspaceId: string; brandId: string; userId: string }, itemId: string, userId: string | null) {
+  // ponytail: checked outside the transaction, so removing the member in the same instant can still let one assignment through; a lock on membership if that matters.
   if (userId && !(await brandOwners(scope)).some((o) => o.id === userId)) throw new PublishingError("Pick someone who works on this brand.", 400, "owner.invalid");
   await prisma.$transaction(async (tx) => {
     await lock(tx, itemId);

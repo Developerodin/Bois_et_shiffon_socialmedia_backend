@@ -52,8 +52,8 @@ const scope = { workspaceId: "w1", brandId: "b1", userId: "u1" };
 const RID = "6f1c2c1e-6a43-4c1b-9a3e-2f1d5b7c8a90";
 const created = (n = 0) => db.contentItem.create.mock.calls[n]![0].data as Record<string, unknown>;
 const people = () => ({
-  viaWorkspace: [{ userId: "u1", name: "Ana", email: "ana@x.com", role: "Owner" }, { userId: "u2", name: null, email: "bob.smith@x.com", role: "Admin" }],
-  people: [{ id: "g1", userId: "u2", name: "Bob", email: "bob.smith@x.com", role: { id: "r", name: "Creator" } }, { id: "g2", userId: "u3", name: "Cy", email: "cy@x.com", role: { id: "r", name: "Viewer" } }],
+  viaWorkspace: [{ userId: "u1", name: "Ana", email: "ana@x.com", role: "Owner", active: true }, { userId: "u2", name: null, email: "bob.smith@x.com", role: "Admin", active: true }],
+  people: [{ id: "g1", userId: "u2", name: "Bob", email: "bob.smith@x.com", role: { id: "r", name: "Creator", permissions: ["brand.read"] }, active: true }, { id: "g2", userId: "u3", name: "Cy", email: "cy@x.com", role: { id: "r", name: "Viewer", permissions: ["brand.read"] }, active: true }],
   invitations: [],
 });
 
@@ -147,6 +147,20 @@ describe("owners list", () => {
     expect(await brandOwners(scope)).toEqual([{ id: "u1", name: "Ana" }, { id: "u2", name: "Bob" }, { id: "u3", name: "Cy" }]);
     m.people.mockResolvedValue({ ...people(), people: [] });
     expect((await brandOwners(scope)).find((o) => o.id === "u2")!.name).toBe("bob.smith");
+  });
+
+  it("leaves out grants whose role lacks brand.read and people who are disabled or deleted", async () => {
+    const p = people();
+    p.people.push({ id: "g3", userId: "u4", name: "Dee", email: "dee@x.com", role: { id: "r2", name: "Nothing", permissions: ["content.create"] }, active: true });
+    p.people.push({ id: "g4", userId: "u5", name: "Eve", email: "eve@x.com", role: { id: "r", name: "Viewer", permissions: ["brand.read"] }, active: false });
+    m.people.mockResolvedValue(p);
+    expect((await brandOwners(scope)).map((o) => o.id)).toEqual(["u1", "u2", "u3"]);
+    db.contentItem.findFirst.mockResolvedValue({ id: "i1", ownerId: "u1" });
+    const errs: PublishingError[] = [];
+    for (const who of ["u4", "u5", "u-nobody"]) await setOwner(scope, "i1", who).catch((e) => errs.push(e));
+    expect(errs.map((e) => e.status)).toEqual([400, 400, 400]);
+    expect(new Set(errs.map((e) => e.message)).size).toBe(1);
+    expect(db.contentItem.update).not.toHaveBeenCalled();
   });
 
   it("GET /content/owners lists names without emails", async () => {

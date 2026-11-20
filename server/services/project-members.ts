@@ -3,6 +3,8 @@ import { memberRole } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { AccountFlowError, createInvitation } from "@/server/services/accounts";
 
+const isActive = (u: { status: string; deletedAt: Date | null }) => u.status === "ACTIVE" && !u.deletedAt;
+
 /**
  * People on one project (brand): workspace Owners/Admins reach it through their workspace role;
  * everyone else through a project grant (BrandMember) with a PROJECT role.
@@ -21,8 +23,8 @@ export async function listProjectPeople(workspaceId: string, brandId: string) {
     // ponytail: legacy members with roleId null are left out here; none exist since the role migration.
     viaWorkspace: members
       .filter((m) => m.roleRef?.permissions.includes("brand.read"))
-      .map((m) => ({ userId: m.userId, name: m.user.name, email: m.user.email, role: m.roleRef!.name })),
-    people: grants.map((g) => ({ id: g.id, userId: g.userId, name: g.user.name, email: g.user.email, role: { id: g.role.id, name: g.role.name } })),
+      .map((m) => ({ userId: m.userId, name: m.user.name, email: m.user.email, role: m.roleRef!.name, active: isActive(m.user) })),
+    people: grants.map((g) => ({ id: g.id, userId: g.userId, name: g.user.name, email: g.user.email, role: { id: g.role.id, name: g.role.name, permissions: g.role.permissions }, active: isActive(g.user) })),
     invitations: invites.map((i) => ({ id: i.id, email: i.email, role: { id: i.role.id, name: i.role.name }, expiresAt: i.expiresAt.toISOString() })),
   };
 }
