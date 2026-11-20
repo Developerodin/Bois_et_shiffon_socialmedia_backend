@@ -35,6 +35,12 @@ vi.mock("@/server/auth/rate-limit", async (orig) => ({
     return { allowed: count <= limit, count };
   }),
 }));
+vi.mock("@/server/services/connections", async (orig) => ({
+  ...(await orig<object>()),
+  listConnections: vi.fn(async () => [{ id: "c1" }]),
+  listProviders: vi.fn(() => []),
+  toConnectionDto: vi.fn((c: { id: string }) => ({ id: c.id })),
+}));
 vi.mock("@/server/services/publishing", async (orig) => ({
   ...(await orig<object>()),
   decide: m.decide,
@@ -117,7 +123,6 @@ describe("re-gated routes", () => {
     ["conversation POST (reply)", () => threadPost(req("POST", {}), { params }), "publish.execute"],
     ["Google reviews", () => reviewsGet(req(), { params }), "inbox.read"],
     ["Google profile", () => googleGet(req(), { params }), "inbox.read"],
-    ["connections", () => connectionsGet(req(), { params }), "inbox.read"],
     ["chat GET", () => chatGet(req(), { params }), "agents.read"],
     ["chat POST", () => chatPost(req("POST", {}), { params }), "agents.read"],
     ["translate", () => translatePost(req("POST", {}), { params }), "agents.read"],
@@ -134,6 +139,24 @@ describe("re-gated routes", () => {
     caller([]);
     expect((await creditsGet(req("GET", undefined, url), wsParams)).status).toBe(200);
     expect((await creditsGet(req("GET", undefined, `${url}?history=1`), wsParams)).status).toBe(403);
+  });
+});
+
+describe("connections list", () => {
+  const list = () => connectionsGet(req(), { params });
+  beforeEach(() => m.authorize.mockResolvedValue(scope));
+
+  it("is authorized as brand.read, then needs inbox.read, publish.execute or integrations.manage", async () => {
+    caller([], clientRole);
+    expect((await list()).status).toBe(403);
+    expect(m.authorize.mock.calls[0]![2]).toBe("brand.read");
+  });
+
+  it.each([["publish.execute"], ["integrations.manage"], ["inbox.read"]])("a role holding only %s (plus brand.read) gets the list", async (key) => {
+    caller([], { isSystem: false, slug: "custom", permissions: ["brand.read", key] });
+    const res = await list();
+    expect(res.status).toBe(200);
+    expect((await res.json()).connections).toEqual([{ id: "c1" }]);
   });
 });
 
