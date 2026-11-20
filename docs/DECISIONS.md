@@ -309,10 +309,41 @@ Pre-publish: re-run stock/offer/product snapshot freshness even if approved earl
 
 ---
 
+## DEC-026 — Why Postgres (Neon) and not MongoDB, re-checked
+
+**Status:** Accepted (re-confirms DEC-025, 2026-11-20)
+**Context:** The owner asked why Postgres on Neon beats MongoDB for this app, and what Neon costs us. Checked against the code and the vendors' own docs on 2026-11-20.
+
+**Why Postgres fits this app**
+1. **The database guards the data.** 51 relations and 47 onDelete rules (38 Cascade) in `prisma/schema.prisma`: a post can't point at a deleted brand, an approval can't point at a missing draft, deleting a brand removes its posts, approvals and runs. On MongoDB the database enforces none of this; every rule becomes app code.
+2. **Multi-step actions are all-or-nothing.** 58 `$transaction` uses, 7 `pg_advisory_xact_lock` and 2 `FOR UPDATE` (credits, publishing, stories, agents, clones, mobile auth). This is what stops a duplicate Instagram post or a double charge after a crash or a retry. MongoDB has multi-document transactions only on a replica set and no equivalent locks.
+3. **The tooling supports it fully.** Prisma 7 does not support MongoDB (latest supported 6.19); on MongoDB, Prisma Migrate is unavailable (`db push` only) and relations aren't enforced (https://www.prisma.io/docs/orm/overview/databases/mongodb). The job queue claims work with `FOR UPDATE SKIP LOCKED` and leases (`server/jobs/queue.ts`); rate limits are one `ON CONFLICT` upsert.
+4. **The data is relational.** Workspaces → brands → posts → versions → approvals → publications → learning notes, plus 49 unique constraints and composite tenant keys.
+
+**Where MongoDB would win:** no migrations for structure changes, easy local setup, a Mumbai region (Atlas M10+ only), loose document data. None outweighs the points above for an app that publishes posts and spends credits for clients. Moving now would be a multi-week rewrite (50 models, 33 raw SQL sites, all transactions and locks).
+
+**Costs and limits of Neon (what we accept)**
+- **Region:** the database is in Frankfurt (eu-central-1), chosen for EU data residency (Bois & Chiffons is French). Neon has **no Mumbai region**; its Asia regions are Singapore and Sydney (https://neon.com/docs/introduction/regions).
+- **Latency from India in dev:** ~150–170 ms per round trip; a brand route makes 7–9 sequential auth queries, a reel poll 13–15 (~2.3 s). In-region it is single-digit ms. MongoDB would not change this; distance × query count does.
+- **Free plan:** sleeps after 5 min idle (can't be turned off on Free), wake-up "a few hundred milliseconds" to "a few seconds"; 100 CU-hours and 1 GB per project; 6-hour restore; no SLA (https://neon.com/pricing, https://neon.com/docs/connect/connection-latency).
+- **Paid:** Launch $0.106/CU-hour + $0.35/GB-month, restore up to 7 days, suspend optional; Scale ~2× per hour, 30-day restore, SLA.
+- **Lock-in:** low for the database (plain Postgres, no Neon driver). The media bucket uses Neon Object Storage, which is Neon-specific and only in four regions — that is the sticky part.
+- **Pooled connections:** SQL-level `PREPARE`, `LISTEN/NOTIFY` and `SET` don't work through the pooler (not used here); migrations use `DATABASE_URL_UNPOOLED`.
+- Neon is owned by Databricks; a Neon DPA wasn't on the pages checked — confirm at trust.neon.com before signing a client.
+
+**Consequences / what we do instead of switching**
+1. Run the production API in Frankfurt, next to the database (see DEPLOY_EC2.md).
+2. Move to Neon Launch (always-on, 7-day restore) before real clients.
+3. Local development in India: plain Postgres in Docker (`postgres:17`, both URLs pointing at it), or a Neon branch per developer/tester.
+4. Later: cut the per-request auth queries to one or two.
+
+---
+
 ## Change log
 
 | Date | ADR | Change |
 |------|-----|--------|
+| 2026-11-20 | DEC-026 | Why Postgres (Neon) over MongoDB, re-checked; Neon costs and limits recorded |
 | 2026-10-21 | DEC-025 | Postgres + Object Storage on Neon; supersedes DEC-024; resolves U-006 |
 | 2026-10-16 | DEC-024 | Local dev MongoDB + db push; PostgreSQL migrations archived |
 | 2026-10-16 | All | Initial Phase 0 proposals |
