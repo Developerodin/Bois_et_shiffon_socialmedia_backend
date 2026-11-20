@@ -18,6 +18,9 @@ pure-function level only (focus restore, the slide, the flash, the Recent menu a
   (both saved), then the page scrolls to it and flashes it. No toast is involved.
 - A **Recent** menu beside Layout lists the last 8 items opened here; R reopens the last closed one.
 - Unsaved work is guarded per editor, so a post's caption and its release form each count and the person is asked once.
+- Drag a panel's header onto the "Open in preview" box (top-right corner, shown only while dragging) or pick
+  "Open in preview" in its ... menu: the panel opens in the side peek (`?peek=<panelId>`), the board unchanged. A
+  previewed panel renders twice (doubled polling, duplicate heading ids, separate local state); not in Recent.
 - Every Overview panel has an X in its header (same as Hide panel; it comes back from Layout).
 - The sidebar's "Your agents" can be reordered by dragging or Alt+Up/Down; the order is kept per browser
   (`nav.agentOrder.v1`, ids only, `lib/agent-order.ts`). Drag doesn't work on touch.
