@@ -436,3 +436,23 @@ Not MVP. Platforms may use polling + scheduled import instead.
 - Per-connection API: respect platform limits in connector
 
 Implementation: **database-backed atomic counters** per workspace/day for MVP (safe with multiple serverless instances). Redis optional later.
+
+## 17. Phase 0 additions (2026-11-20)
+
+The tables above are the original design; the built routes live under `/api/v1/workspaces/:workspaceId/brands/:brandId/`.
+
+| Method | Path | Permission | Notes |
+|--------|------|------------|-------|
+| GET | `content` | `brand.read` | Open posts plus anything updated in the last 30 days, 200 rows. `?id=` returns one post of any age (404 if cancelled). Each item carries `owner: { id, name }` or null. |
+| GET | `content/owners` | `content.create` | `{ owners: [{ id, name }] }`, people on the brand, no emails. |
+| POST | `content` | `content.create` | Optional `requestId` (uuid): a retry returns the first post before any rate limit is used. A post body may carry `pinLink` (max 2000). |
+| POST | `content/:id` | by action | New actions `setOwner` (`{ userId }` or null, `content.create`) and `postedByHand` (`{ url? }`, `publish.execute`). Decide never auto-publishes. |
+| GET | `content/export` | `content.download` | CSV of posts scheduled in `?from..?to` (default 90 days each way, max 366 days, 5,000 rows, cancelled left out). Columns: Date, Channel, Status, Title, Owner, Campaign, Caption, Post link. 20 per hour per user; audited. |
+| GET | `audit-reports/export` | `analytics.read` | CSV of the latest findings, `?kind=SEO` or `GEO`. 20 per hour per user. |
+| GET | `members` | `brand.read` | Full list only with `project.members.manage`; others get names and role names (no emails, invitations or role permissions). |
+| GET | `connections` | any of `CONNECTIONS_READ` | `inbox.read`, `publish.execute`, `integrations.manage` (`shared/permissions.ts`). |
+| GET | `/workspaces/:workspaceId/credits?history=1` | `members.read` | The ledger lines need `members.read`; without it the call is refused. |
+
+New permission keys: `inbox.read` (customer inbox and Google reviews; Owner, Admin, Project admin, Manager, Approver and
+custom roles with `publish.execute`) and `content.download` (CSV exports). New system project role `client-reviewer`:
+`brand.read`, `analytics.read`, `content.approve`, `content.download`; its approval counts but never publishes.

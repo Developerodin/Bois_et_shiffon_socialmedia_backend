@@ -344,3 +344,16 @@ type MetricValue = {
 
 - Raw external excerpts: configurable TTL (default 90 days) — **DEC-007**; enforced by scheduled `Job` type `RETENTION_CLEANUP` (deletes `SourceReference.rawExcerpt` or archives row)
 - Analytics snapshots: retain indefinitely; aggregate older than 24 months — later
+
+## 9. Phase 0 additions (2026-11-20)
+
+Built in Prisma (`prisma/schema.prisma`); section 5 is only a sketch.
+
+- `ContentItem.ownerId String?` to `User` (relation `ContentOwner`, `onDelete: SetNull`), index `(brandId, ownerId)`. Set
+  from the creator or the run's starter; null = unassigned. Migration `content_owner` backfills it.
+- Migration `approval_brand_index` adds an approval index by brand for the reviewer and `hasOtherApprover` lookups.
+- The create `requestId` is kept in the item's `brief` JSON (`brief.requestId`), not a column; a retried create finds the
+  first item through `itemForRequest` under an advisory lock.
+- A post body (`ContentVersion.body`) may hold `pinLink` (Pinterest destination, max 2000 chars).
+- Roles: system `client-reviewer` (PROJECT scope) added to every workspace by migration `client_reviewer`, which also adds
+  `inbox.read`, `content.download` and (custom roles with `brand.read`) `agents.read` by guarded `array_append`.

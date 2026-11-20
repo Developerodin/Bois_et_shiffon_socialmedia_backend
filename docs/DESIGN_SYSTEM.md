@@ -171,6 +171,12 @@ Customize via CSS variables above in `components.json`.
 ### Calendar
 
 - Month grid + list toggle; overdue in `--warning`
+- Filter row above the list (Phase 0): Channel, Status, Campaign (only when posts belong to campaigns), Owner (Mine,
+  Unassigned, a person), Needs action. Filters run in the browser over the loaded window.
+- No-matches state: "No posts match these filters" with a Clear filters button; the filter row stays visible.
+- Owner label on each card: small muted text, the owner's name or "Unassigned". Setting it is a select in the post's
+  detail view (people from `GET content/owners`).
+- New post dialog: opens from a product; one column (`grid-cols-[minmax(0,1fr)]`) so long names never scroll it sideways.
 
 ---
 
