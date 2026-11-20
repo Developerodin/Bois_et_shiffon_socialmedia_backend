@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { TEAM_MEMBER } from "@/server/content/person-name";
+import { isHiddenName } from "@/server/content/person-name";
 import { PublishingError } from "@/server/services/publishing";
 
 export const STORY_LIMITS = { frames: [3, 5], maxFrames: 5, label: 30, headline: 60, body: 120, cta: 40, composition: 100, clipSeconds: 15, link: 2000 } as const;
@@ -76,7 +76,7 @@ export function rightsLines(frames: { rights?: Rights }[], nameOf: (r: Rights) =
     const r = f.rights;
     if (!r) return null;
     const name = nameOf(r)?.trim();
-    const who = r.kind === "owned" ? "Brand's own" : `Confirmed by ${!name || name === TEAM_MEMBER || name.includes("@") ? "a team member" : name}`;
+    const who = r.kind === "owned" ? "Brand's own" : `Confirmed by ${isHiddenName(name) ? "a team member" : name}`;
     return `Frame ${i + 1}: ${who}`;
   });
 }
@@ -99,6 +99,22 @@ export function hideRightsNote<R>(results: R, body: unknown): R {
 export function hideRightsNames<T>(body: T): T {
   if (!isStoryBody(body)) return body;
   return { ...body, frames: body.frames.map(({ rights, ...f }) => ({ ...f, rights: rights && { kind: rights.kind } })) } as T;
+}
+
+/** An older body or note may hold a whole email as the name: only its local part goes out, to anyone (API_CONTRACTS: the whole email is never returned). */
+const localPart = (name: string) => (name.includes("@") ? name.split("@")[0]!.trim() || "a team member" : name);
+
+/** What people who manage members get of a story body: as stored, except a rights name that is an email shows its local part. A copy. */
+export function revealRightsNames<T>(body: T): T {
+  if (!isStoryBody(body)) return body;
+  return { ...body, frames: body.frames.map((f) => (f.rights?.kind === "confirmed" ? { ...f, rights: { ...f.rights, name: localPart(f.rights.name) } } : f)) } as T;
+}
+
+/** The same for a check's "Asset rights" pass note: "Confirmed by ana@x.com" reads "Confirmed by ana". */
+export function revealRightsNote<R>(results: R): R {
+  if (!Array.isArray(results)) return results;
+  return results.map((r: { check?: unknown; status?: unknown; note?: unknown }) =>
+    r?.check === ASSET_RIGHTS && r.status === "pass" && typeof r.note === "string" ? { ...r, note: r.note.replace(/Confirmed by ([^;]+)/g, (_m, n: string) => `Confirmed by ${localPart(n.trim())}`) } : r) as R;
 }
 
 export function isStoryBody(x: unknown): x is StoryBody {

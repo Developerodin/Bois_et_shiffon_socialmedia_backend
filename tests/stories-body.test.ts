@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { parseStoryInput, storySlides, isStoryBody } from "@/server/stories/body";
+import { parseStoryInput, storySlides, isStoryBody, revealRightsNames, revealRightsNote } from "@/server/stories/body";
 
 vi.mock("@/server/db/prisma", () => ({ prisma: {} }));
 
@@ -40,5 +40,19 @@ describe("isStoryBody", () => {
     expect(isStoryBody({ frames: [], cta: "", link: "", hook: "", productIds: [], brandMark: false })).toBe(true);
     expect(isStoryBody({ frames: "x" })).toBe(false);
     expect(isStoryBody(null)).toBe(false);
+  });
+});
+
+describe("reveal helpers: no whole email goes out, even to people who manage members", () => {
+  const body = { frames: [{ label: "", headline: "", body: "", rights: { kind: "confirmed", by: "u1", name: "zoe@x.com" } }, { label: "", headline: "", body: "", rights: { kind: "confirmed", by: "u2", name: "Yan" } }, { label: "", headline: "", body: "", rights: { kind: "owned" } }], cta: "", link: "", hook: "", productIds: [], brandMark: false };
+  it("maps an email rights name to its local part, leaving names and owned alone, without changing the input", () => {
+    const out = revealRightsNames(body);
+    expect(out.frames.map((f) => f.rights)).toEqual([{ kind: "confirmed", by: "u1", name: "zoe" }, { kind: "confirmed", by: "u2", name: "Yan" }, { kind: "owned" }]);
+    expect(body.frames[0]!.rights).toEqual({ kind: "confirmed", by: "u1", name: "zoe@x.com" });
+    expect(revealRightsNames({ caption: "post" })).toEqual({ caption: "post" });
+  });
+  it("rewrites email names in the Asset rights pass note only", () => {
+    const results = [{ check: "Frames", status: "pass", note: "a@b.c" }, { check: "Asset rights", status: "pass", note: "Frame 1: Confirmed by zoe@x.com; Frame 2: Confirmed by Yan; Frame 3: Brand's own" }, { check: "Asset rights", status: "blocker", note: "q@x.com" }];
+    expect(revealRightsNote(results).map((r) => r.note)).toEqual(["a@b.c", "Frame 1: Confirmed by zoe; Frame 2: Confirmed by Yan; Frame 3: Brand's own", "q@x.com"]);
   });
 });

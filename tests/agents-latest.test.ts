@@ -5,6 +5,7 @@ vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: async () => ({ userId: "u1", workspaceId: "w1", brandId: "b1", perms: new Set(["agents.read"]) }) }));
 vi.mock("@/server/jobs/runner", () => ({ kickIfDue: vi.fn(async () => {}) }));
 
+import { AGENTS } from "@/server/agents/registry";
 import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/agents/route";
 
 const call = () => GET(new Request("http://x/agents"), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) });
@@ -24,9 +25,11 @@ describe("GET /agents latest runs", () => {
     expect(db.agentRun.findMany).not.toHaveBeenCalled();
     const [strings, ...values] = db.$queryRaw.mock.calls[0]! as [TemplateStringsArray, ...unknown[]];
     const sql = strings.join("?");
-    expect(sql).toMatch(/DISTINCT ON \("agentKey"\)/);
-    expect(sql).toMatch(/ORDER BY "agentKey", "createdAt" DESC/);
-    expect(values).toEqual(["w1", "b1"]);
+    // One lookup per agent key (newest first, id as the tiebreak, LIMIT 1), not a sort of every run of the brand.
+    expect(sql).toMatch(/CROSS JOIN LATERAL/);
+    expect(sql).toMatch(/ORDER BY "createdAt" DESC, "id" DESC LIMIT 1/);
+    expect(sql).not.toMatch(/DISTINCT ON/);
+    expect(values).toEqual([AGENTS.filter((a) => !a.internal).map((a) => a.key), "w1", "b1"]);
     const creator = agents.find((a) => a.key === "creator")!;
     expect(creator.lastRun).toEqual({ id: "r1", status: "FAILED", startedAt: t.toISOString(), finishedAt: t.toISOString(), error: "x".repeat(300) });
     expect(agents.find((a) => a.key === "quality")!.lastRun).toEqual({ id: "r2", status: "RUNNING", startedAt: t.toISOString(), finishedAt: null, error: null });

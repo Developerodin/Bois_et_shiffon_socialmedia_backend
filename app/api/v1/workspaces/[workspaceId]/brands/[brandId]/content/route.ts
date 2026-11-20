@@ -10,7 +10,7 @@ import { signedMediaUrl } from "@/server/storage/media";
 import { CONTENT_GOALS } from "@/shared";
 import { contentWindow } from "@/server/content/window";
 import { personName } from "@/server/content/person-name";
-import { hideRightsNames, hideRightsNote, isStoryBody } from "@/server/stories/body";
+import { hideRightsNames, hideRightsNote, isStoryBody, revealRightsNames, revealRightsNote } from "@/server/stories/body";
 import { coverUrl, createStory, failStoryStart, itemForRequest, STORY_RENDER_JOB, STORY_START_NOTE, storyTab } from "@/server/stories/service";
 
 /** Calendar items with their latest draft and its latest quality check. */
@@ -55,14 +55,20 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     // Stories: their P07 tab (any partly posted or unverified attempt, not only the latest, moves one to Posted) and
     // the first rendered frame as the card.
     const storyIds = rows.filter((r) => r.channel === "INSTAGRAM_STORY").map((r) => r.id);
-    const openAttempts = storyIds.length
-      ? await prisma.publicationAttempt.findMany({ where: { contentItemId: { in: storyIds }, status: { in: ["PARTIAL", "PENDING_VERIFY"] } }, select: { contentItemId: true, status: true } })
-      : [];
     // Stories whose frames are being prepared (a first save has no version until its render ends). One read of the
     // brand's in-flight renders, matched here. ponytail: fine while renders in flight are few; filter by item in SQL if not.
-    const renders = storyIds.length
-      ? await prisma.job.findMany({ where: { type: STORY_RENDER_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["PENDING", "RUNNING"] } }, select: { payload: true } })
-      : [];
+    // Owners by one read of the distinct ids, not a join on each half. The three reads are independent: run them together.
+    const ownerIds = [...new Set(rows.flatMap((r) => (r.ownerId ? [r.ownerId] : [])))];
+    const [openAttempts, renders, ownerRows] = await Promise.all([
+      storyIds.length
+        ? prisma.publicationAttempt.findMany({ where: { contentItemId: { in: storyIds }, status: { in: ["PARTIAL", "PENDING_VERIFY"] } }, select: { contentItemId: true, status: true } })
+        : [],
+      storyIds.length
+        ? prisma.job.findMany({ where: { type: STORY_RENDER_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["PENDING", "RUNNING"] } }, select: { payload: true } })
+        : [],
+      ownerIds.length ? prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, name: true, email: true } }) : [],
+    ]);
+    const owners = new Map(ownerRows.map((u) => [u.id, u]));
     const rendering = new Set(renders.map((j) => (j.payload as { itemId?: unknown } | null)?.itemId));
     const story = async (r: (typeof rows)[number]) => {
       if (r.channel !== "INSTAGRAM_STORY") return {};
@@ -74,15 +80,12 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       };
     };
     const stories = await Promise.all(rows.map(story));
-    // Owners by one read of the distinct ids, not a join on each half.
-    const ownerIds = [...new Set(rows.flatMap((r) => (r.ownerId ? [r.ownerId] : [])))];
-    const owners = new Map((ownerIds.length ? await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, name: true, email: true } }) : []).map((u) => [u.id, u]));
-    // Who confirmed a story frame's rights (in the body and the check's note) is for people who manage members; the
-    // stored version is never rewritten (packageHash covers it), only what is sent.
+    // Who confirmed a story frame's rights (in the body and the check's note) is for people who manage members, by name
+    // (an older email name shows its local part); the stored version is never rewritten (packageHash covers it), only what is sent.
     const reveal = scope.perms.has("project.members.manage");
     const check = (v: (typeof rows)[number]["versions"][number]) => {
       const c = v.checks[0];
-      return !c || reveal ? (c ?? null) : { ...c, results: hideRightsNote(c.results, v.body) };
+      return !c ? null : { ...c, results: reveal ? revealRightsNote(c.results) : hideRightsNote(c.results, v.body) };
     };
     return Response.json({
       items: rows.map(({ versions, decisions, publications, ...i }, n) => ({
@@ -96,7 +99,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
         latest: versions[0]
           ? {
               version: versions[0].version,
-              body: reveal ? versions[0].body : hideRightsNames(versions[0].body),
+              body: reveal ? revealRightsNames(versions[0].body) : hideRightsNames(versions[0].body),
               createdAt: versions[0].createdAt,
               byPerson: versions[0].createdBy !== "agent",
               photoUrls: photoUrls[n],

@@ -125,6 +125,27 @@ describe("GET /content window", () => {
     expect(most).toBe(2);
   });
 
+  it("reads story attempts, in-flight renders and owners at once, after the rows and not one by one", async () => {
+    let running = 0, most = 0;
+    const slow = (value: unknown) => async () => {
+      most = Math.max(most, ++running);
+      await new Promise((r) => setTimeout(r, 5));
+      running--;
+      return value;
+    };
+    db.publicationAttempt.findMany.mockImplementation(slow([]) as never);
+    db.job.findMany.mockImplementation(slow([]) as never);
+    db.user.findMany.mockImplementation(slow([{ id: "u2", name: "Bea", email: "bea@x.com" }]) as never);
+    db.rows.push(row("s1", "PLANNED", { channel: "INSTAGRAM_STORY", ownerId: "u2" }));
+    const { items } = await (await call()).json();
+    expect(items[0].owner).toEqual({ id: "u2", name: "Bea" });
+    expect(db.publicationAttempt.findMany).toHaveBeenCalledTimes(1);
+    expect(db.job.findMany).toHaveBeenCalledTimes(1);
+    expect(most).toBe(3);
+    db.publicationAttempt.findMany.mockImplementation(async () => []);
+    db.job.findMany.mockImplementation(async () => []);
+  });
+
   it("recent history keeps the newest at the ceiling", async () => {
     // Made in the order of their last change: by creation the oldest changes would come first.
     for (let n = 0; n < 250; n++) db.rows.push(row(`h${n}`, "PUBLISHED", { createdAt: new Date(now - 60 * DAY + n), updatedAt: new Date(now - 20 * DAY + n * 60_000) }));

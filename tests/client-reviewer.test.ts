@@ -83,6 +83,12 @@ function caller(workspacePerms: string[], grant?: { isSystem: boolean; slug: str
   db.brandMember.findFirst.mockResolvedValue(grant ? { userId: "u1", role: grant } : null);
 }
 
+/** `caller`, and the route's scope carries the same permissions (routes read scope.perms rather than asking again). */
+function callerInScope(workspacePerms: string[], grant?: { isSystem: boolean; slug: string; permissions: string[] }) {
+  caller(workspacePerms, grant);
+  m.authorize.mockResolvedValue({ ...scope, perms: new Set([...workspacePerms, ...(grant?.permissions ?? [])]) });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   m.buckets.clear();
@@ -167,13 +173,13 @@ describe("connections list", () => {
   beforeEach(() => m.authorize.mockResolvedValue(scope));
 
   it("is authorized as brand.read, then needs inbox.read, publish.execute or integrations.manage", async () => {
-    caller([], clientRole);
+    callerInScope([], clientRole);
     expect((await list()).status).toBe(403);
     expect(m.authorize.mock.calls[0]![2]).toBe("brand.read");
   });
 
   it.each([["publish.execute"], ["integrations.manage"], ["inbox.read"]])("a role holding only %s (plus brand.read) gets the list", async (key) => {
-    caller([], { isSystem: false, slug: "custom", permissions: ["brand.read", key] });
+    callerInScope([], { isSystem: false, slug: "custom", permissions: ["brand.read", key] });
     const res = await list();
     expect(res.status).toBe(200);
     expect((await res.json()).connections).toEqual([{ id: "c1" }]);
@@ -414,7 +420,7 @@ describe("project members", () => {
   });
 
   it("members hides emails without project.members.manage", async () => {
-    caller([], clientRole);
+    callerInScope([], clientRole);
     const body = await (await membersGet(req(), { params })).json();
     expect(body).toEqual({
       viaWorkspace: [{ userId: "u0", name: "Ana", role: "Owner" }],
@@ -426,7 +432,7 @@ describe("project members", () => {
   });
 
   it("names a nameless member \"A team member\" for someone who can't manage members", async () => {
-    caller([], clientRole);
+    callerInScope([], clientRole);
     m.people.mockResolvedValue({ ...listed, viaWorkspace: [{ userId: "u0", name: null, email: "ana.private@x.com", role: "Owner", active: true }], people: [{ ...listed.people[0]!, name: " " }] });
     const body = await (await membersGet(req(), { params })).json();
     expect(body.viaWorkspace[0].name).toBe("A team member");
@@ -435,7 +441,7 @@ describe("project members", () => {
   });
 
   it("people who manage the project still see everything", async () => {
-    caller([], { isSystem: true, slug: "project-admin", permissions: ["brand.read", "project.members.manage"] });
+    callerInScope([], { isSystem: true, slug: "project-admin", permissions: ["brand.read", "project.members.manage"] });
     const body = await (await membersGet(req(), { params })).json();
     expect(body).toEqual({ ...listed, roles: [{ id: "r1", name: "Approver", description: null }] });
   });
@@ -480,11 +486,15 @@ describe("story rights never expose an email", () => {
     expect(await currentApproval("i1", { id: "v2", body }, "INSTAGRAM_STORY")).not.toBeNull();
   });
 
-  it("people who manage members see the stored rights and note", async () => {
+  it("people who manage members see who confirmed by name, an old email name as its local part, never a whole email", async () => {
     m.authorize.mockResolvedValue({ ...scope, perms: new Set(["brand.read", "project.members.manage"]), clientReviewer: false });
     const item = (await list()).items[0];
     expect(item.owner).toEqual({ id: "o1", name: "zoe.private" });
-    expect(item.latest.body.frames[0].rights).toEqual(rights);
-    expect(item.latest.check.results[1].note).toBe(note);
+    expect(item.latest.body.frames[0].rights).toEqual({ ...rights, name: "zoe.private" });
+    expect(item.latest.body.frames[2].rights).toEqual(body.frames[2].rights);
+    expect(item.latest.check.results[1].note).toBe(note.replace("zoe.private@x.com", "zoe.private"));
+    expect(JSON.stringify(item)).not.toContain("@");
+    // Read-side only: what is stored keeps the old name.
+    expect(body.frames[0].rights).toEqual(rights);
   });
 });

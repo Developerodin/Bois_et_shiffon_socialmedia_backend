@@ -9,3 +9,9 @@ export const TEAM_MEMBER = "A team member";
 export function personName(u: { name: string | null; email: string }, { reveal }: { reveal: boolean }) {
   return u.name?.trim() || (reveal ? u.email.split("@")[0]! : TEAM_MEMBER);
 }
+
+/**
+ * A stored or computed name that must read as "a team member": none, the placeholder, or anything that looks like an
+ * email (older story bodies and check notes kept one). Shared by the rights note and the rights-name filters.
+ */
+export const isHiddenName = (name: string | undefined | null) => !name || name === TEAM_MEMBER || name.includes("@");

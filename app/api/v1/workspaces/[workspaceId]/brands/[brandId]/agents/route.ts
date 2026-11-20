@@ -15,16 +15,23 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     // The open app polls this: use it to run overdue scheduled posts and retries between cron runs.
     await kickIfDue().catch(() => {});
 
+    const shown = AGENTS.filter((a) => !a.internal);
     const [configs, lastRuns] = await Promise.all([
       prisma.brandAgentConfig.findMany({ where: { workspaceId, brandId } }),
-      // Each agent's newest run, read in the database (the [brandId, agentKey, createdAt] index), not every run.
+      // Each agent's newest run, one round trip: for each key a single index lookup (the [brandId, agentKey, createdAt]
+      // index, read backwards, stops at the first row), so the cost is the number of agents, not the brand's run history.
+      // "id" breaks a tie between runs made in the same instant.
       prisma.$queryRaw<{ id: string; agentKey: string; status: string; startedAt: Date | null; finishedAt: Date | null; error: string | null }[]>`
-        SELECT DISTINCT ON ("agentKey") "id", "agentKey", "status", "startedAt", "finishedAt", "error"
-        FROM "AgentRun" WHERE "workspaceId" = ${workspaceId} AND "brandId" = ${brandId}
-        ORDER BY "agentKey", "createdAt" DESC`,
+        SELECT r."id", r."agentKey", r."status", r."startedAt", r."finishedAt", r."error"
+        FROM unnest(${shown.map((a) => a.key)}::text[]) AS k("key")
+        CROSS JOIN LATERAL (
+          SELECT "id", "agentKey", "status", "startedAt", "finishedAt", "error" FROM "AgentRun"
+          WHERE "workspaceId" = ${workspaceId} AND "brandId" = ${brandId} AND "agentKey" = k."key"
+          ORDER BY "createdAt" DESC, "id" DESC LIMIT 1
+        ) r`,
     ]);
 
-    const agents = AGENTS.filter((a) => !a.internal).map((a) => {
+    const agents = shown.map((a) => {
       const run = lastRuns.find((r) => r.agentKey === a.key);
       return {
         key: a.key,
