@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-type Row = { id: string; workspaceId: string; brandId: string; status: string; channel: string; scheduledFor: Date | null; ownerId?: string | null; createdAt: Date; updatedAt: Date };
+type Row = { id: string; workspaceId: string; brandId: string; status: string; channel: string; scheduledFor: Date | null; ownerId?: string | null; campaign?: { id: string; name: string } | null; createdAt: Date; updatedAt: Date };
 const db = vi.hoisted(() => ({ perms: new Set<string>(["brand.read"]), rows: [] as Row[], contentItem: { findMany: vi.fn() }, users: [] as { id: string; name: string | null; email: string }[], user: { findMany: vi.fn() }, publicationAttempt: { findMany: vi.fn(async () => []) }, job: { findMany: vi.fn(async () => []) } }));
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
@@ -42,7 +42,7 @@ beforeEach(() => {
       .filter((r) => matches(r, a.where))
       .sort(JSON.stringify(a.orderBy?.[0]) === '{"updatedAt":"desc"}' ? (x, y) => y.updatedAt.getTime() - x.updatedAt.getTime() : (x, y) => time(x) - time(y) || x.createdAt.getTime() - y.createdAt.getTime())
       .slice(0, a.take)
-      .map((r) => ({ ...r, owner: db.users.find((u) => u.id === r.ownerId) ?? null, opportunity: null, versions: [], decisions: [], publications: [] })),
+      .map((r) => ({ ...r, campaign: r.campaign ?? null, owner: db.users.find((u) => u.id === r.ownerId) ?? null, opportunity: null, versions: [], decisions: [], publications: [] })),
   );
 });
 
@@ -67,6 +67,13 @@ describe("GET /content window", () => {
     expect(owner("d")).toBeNull();
     // Both halves ask for the owner with only the fields needed to name them.
     for (const c of db.contentItem.findMany.mock.calls) expect((c[0] as { include: { owner: object } }).include.owner).toEqual({ select: { id: true, name: true, email: true } });
+  });
+
+  it("each item carries its campaign's id and name, read with the item", async () => {
+    db.rows.push(row("a", "SCHEDULED", { campaign: { id: "k1", name: "Spring" } }), row("b", "SCHEDULED", { createdAt: new Date(now) }));
+    const { items } = await (await call()).json();
+    expect(items.map((i: { campaign: unknown }) => i.campaign)).toEqual([{ id: "k1", name: "Spring" }, null]);
+    for (const c of db.contentItem.findMany.mock.calls) expect((c[0] as { include: { campaign: object } }).include.campaign).toEqual({ select: { id: true, name: true } });
   });
 
   it("opens one post by id even when it is 90 days old", async () => {

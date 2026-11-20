@@ -30,6 +30,8 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     // The owner joins the item read: a separate read after the rows would add a round trip for a brand with posts and no stories.
     const include = {
       opportunity: { select: { title: true } },
+      // The campaign's name too, so the calendar's filter can name a campaign from an older month (ended or archived).
+      campaign: { select: { id: true, name: true } },
       owner: { select: { id: true, name: true, email: true } },
       versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } },
       decisions: { orderBy: { createdAt: "desc" }, take: 1, select: { verdict: true, note: true, contentVersionId: true } },
