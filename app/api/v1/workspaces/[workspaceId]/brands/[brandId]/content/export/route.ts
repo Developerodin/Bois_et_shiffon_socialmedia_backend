@@ -1,6 +1,6 @@
-import { fromAccessError, problemResponse } from "@/server/api/http-error";
+import { fromAccessError } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
-import { hitRateLimit } from "@/server/auth/rate-limit";
+import { badExport as bad, csvResponse, exportAllowed, tooManyExports } from "@/server/api/csv-export";
 import { prisma } from "@/server/db/prisma";
 import { personName } from "@/server/content/person-name";
 import { toCsv } from "@/shared";
@@ -8,7 +8,6 @@ import { toCsv } from "@/shared";
 const DAY = 86_400_000;
 const MAX_ROWS = 5000;
 const COLUMNS = ["Date", "Channel", "Status", "Title", "Owner", "Campaign", "Caption", "Post link"].map((label) => ({ key: label, label }));
-const bad = (detail: string) => problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Bad Request", status: 400, detail });
 
 /**
  * The calendar as CSV: posts scheduled in ?from..?to (default 90 days back to 90 ahead, at most 366 days), 5,000 rows,
@@ -25,9 +24,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const to = q.has("to") ? new Date(q.get("to")!) : new Date(now + 90 * DAY);
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || to < from) return bad("from and to must be ISO dates, from before to");
     if (to.getTime() - from.getTime() > 366 * DAY) return bad("The range can be at most 366 days");
-    if (!(await hitRateLimit(`export:${scope.userId}`, 20, 3_600_000)).allowed) {
-      return problemResponse({ type: "https://api.brandpilot/errors/rate-limited", title: "Too many exports. Try again later.", status: 429 });
-    }
+    if (!(await exportAllowed(scope.userId))) return tooManyExports();
     const items = await prisma.contentItem.findMany({
       where: { workspaceId: scope.workspaceId, brandId: scope.brandId, status: { not: "CANCELLED" }, scheduledFor: { gte: from, lte: to } },
       select: { id: true, title: true, channel: true, status: true, scheduledFor: true, postUrl: true, owner: { select: { name: true, email: true } }, campaign: { select: { name: true } } },
@@ -58,15 +55,8 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     await prisma.auditEvent.create({
       data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "content.export", entityType: "Brand", entityId: scope.brandId, metadata: { from: from.toISOString(), to: to.toISOString(), rows: items.length } },
     });
-    return new Response(csv, { headers: csvHeaders(`calendar-${new Date(now).toISOString().slice(0, 10)}.csv`) });
+    return csvResponse(csv, `calendar-${new Date(now).toISOString().slice(0, 10)}.csv`);
   } catch (error) {
     return fromAccessError(error);
   }
 }
-
-const csvHeaders = (filename: string) => ({
-  "Content-Type": "text/csv; charset=utf-8",
-  "Content-Disposition": `attachment; filename="${filename}"`,
-  "Cache-Control": "no-store",
-  "X-Content-Type-Options": "nosniff",
-});

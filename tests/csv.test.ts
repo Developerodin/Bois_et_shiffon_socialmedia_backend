@@ -5,9 +5,10 @@ const m = vi.hoisted(() => ({
   contentItem: { findMany: vi.fn(async () => []) },
   auditEvent: { create: vi.fn(async () => ({})) },
   queryRaw: vi.fn(async () => []),
+  auditReport: { findFirst: vi.fn(async () => ({ findings: [{ severity: "high", category: "SEO", title: "No title", detail: "d", urls: ["https://a"], fix: "f" }] })) },
   hit: vi.fn(async () => ({ allowed: true })),
 }));
-vi.mock("@/server/db/prisma", () => ({ prisma: { contentItem: m.contentItem, auditEvent: m.auditEvent, $queryRaw: m.queryRaw } }));
+vi.mock("@/server/db/prisma", () => ({ prisma: { contentItem: m.contentItem, auditEvent: m.auditEvent, auditReport: m.auditReport, $queryRaw: m.queryRaw } }));
 vi.mock("@/server/auth/rate-limit", () => ({ hitRateLimit: m.hit }));
 vi.mock("@/server/api/brand-route", async () => {
   const { AccessDeniedError } = await import("@/server/auth/errors");
@@ -20,6 +21,7 @@ vi.mock("@/server/api/brand-route", async () => {
 });
 
 import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/export/route";
+import { GET as findingsGet } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/audit-reports/export/route";
 import { toCsv } from "@/shared";
 
 const cols = [{ key: "a", label: "A" }];
@@ -28,7 +30,7 @@ const call = (qs = "") => GET(new Request(`http://x/content/export${qs}`), { par
 
 beforeEach(() => {
   vi.clearAllMocks();
-  m.perms = new Set(["content.download"]);
+  m.perms = new Set(["content.download", "analytics.read"]);
 });
 
 describe("toCsv", () => {
@@ -76,5 +78,38 @@ describe("GET /content/export", () => {
     expect(text).not.toContain("@");
     expect(m.queryRaw).toHaveBeenCalledTimes(1);
     expect(m.auditEvent.create).toHaveBeenCalled();
+  });
+});
+
+describe("both CSV exports", () => {
+  const findings = (qs = "?kind=GEO") => findingsGet(new Request(`http://x/audit-reports/export${qs}`), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) });
+
+  it("share one allowance per person and answer 429 the same way", async () => {
+    await call();
+    await findings();
+    expect(m.hit.mock.calls.map((c) => (c as unknown[])[0])).toEqual(["export:u1", "export:u1"]);
+    m.hit.mockResolvedValue({ allowed: false });
+    for (const res of [await call(), await findings()]) {
+      expect(res.status).toBe(429);
+      expect(await res.json()).toMatchObject({ title: "Too many exports. Try again later.", status: 429 });
+    }
+    m.hit.mockResolvedValue({ allowed: true });
+  });
+
+  it("send the same download headers", async () => {
+    const res = await findings();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
+    expect(res.headers.get("Content-Disposition")).toMatch(/^attachment; filename="geo-findings-\d{4}-\d{2}-\d{2}\.csv"$/);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect((await call()).headers.get("Content-Disposition")).toMatch(/^attachment; filename="calendar-/);
+  });
+
+  it("refuse a bad kind with a 400 before using the allowance", async () => {
+    const res = await findings("?kind=X");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ detail: "kind must be SEO or GEO" });
+    expect(m.hit).not.toHaveBeenCalled();
   });
 });
