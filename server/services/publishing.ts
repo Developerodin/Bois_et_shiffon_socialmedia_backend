@@ -921,6 +921,7 @@ export async function releaseState(scope: { workspaceId: string; brandId: string
   return {
     latestVersion: latest?.version ?? null,
     byHand: item.byHand,
+    postUrl: item.postUrl,
     scheduledFor: item.scheduledFor,
     approvedVersionId: approval?.contentVersionId ?? null,
     approvalValid: Boolean(approval),

@@ -7,6 +7,8 @@ const m = vi.hoisted(() => {
     contentItem: { findFirst: fn(), update: fn() },
     auditEvent: { create: fn() },
     reelRender: { findUnique: fn(), findFirst: fn() },
+    approvalDecision: { findFirst: fn() },
+    publicationAttempt: { findFirst: fn() },
   };
   return { tx, prisma: { ...tx, $transaction: vi.fn(async (f: (t: typeof tx) => unknown) => f(tx)) }, decide: fn(), enqueueTick: fn(), kick: fn() };
 });
@@ -20,17 +22,25 @@ vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>())
 
 import { POST as webhook } from "@/app/api/v1/webhooks/higgsfield/[renderId]/route";
 import { PRESENTER_MODEL } from "@/server/reels/router";
+import { packageHash } from "@/server/services/publishing";
 import { registerPostLink, reelDetail, sendReel } from "@/server/reels/service";
 
 const scope = { workspaceId: "w1", brandId: "b1", userId: "u1" };
-const reel = (status: string, body: object = { videoKey: "w1/b1/r.mp4" }) => m.tx.contentItem.findFirst.mockResolvedValue({ id: "i1", status, studio: true, versions: [{ id: "v1", version: 3, body }] });
+const reel = (status: string, body: object = { videoKey: "w1/b1/r.mp4" }) => {
+  m.tx.contentItem.findFirst.mockResolvedValue({ id: "i1", channel: "INSTAGRAM_REEL", status, studio: true, versions: [{ id: "v1", version: 3, body }] });
+  // Downloading approved this version, so its approval holds.
+  m.tx.approvalDecision.findFirst.mockResolvedValue({ verdict: "APPROVED", contentVersionId: "v1", packageHash: packageHash({ id: "i1", channel: "INSTAGRAM_REEL" }, { id: "v1", body }), productOverride: null });
+};
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  m.tx.publicationAttempt.findFirst.mockResolvedValue(null);
+});
 
 describe("registerPostLink", () => {
   it("rejects a link that isn't an Instagram post", async () => {
     reel("APPROVED");
-    await expect(registerPostLink(scope, "i1", "https://evil.example/reel/abc")).rejects.toThrow(/Instagram post/);
+    await expect(registerPostLink(scope, "i1", "https://evil.example/reel/abc")).rejects.toThrow(/link of the post/);
   });
 
   it("rejects a reel that was never approved", async () => {
@@ -46,7 +56,7 @@ describe("registerPostLink", () => {
   it("records an approved reel's post link as published", async () => {
     reel("APPROVED");
     await registerPostLink(scope, "i1", "https://www.instagram.com/reel/abc/");
-    expect(m.tx.contentItem.update).toHaveBeenCalledWith({ where: { id: "i1" }, data: { status: "PUBLISHED", postUrl: "https://www.instagram.com/reel/abc/" } });
+    expect(m.tx.contentItem.update).toHaveBeenCalledWith({ where: { id: "i1" }, data: { status: "PUBLISHED", byHand: false, postUrl: "https://www.instagram.com/reel/abc/" } });
   });
 });
 

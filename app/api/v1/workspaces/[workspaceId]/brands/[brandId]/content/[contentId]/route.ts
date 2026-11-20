@@ -52,7 +52,7 @@ const Action = z.discriminatedUnion("action", [
   z.object({ action: z.literal("postRest"), attemptId: z.string().min(1), confirm: z.boolean().optional() }),
   z.object({ action: z.literal("markDone"), attemptId: z.string().min(1) }),
   z.object({ action: z.literal("settleFrame"), attemptId: z.string().min(1), frame: z.number().int().min(0).max(4), appeared: z.boolean() }),
-  // Post a story by hand: `at` is when it is due (null turns it off); postedByHand says it was posted (url: the story's link, checked and kept).
+  // byHand: a story due to be posted by a person (`at`; null turns it off). postedByHand: any approved post was posted by hand (url: its link, checked and kept).
   z.object({ action: z.literal("byHand"), at: z.string().datetime({ offset: true }).nullable() }),
   z.object({ action: z.literal("postedByHand"), url: z.string().max(2000).optional() }),
   // Give the post to someone who works on the brand, or to nobody (null).
@@ -173,7 +173,7 @@ export async function POST(request: Request, context: Params) {
     } else if (body.action === "byHand") {
       await setByHand(scope, itemId, body.at ? new Date(body.at) : null);
     } else if (body.action === "postedByHand") {
-      await registerManualPost(scope, itemId, body.url, "story");
+      await registerManualPost(scope, itemId, body.url);
     } else if (body.action === "markDone") {
       await markDone({ ...scope, itemId, attemptId: body.attemptId });
     } else if (body.action === "settleFrame") {

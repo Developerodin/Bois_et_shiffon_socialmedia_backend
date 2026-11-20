@@ -198,30 +198,30 @@ describe("package route", () => {
 describe("registerManualPost", () => {
   it("publishes an approved story with no URL and clears byHand", async () => {
     seed();
-    await registerManualPost(user, "s1", undefined, "story");
+    await registerManualPost(user, "s1", undefined);
     expect(item()).toMatchObject({ status: "PUBLISHED", byHand: false });
     expect(db.audits.at(-1)).toMatchObject({ action: "content.publish.manual" });
   });
   it("keeps a valid story link without its query, and audits it", async () => {
     seed();
-    await registerManualPost(user, "s1", "https://www.instagram.com/stories/shop/12345/?igsh=x", "story");
+    await registerManualPost(user, "s1", "https://www.instagram.com/stories/shop/12345/?igsh=x");
     expect(item()).toMatchObject({ status: "PUBLISHED", byHand: false, postUrl: "https://www.instagram.com/stories/shop/12345/" });
     expect(db.audits.at(-1)).toMatchObject({ metadata: { kind: "story", url: "https://www.instagram.com/stories/shop/12345/" } });
   });
   it("refuses a bad story link and leaves the story approved", async () => {
     seed();
-    await expect(registerManualPost(user, "s1", "https://www.instagram.com/p/abc/", "story")).rejects.toMatchObject({ status: 400, code: "story.linkInvalid" });
+    await expect(registerManualPost(user, "s1", "https://www.instagram.com/p/abc/")).rejects.toMatchObject({ status: 400, code: "story.linkInvalid" });
     expect(item().status).toBe("APPROVED");
   });
   it("refuses a story whose approval no longer holds", async () => {
     seed();
     db.decisions.length = 0;
-    await expect(registerManualPost(user, "s1", undefined, "story")).rejects.toMatchObject({ status: 409 });
+    await expect(registerManualPost(user, "s1", undefined)).rejects.toMatchObject({ status: 409 });
   });
-  it("still needs a reel's URL", async () => {
-    seed({ channel: "INSTAGRAM_REEL", studio: true });
-    await expect(registerManualPost(user, "s1", undefined, "reel")).rejects.toMatchObject({ status: 400 });
-    await expect(registerManualPost(user, "s1", "https://www.instagram.com/reel/abc/", "reel")).resolves.toBeUndefined();
+  it("still needs a studio reel's URL", async () => {
+    seed({ channel: "INSTAGRAM_REEL", studio: true, byHand: false }, "s1", { videoKey: "w1/b1/r.mp4" });
+    await expect(registerManualPost(user, "s1", undefined)).rejects.toMatchObject({ status: 400 });
+    await expect(registerManualPost(user, "s1", "https://www.instagram.com/reel/abc/")).resolves.toBeUndefined();
     expect(item()).toMatchObject({ status: "PUBLISHED", postUrl: "https://www.instagram.com/reel/abc/" });
   });
 });
