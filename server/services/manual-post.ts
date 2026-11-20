@@ -47,6 +47,11 @@ export function postLinkFor(channel: ContentChannel, url: string): string | null
  */
 export async function registerManualPost(scope: { workspaceId: string; brandId: string; userId: string }, itemId: string, url: string | undefined) {
   const raw = url?.trim();
+  // A story's link is checked against the brand's Instagram account before the transaction: it reads with the global
+  // client, which must never wait inside a transaction holding the pool's connection. A post's channel never changes.
+  const storyLink = raw && (await prisma.contentItem.findFirst({ where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { channel: true } }))?.channel === "INSTAGRAM_STORY"
+    ? await checkStoryLink(scope, raw)
+    : undefined;
   await prisma.$transaction(async (tx) => {
     await lock(tx, itemId);
     const item = await tx.contentItem.findFirst({
@@ -58,7 +63,7 @@ export async function registerManualPost(scope: { workspaceId: string; brandId: 
     const code = (c: string) => (story ? c : undefined);
     const noun = story ? "story" : item.studio ? "reel" : "post";
     let link: string | undefined;
-    if (story) link = raw ? await checkStoryLink(scope, raw) : undefined;
+    if (story) link = storyLink;
     else if (raw) {
       link = postLinkFor(item.channel, raw) ?? undefined;
       if (!link) throw new PublishingError(`Paste the link of the post itself (${LINKS[item.channel]?.hint ?? "its address"})`, 400);

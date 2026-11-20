@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Row = Record<string, any>;
-const db = vi.hoisted(() => ({ items: [] as Row[], versions: [] as Row[], decisions: [] as Row[], attempts: [] as Row[], audits: [] as Row[] }));
+const db = vi.hoisted(() => ({ items: [] as Row[], versions: [] as Row[], decisions: [] as Row[], attempts: [] as Row[], audits: [] as Row[], inTx: false, accountReads: [] as boolean[] }));
 const gate = vi.hoisted(() => ({ issue: null as null | { refuses: boolean; message: string }, calls: 0 }));
 
 vi.mock("@/server/db/prisma", () => {
@@ -22,8 +22,17 @@ vi.mock("@/server/db/prisma", () => {
     approvalDecision: { findFirst: async ({ where }: Row) => copy(db.decisions.filter((d) => match(d, where)).at(-1) ?? null) },
     publicationAttempt: { findFirst: async ({ where }: Row) => copy(db.attempts.find((a) => match(a, where)) ?? null) },
     auditEvent: { create: async ({ data }: Row) => { db.audits.push(copy(data)); return {}; } },
+    // The story link check's account read; records whether it ran inside the transaction.
+    integrationConnection: { findMany: async () => { db.accountReads.push(db.inTx); return [{ displayName: "@shop" }]; } },
   };
-  prisma.$transaction = async (f: (tx: Row) => unknown) => f(prisma);
+  prisma.$transaction = async (f: (tx: Row) => unknown) => {
+    db.inTx = true;
+    try {
+      return await f(prisma);
+    } finally {
+      db.inTx = false;
+    }
+  };
   return { prisma };
 });
 vi.mock("@/server/services/publishing", async (orig) => {
@@ -46,7 +55,7 @@ function seed(over: Row = {}) {
 const item = () => db.items[0];
 
 beforeEach(() => {
-  Object.assign(db, { items: [], versions: [], decisions: [], attempts: [], audits: [] });
+  Object.assign(db, { items: [], versions: [], decisions: [], attempts: [], audits: [], inTx: false, accountReads: [] });
   Object.assign(gate, { issue: null, calls: 0 });
 });
 
@@ -124,6 +133,12 @@ describe("registerManualPost on any channel", () => {
     seed({ channel: "INSTAGRAM_REEL", studio: true });
     db.decisions.length = 0;
     await expect(registerManualPost(user, "p1", "https://www.instagram.com/reel/abc/")).rejects.toMatchObject({ status: 409 });
+  });
+  it("checks a story's link against the account before the transaction, not inside it", async () => {
+    seed({ channel: "INSTAGRAM_STORY" });
+    await registerManualPost(user, "p1", "https://www.instagram.com/stories/shop/1234567890/");
+    expect(db.accountReads).toEqual([false]);
+    expect(item()).toMatchObject({ status: "PUBLISHED", postUrl: "https://www.instagram.com/stories/shop/1234567890/" });
   });
   it("is 404 for another brand's post", async () => {
     seed({ brandId: "other" });
