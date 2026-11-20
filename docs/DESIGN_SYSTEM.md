@@ -99,7 +99,7 @@ A small own component for "something finished while you were elsewhere", mounted
 
 ### Toast: action and duration
 
-`ToastInput` also takes `action: { label, onAction }` and `ms`. The action is a text button beside the body (`text-primary`, `hover:bg-muted`, focus ring); pressing it dismisses the toast and then runs the callback. `ms` overrides the 10 s default (`toastMs`); the hover and focus pause still applies. Used for "Closed X" / Reopen (6 s) and "X is collapsed" / Expand and "X isn't on your board" / Add to board (15 s, so there is time to decide). Toasts with an action are cleared when the Overview unmounts (`clearActionToasts`), because their callback would act on a page that is gone.
+`ToastInput` also takes `action: { label, onAction }` and `ms`. The action is a text button beside the body (`text-primary`, `hover:bg-muted`, focus ring); pressing it dismisses the toast and then runs the callback. `ms` overrides the 10 s default (`toastMs`); the hover and focus pause still applies. Used for "Closed X" / Reopen (6 s). Toasts with an action are cleared when the Overview unmounts (`clearActionToasts`), because their callback would act on a page that is gone.
 
 ### Peek (built: `web/components/workspace/peek.tsx`, `use-peek.ts`)
 
@@ -117,7 +117,7 @@ The Overview's side peek for a post, document, agent or competitor. Not `Sheet`:
 
 ### Reveal flash
 
-A button that points at a panel (`revealPanel` in `workspace.tsx`, `revealPlan` / `withPanel` in `panel-layout.tsx`) closes an open peek first (asking about unsaved work), then: panel shown, scrolls its header into view (`block: nearest`, smooth) and outlines the panel (`outline-2 outline-primary outline-offset-2`) for 1.2 s, one at a time; collapsed or absent, shows the warning toast with Expand or Add to board. Nothing is saved to the board unless that button is pressed. Reduced motion: scroll jumps and there is no outline. Sidebar `?panel=` still inserts into the saved board.
+A button that points at a panel (`revealPanel` in `workspace.tsx`, `revealPlan` / `withPanel` in `panel-layout.tsx`) closes an open peek first (asking about unsaved work), then: panel shown, scrolls its header into view (`block: nearest`, smooth) and outlines the panel (`outline-2 outline-primary outline-offset-2`) for 1.2 s, one at a time; collapsed or absent, it is expanded or added first (saved), then scrolled to and flashed. Reduced motion: scroll jumps and there is no outline. Sidebar `?panel=` still inserts into the saved board.
 
 ### Recent menu (built: `web/components/workspace/recent-menu.tsx`, `lib/recent.ts`)
 

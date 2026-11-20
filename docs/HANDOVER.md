@@ -14,9 +14,8 @@ pure-function level only (focus restore, the slide, the flash, the Recent menu a
 ### What changed for people
 - A post, document, agent or competitor now opens in a side peek over the right of the Overview. The board behind stays
   as it was (the Today panel no longer gets replaced). X or Esc closes it; a "Closed ..." toast offers Reopen (6 s).
-- Buttons that point at a panel scroll to it and flash it instead of adding it. A collapsed panel gets "X is collapsed"
-  with Expand; one not on the board gets "X isn't on your board" with Add to board (15 s). Both change the board only
-  when pressed.
+- Buttons that point at a panel bring it into view: a collapsed panel is expanded and one not on the board is added
+  (both saved), then the page scrolls to it and flashes it. No toast is involved.
 - A **Recent** menu beside Layout lists the last 8 items opened here; R reopens the last closed one.
 - Unsaved work is guarded per editor, so a post's caption and its release form each count and the person is asked once.
 
