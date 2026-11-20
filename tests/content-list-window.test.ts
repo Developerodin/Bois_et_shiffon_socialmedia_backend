@@ -181,6 +181,17 @@ describe("GET /content?from&to", () => {
     expect((db.contentItem.findMany.mock.calls[0]![0] as { take: number }).take).toBe(500);
   });
 
+  it("says truncated when the range filled its 500 rows, and only then", async () => {
+    for (let n = 0; n < 499; n++) db.rows.push(row(`r${n}`, "SCHEDULED", { scheduledFor: new Date(Date.UTC(2026, 7, 1 + (n % 30), 9)) }));
+    const qs = "?from=2026-08-01&to=2026-09-01";
+    expect((await (await call(qs)).json()).truncated).toBeUndefined();
+    db.rows.push(row("r499", "SCHEDULED", { scheduledFor: new Date(Date.UTC(2026, 7, 31, 9)) }));
+    const full = await (await call(qs)).json();
+    expect(full.items).toHaveLength(500);
+    expect(full.truncated).toBe(true);
+    expect((await (await call()).json()).truncated).toBeUndefined();
+  });
+
   it("answers 400 for a bad range", async () => {
     for (const qs of ["?from=2026-08-01", "?from=nope&to=2026-08-02", "?from=2026-08-02&to=2026-08-01", "?from=2026-08-01&to=2026-08-01", "?from=2026-01-01&to=2026-04-01"])
       expect((await call(qs)).status, qs).toBe(400);

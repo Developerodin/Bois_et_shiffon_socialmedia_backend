@@ -41,10 +41,12 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     // Both halves are read at once; open posts fill the 200 first, so a long history (undated, so sorted first) can never
     // push upcoming posts out. The recent half is read newest change first, so rows past what's left drop the oldest
     // (at most 200 read for nothing).
-    // ponytail: a range reads up to 500 dated posts (about 60 days); a brand past ~8 posts a day would lose the latest days.
+    // ponytail: a range reads up to 500 dated posts (about 60 days); a brand past ~8 posts a day would lose the latest days
+    // (the answer says so with truncated: true).
+    const RANGE_TAKE = 500;
     const where = id ? { ...base, id } : range ? { ...base, scheduledFor: { gte: range.from, lt: range.to } } : { ...base, ...open };
     const [openRows, recentRows] = await Promise.all([
-      prisma.contentItem.findMany({ where, orderBy, take: range ? 500 : 200, include }),
+      prisma.contentItem.findMany({ where, orderBy, take: range ? RANGE_TAKE : 200, include }),
       id || range ? [] : prisma.contentItem.findMany({ where: { ...base, ...recent, NOT: open }, orderBy: [{ updatedAt: "desc" }], take: 200, include }),
     ]);
     // Each half is sorted on its own; sort the whole once so the list keeps one order (undated first, then date, then creation).
@@ -93,6 +95,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       return !c ? null : { ...c, results: reveal ? revealRightsNote(c.results) : hideRightsNote(c.results, v.body) };
     };
     return Response.json({
+      ...(range && openRows.length === RANGE_TAKE ? { truncated: true } : {}),
       items: rows.map(({ versions, decisions, publications, owner, ...i }, n) => ({
         ...i,
         // Named as the owners list names them, never the email itself.
