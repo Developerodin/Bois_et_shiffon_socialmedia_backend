@@ -21,6 +21,9 @@ pure-function level only (focus restore, the slide, the flash, the Recent menu a
 - Drag a panel's header onto the "Open in preview" box (top-right corner, shown only while dragging) or pick
   "Open in preview" in its ... menu: the panel opens in the side peek (`?peek=<panelId>`), the board unchanged. A
   previewed panel is left out of the board until the preview closes (layout not saved); not in Recent.
+- Content calendar: List | Month switch (`cal.view.v1` per browser). Month reads its grid range with `GET content?from&to`
+  (ISO instants, span <= 62 days, 500 rows, `truncated` when capped); past months poll slower. Closing a panel offers Undo.
+  Ideas cards carry their next step (Plan into posts / Open post); the Ideas top bar is pinned.
 - Every Overview panel has an X in its header (same as Hide panel; it comes back from Layout).
 - The sidebar's "Your agents" can be reordered by dragging or Alt+Up/Down; the order is kept per browser
   (`nav.agentOrder.v1`, ids only, `lib/agent-order.ts`). Drag doesn't work on touch.
