@@ -360,9 +360,12 @@ export async function decide(input: {
   // Checked first outside the transaction (and again inside it): a missing post or a decision that can't happen spends
   // no send-back or AI allowance.
   const pre = await loadItem(input, input.itemId);
-  await assertDecidable(pre.item, pre.latest, input);
-  // Read outside the transaction (it reads every member): whether someone else could approve, for self-approval below.
-  const otherApprover = input.verdict === "APPROVED" ? await hasOtherApprover(input.workspaceId, input.brandId, input.userId) : false;
+  const preLatest = await assertDecidable(pre.item, pre.latest, input);
+  // Whether someone else could approve, for self-approval below: read outside the transaction (it reads every member),
+  // and only when it matters, someone approving their own draft. The version number is checked again inside, so the
+  // draft (and its author) is the same one.
+  const ownDraft = input.verdict === "APPROVED" && preLatest.createdBy === input.userId && !pre.item.studio;
+  const otherApprover = ownDraft ? await hasOtherApprover(input.workspaceId, input.brandId, input.userId) : false;
   // Each send-back starts a free rewrite: capped per person, so one reviewer can't loop the writer.
   if (input.verdict === "CHANGES_REQUESTED" && !(await hitRateLimit(`send-back:${input.userId}`, 30, 3_600_000)).allowed) {
     throw new PublishingError("You've sent back a lot of posts this hour. Try again later.", 429);

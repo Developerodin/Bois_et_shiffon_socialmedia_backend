@@ -20,6 +20,7 @@ vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn(async () => ({})) }));
 const approvers = vi.hoisted(() => ({ other: true }));
 vi.mock("@/server/auth/permissions", () => ({ hasOtherApprover: vi.fn(async () => approvers.other), isClientReviewer: vi.fn(async () => false) }));
 
+import { hasOtherApprover } from "@/server/auth/permissions";
 import { creatorAgent } from "@/server/agents/definitions/creator";
 import { briefAgent } from "@/server/agents/definitions/brief";
 import { qualityAgent } from "@/server/agents/definitions/quality";
@@ -150,6 +151,19 @@ describe("studio reels in the publishing flow", () => {
     db.tx.approvalDecision.create.mockResolvedValue({ packageHash: "h" });
     await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" })).resolves.toBeTruthy();
     approvers.other = true;
+  });
+
+  it("reads the other approvers only when someone approves their own non-studio draft", async () => {
+    db.tx.approvalDecision.create.mockResolvedValue({ packageHash: "h" });
+    vi.mocked(hasOtherApprover).mockClear();
+    withLatest(item({ channel: "INSTAGRAM_POST", studio: false }), version({ createdBy: "agent" }));
+    await decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" });
+    withLatest(item(), version());
+    await decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" });
+    expect(hasOtherApprover).not.toHaveBeenCalled();
+    withLatest(item({ channel: "INSTAGRAM_POST", studio: false }), version());
+    await expect(decide({ ...scope, userId: "u1", itemId: "i1", version: 3, verdict: "APPROVED" })).rejects.toThrow(/someone else/);
+    expect(hasOtherApprover).toHaveBeenCalledTimes(1);
   });
 
   it("studio reel schedules with videoKey not client url", async () => {
