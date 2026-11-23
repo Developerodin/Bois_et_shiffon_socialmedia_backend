@@ -1,5 +1,6 @@
 import { shopifyQuery } from "@/server/catalog/shopify";
 import { ReconnectNeeded } from "@/server/services/connections";
+import type { SyncStop } from "@/server/data/sync-stop";
 
 /**
  * Shopify order totals for the Sales tab. Pure: reads Shopify, returns mapped rows, writes nothing.
@@ -68,14 +69,12 @@ export type ShopOrderRow = {
   shopifyUpdatedAt: Date;
 };
 
-export type StoppedReason = "throttled" | "reconnect" | "page_cap" | "time_cap";
-
 export type FetchOrdersResult = {
   orders: ShopOrderRow[];
   /** Latest updatedAt among the returned orders (the next run's `sinceUpdatedAt`); `sinceUpdatedAt` if none. */
   cursorEnd: Date;
   /** Set when the run stopped before the last page. */
-  stoppedReason?: StoppedReason;
+  stoppedReason?: SyncStop;
 };
 
 const OVERLAP_MS = 3_600_000; // re-reads the last hour: covers clock skew and same-second updates at a page edge
@@ -125,11 +124,11 @@ export function mapOrder(o: OrderNode): ShopOrderRow {
 /**
  * Every order updated since `sinceUpdatedAt` (minus a 1 h overlap), oldest update first, cursor-paginated.
  * All pages are buffered and returned together; nothing is written here.
- * On a stop (throttled after the helper's retries, refused token, 50-page or 4-minute cap) it returns the pages
- * it finished with `stoppedReason`; because pages are sorted by updatedAt they form a contiguous prefix and
- * `cursorEnd` covers exactly them. A caller that writes nothing on a partial run just ignores `orders`.
- * A refused token (401/403/ACCESS_DENIED) returns no orders and `stoppedReason: "reconnect"`.
- * Other errors throw; the helper keeps the token out of every message.
+ * `rate_limited` (still throttled after the helper's retries) and `capped` (50 pages or 4 minutes) return the pages
+ * finished so far: because pages are sorted by updatedAt they form a contiguous prefix and `cursorEnd` covers exactly
+ * them, so the caller writes them and advances — capped is progress, not a failure.
+ * `reconnect` (401/403), `missing_scope` (ACCESS_DENIED: the token lacks read_orders, the catalogue keeps working) and
+ * `failed` (5xx, network, timeout, a GraphQL error) return no orders. Only bugs throw; the token never reaches a message.
  * ponytail: 50 × 100 = 5,000 orders a run; a busier store catches up over several runs from `cursorEnd`.
  * `read_orders` only reaches the last 60 days, whatever `sinceUpdatedAt` says.
  */
@@ -142,26 +141,33 @@ export async function fetchOrders(
   const started = Date.now();
   const orders: ShopOrderRow[] = [];
   let after: string | null = null;
-  const done = (stoppedReason?: StoppedReason): FetchOrdersResult => ({
+  const done = (stoppedReason?: SyncStop): FetchOrdersResult => ({
     orders,
     cursorEnd: orders.reduce((max, o) => (o.shopifyUpdatedAt > max ? o.shopifyUpdatedAt : max), sinceUpdatedAt),
     ...(stoppedReason ? { stoppedReason } : {}),
   });
 
   for (let page = 0; page < MAX_PAGES; page++) {
-    if (page > 0 && Date.now() - started > MAX_MS) return done("time_cap");
+    if (page > 0 && Date.now() - started > MAX_MS) return done("capped");
     type Page = { orders: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: OrderNode[] } };
     let data: Page;
     try {
       ({ data } = await shopifyQuery<Page>(conn.shop, conn.accessToken, ORDERS_QUERY, { after, query }, signal));
     } catch (err) {
-      if (err instanceof ReconnectNeeded) return { orders: [], cursorEnd: sinceUpdatedAt, stoppedReason: "reconnect" };
-      if (err instanceof Error && /THROTTLED/.test(err.message)) return done("throttled");
+      const none = (stoppedReason: SyncStop): FetchOrdersResult => ({ orders: [], cursorEnd: sinceUpdatedAt, stoppedReason });
+      // ACCESS_DENIED is a missing scope (read_orders), not a dead token: the connection must not be marked for reconnect.
+      if (err instanceof ReconnectNeeded) return none(err.message === "Shopify ACCESS_DENIED" ? "missing_scope" : "reconnect");
+      if (!(err instanceof Error) || signal?.aborted) throw err;
+      if (/THROTTLED/.test(err.message)) return done("rate_limited");
+      if (err.message.startsWith("Shopify ") || err instanceof TypeError || err.name === "TimeoutError" || err.name === "AbortError") {
+        console.error("[shopify-orders] failed", err.name, err.message.startsWith("Shopify ") ? err.message : "");
+        return none("failed");
+      }
       throw err;
     }
     orders.push(...data.orders.nodes.map(mapOrder));
     if (!data.orders.pageInfo.hasNextPage) return done();
     after = data.orders.pageInfo.endCursor;
   }
-  return done("page_cap");
+  return done("capped");
 }

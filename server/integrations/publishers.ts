@@ -77,7 +77,8 @@ export const PUBLISHERS: Partial<
   async META(p, { id, token }) {
     await p.beforePublish?.();
     // A photo post answers with the photo id and the post id; keep the post id, which insights need (the link
-    // still opens the photo). Posts published before this kept the photo id and get no insights.
+    // still opens the photo). Posts published before this kept the photo id and get no insights: post-metrics'
+    // hasFacebookPostId (no "_" in the id) skips them.
     const res = p.imageUrl
       ? await post(`${GRAPH}/${id}/photos`, { url: p.imageUrl, caption: p.text, access_token: token })
       : await post(`${GRAPH}/${id}/feed`, { message: p.text, access_token: token });

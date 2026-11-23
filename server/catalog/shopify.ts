@@ -29,7 +29,7 @@ export function throttleWaitMs(cost: Cost | undefined) {
   return Math.min(60_000, Math.max(0, ((cost.requestedQueryCost - currentlyAvailable) / restoreRate) * 1000));
 }
 
-const THROTTLE_RETRIES = 5;
+export const THROTTLE_RETRIES = 5;
 
 /**
  * One Admin GraphQL call. The shop is re-validated here so the token can only ever go to *.myshopify.com, and
@@ -59,7 +59,8 @@ export async function shopifyQuery<T>(
       errors?: { message?: string; extensions?: { code?: string } }[];
       extensions?: { cost?: Cost };
     } | null;
-    const codes = body?.errors?.map((e) => e.extensions?.code ?? e.message ?? "") ?? [];
+    // A message can echo the request, token included: scrub it before it reaches any error text.
+    const codes = body?.errors?.map((e) => (e.extensions?.code ?? e.message ?? "").split(accessToken).join("[token]")) ?? [];
     if (codes.includes("ACCESS_DENIED")) throw new ReconnectNeeded("Shopify ACCESS_DENIED");
     const cost = body?.extensions?.cost;
     if (codes.includes("THROTTLED") && attempt < THROTTLE_RETRIES) {

@@ -38,7 +38,10 @@ function stubFetch(...responses: { status?: number; body: unknown }[]) {
 }
 const sentVariables = (call: unknown[]) => JSON.parse((call[1] as { body: string }).body).variables;
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("fetchOrders", () => {
   it("query asks for none of the personal fields", () => {
@@ -74,7 +77,7 @@ describe("fetchOrders", () => {
   it("stops as partial when Shopify keeps throttling, keeping only finished pages", async () => {
     stubFetch({ body: page([REFUNDED], "c1") }, ...Array.from({ length: 6 }, () => ({ body: throttled })));
     const { orders, cursorEnd, stoppedReason } = await fetchOrders(CONN, SINCE);
-    expect(stoppedReason).toBe("throttled");
+    expect(stoppedReason).toBe("rate_limited");
     expect(orders.map((o) => o.name)).toEqual(["#1001"]);
     expect(cursorEnd).toEqual(new Date("2026-11-21T09:00:00Z"));
   });
@@ -84,11 +87,10 @@ describe("fetchOrders", () => {
     expect(await fetchOrders(CONN, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: "reconnect" });
   });
 
-  it("never puts the token in an error", async () => {
-    stubFetch({ status: 500, body: { errors: [{ message: "Internal error", extensions: { code: "INTERNAL_SERVER_ERROR" } }] } });
-    const err = await fetchOrders(CONN, SINCE).catch((e: Error) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect(`${(err as Error).message} ${(err as Error).stack}`).not.toContain(TOKEN);
+  it("a 5xx returns failed and no orders, without throwing", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch({ body: page([REFUNDED], "c1") }, { status: 500, body: { errors: [{ message: "Internal error", extensions: { code: "INTERNAL_SERVER_ERROR" } }] } });
+    expect(await fetchOrders(CONN, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: "failed" });
   });
 });
 
