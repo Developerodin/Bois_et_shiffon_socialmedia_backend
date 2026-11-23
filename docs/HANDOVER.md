@@ -153,7 +153,7 @@ Phone and channels
   web a872053, mobile d39674e.
 - Web: Task 15 fe16afd..7923ca2; 16+17 7923ca2..da7df89; 18+21 da7df89..b216a3e; 19 b216a3e..bd3f7f7; 20
   bd3f7f7..0104d4e.
-- Final fixes: server d5c0af2..(this handover), web 0104d4e..03013ea (shared sync c5465f5), mobile 0fb8198 (shared
+- Final fixes: server d5c0af2..98b0c59, web 0104d4e..03013ea (shared sync c5465f5), mobile 0fb8198 (shared
   sync); anything later: see git log.
 
 ## Overview side peek (2026-11-20)
