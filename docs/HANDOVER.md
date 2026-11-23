@@ -83,13 +83,23 @@ unflagged but permission-checked, so it is harmless with the web flag off.
 - Task list is keyset-paged; Today uses one count query.
 
 ### Before go-live
-- Run `npm run test:db` against a throwaway Postgres with `TEST_DATABASE_URL`. It has never run (no Docker or Postgres
-  here); the SQL visibility, index, keyset and clearing rules are tested only there.
+- Done 2026-11-23: `npm run test:db` on a Docker Postgres 17 (`docker run -d --name sma-testdb -e POSTGRES_PASSWORD=test
+  -p 55432:5432 postgres:17-alpine`, then `TEST_DATABASE_URL=postgresql://postgres:test@localhost:55432/<db>`): every
+  migration applies from empty; 10 files, 30 tests pass.
+- Done 2026-11-23: browser pass (Playwright, seeded throwaway DB, `WEB_FEATURES=tasks`): project create and page, quick
+  create, panel, start, checklist, comment, send for review, block with reason, every view, board, Ctrl+K search, Overview
+  Today and Blockers, bell, and approval as the reviewer. Not covered: brand switch on a project page (the seed has one
+  brand), screenshot upload (needs bucket CORS), notes to tasks (needs AI credits).
+- Second four-lens review 2026-11-23 fixed: owner made their own reviewer while in review (409 `task.reviewerIsOwner`),
+  month 00/13 dates crashing date checks (now 400).
 - Storage bucket CORS must allow browser PUT for screenshot uploads.
 - Set `PLANNER_HAND_CHANNELS=on` only after the phone build with the LinkedIn and X labels is released.
-- Browser pass: no DOM tests exist for the task list, board, panel, Today, bell, search or quick create; also switch
-  brands once on a project page.
 - Tell the owner about the extra name-only "New project" form.
+- For the owner: nobody is notified when their task is approved or sent back (no such notification kind); in the panel,
+  "Send for review" asks for a reviewer even when the unsaved form already shows one.
+- Owner decision: recheck notices match the brand-local day exactly, so a missed daily sweep (or a DST skip) loses that
+  day's rechecks. Catch-up (`recheckOn <= today`, keyed by recheckOn, bounded to a week so the 90-day prune can't replay
+  it) is a one-query change; `task-notifications.db.test.ts` currently pins "yesterday's recheck is not sent".
 
 ### Deferred minors
 Task rules
