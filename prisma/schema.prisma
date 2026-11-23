@@ -49,6 +49,12 @@ model User {
   ownedWorkspaces Workspace[]          @relation("WorkspacePrimaryOwner")
   pushDevices     PushDevice[]
   ownedContent    ContentItem[]        @relation("ContentOwner")
+  ownedTasks      Task[]               @relation("TaskOwner")
+  reviewingTasks  Task[]               @relation("TaskReviewer")
+  createdTasks    Task[]               @relation("TaskCreatedBy")
+  blockingTasks   Task[]               @relation("TaskBlockedOn")
+  ownedProjects   WorkProject[]        @relation("WorkProjectOwner")
+  notifications   Notification[]
 }
 
 /// A phone that gets push notifications (reel ready / couldn't be made). messages: the notification texts in the
@@ -198,6 +204,10 @@ model Brand {
   reelAssets    ReelAsset[]
   products      Product[]
   campaigns     Campaign[]
+  tasks         Task[]
+  workProjects  WorkProject[]
+  taskComments  TaskComment[]
+  notifications Notification[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -741,7 +751,8 @@ model AuditReport {
   agentRunId  String?
   createdAt   DateTime  @default(now())
 
-  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  brand Brand  @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  tasks Task[]
 
   @@index([brandId, kind, createdAt])
   @@index([workspaceId, brandId])
@@ -816,6 +827,8 @@ enum ContentChannel {
   FACEBOOK_POST
   PINTEREST_PIN
   THREADS_POST
+  LINKEDIN_POST // planned and posted by hand: no publishing API (Phase 1)
+  X_POST // planned and posted by hand: no publishing API (Phase 1)
 }
 
 /**
@@ -873,6 +886,7 @@ model ContentItem {
   publications PublicationAttempt[]
   renders      ReelRender[]
   recordings   ReelRecording[]
+  tasks        Task[]
 
   @@index([workspaceId, brandId, status])
   @@index([brandId, scheduledFor])
@@ -1084,8 +1098,9 @@ model Campaign {
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
-  brand Brand         @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  items ContentItem[]
+  brand        Brand         @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  items        ContentItem[]
+  workProjects WorkProject[]
 
   @@index([brandId, endsAt])
 }
@@ -1286,6 +1301,245 @@ model MediaUpload {
   createdBy         String
   createdAt         DateTime  @default(now())
 
+  taskAttachments TaskAttachment[]
+
   @@unique([brandId, productId])
   @@index([workspaceId, brandId, status, createdAt])
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+  CANCELLED
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum TaskArea {
+  CONTENT
+  WEBSITE
+  SEO
+  GENERAL
+}
+
+enum WebsiteChangeKind {
+  PRODUCT_PAGE
+  COLLECTION
+  MENU
+  HOMEPAGE
+  LANDING_PAGE
+  BUG
+  CORRECTION
+  OTHER
+}
+
+enum WorkProjectStatus {
+  ACTIVE
+  DONE
+  ARCHIVED
+}
+
+enum TaskCommentKind {
+  COMMENT
+  APPROVED
+  CHANGES_REQUESTED
+  SYSTEM
+}
+
+enum NotificationKind {
+  TASK_ASSIGNED
+  REVIEW_REQUESTED
+  TASK_OVERDUE
+  TASK_RECHECK
+}
+
+enum TaskAttachmentRole {
+  BEFORE
+  AFTER
+  OTHER
+}
+
+/// A piece of team work on one brand: content, website, SEO or general. Status moves only through the task actions.
+/// The open-only partial indexes, the one-open-task-per-finding unique index, the Done-view index and the trigram
+/// index on title are raw SQL in the phase1_tasks migration (Prisma can't express them).
+model Task {
+  id                 String             @id @default(cuid())
+  workspaceId        String
+  brandId            String
+  title              String
+  description        String?
+  status             TaskStatus         @default(TODO)
+  priority           TaskPriority       @default(NORMAL)
+  areas              TaskArea[]         @default([GENERAL])
+  ownerId            String?
+  /// Set when the task needs review; such a task reaches DONE only through approve.
+  reviewerId         String?
+  createdById        String?
+  /// A day in the brand's time zone.
+  dueOn              DateTime?          @db.Date
+  /// Non-null = blocked (on any open status).
+  blockedReason      String?
+  /// Who can unblock it.
+  blockedOnId        String?
+  workProjectId      String?
+  contentItemId      String?
+  /// The affected page, http(s).
+  url                String?
+  changeKind         WebsiteChangeKind?
+  acceptanceCriteria String?
+  previewUrl         String?
+  /// Cleared when url changes or the task reopens.
+  checkedLiveAt      DateTime?
+  checkedLiveById    String?
+  auditReportId      String?
+  /// The audit finding this task came from.
+  findingKind        AuditKind?
+  findingId          String?
+  /// The finding's pages when the task was made (empty = site-wide).
+  findingUrls        String[]           @default([])
+  /// Set by the audit that no longer finds it.
+  findingClearedAt   DateTime?
+  /// SEO: look at performance again on this day.
+  recheckOn          DateTime?          @db.Date
+  /// Set on DONE, cleared on reopen.
+  completedAt        DateTime?
+  requestId          String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  brand         Brand               @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  owner         User?               @relation("TaskOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  reviewer      User?               @relation("TaskReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
+  createdBy     User?               @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  blockedOn     User?               @relation("TaskBlockedOn", fields: [blockedOnId], references: [id], onDelete: SetNull)
+  workProject   WorkProject?        @relation(fields: [workProjectId], references: [id], onDelete: SetNull)
+  contentItem   ContentItem?        @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  auditReport   AuditReport?        @relation(fields: [auditReportId], references: [id], onDelete: SetNull)
+  checklist     TaskChecklistItem[]
+  attachments   TaskAttachment[]
+  comments      TaskComment[]
+  notifications Notification[]
+
+  @@unique([brandId, requestId])
+  @@index([workProjectId, status])
+  @@index([contentItemId])
+}
+
+model TaskChecklistItem {
+  id       String    @id @default(cuid())
+  taskId   String
+  text     String
+  doneAt   DateTime?
+  doneById String?
+  position Int
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, position])
+}
+
+/// A brand photo on a task. Restrict: removing the attachment or deleting the task never deletes the upload.
+model TaskAttachment {
+  id            String             @id @default(cuid())
+  taskId        String
+  mediaUploadId String
+  role          TaskAttachmentRole
+  createdById   String
+  createdAt     DateTime           @default(now())
+
+  task        Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  mediaUpload MediaUpload @relation(fields: [mediaUploadId], references: [id], onDelete: Restrict)
+
+  @@index([taskId])
+  @@index([mediaUploadId])
+}
+
+/// A group of tasks with dates (a launch, a site rebuild). Progress = done / (all - cancelled). The trigram index on
+/// name is raw SQL in the phase1_tasks migration.
+model WorkProject {
+  id            String            @id @default(cuid())
+  workspaceId   String
+  brandId       String
+  name          String
+  description   String?
+  ownerId       String?
+  status        WorkProjectStatus @default(ACTIVE)
+  startsOn      DateTime?         @db.Date
+  dueOn         DateTime?         @db.Date
+  campaignId    String?
+  clientVisible Boolean           @default(false)
+  requestId     String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  brand      Brand                  @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  owner      User?                  @relation("WorkProjectOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  campaign   Campaign?              @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  tasks      Task[]
+  milestones WorkProjectMilestone[]
+
+  @@unique([brandId, campaignId])
+  @@unique([brandId, requestId])
+  @@index([brandId, status, dueOn])
+}
+
+model WorkProjectMilestone {
+  id            String    @id @default(cuid())
+  workProjectId String
+  title         String
+  dueOn         DateTime  @db.Date
+  doneAt        DateTime?
+  position      Int
+
+  workProject WorkProject @relation(fields: [workProjectId], references: [id], onDelete: Cascade)
+
+  @@index([workProjectId, dueOn])
+}
+
+/// Append-only (no edit or delete). authorId is null for SYSTEM comments; internal ones are never shown to a client.
+model TaskComment {
+  id          String          @id @default(cuid())
+  workspaceId String
+  brandId     String
+  taskId      String
+  authorId    String?
+  kind        TaskCommentKind
+  body        String
+  byClient    Boolean         @default(false)
+  internal    Boolean         @default(false)
+  createdAt   DateTime        @default(now())
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  task  Task  @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, createdAt])
+}
+
+/// One in-app notice for one person. dedupeKey: event kinds <kind>:<userId>:<auditEventId>; daily kinds
+/// <kind>:<userId>:<taskId>:<brand-local yyyy-mm-dd>. Pruned after 90 days by the daily sweep.
+model Notification {
+  id          String           @id @default(cuid())
+  userId      String
+  workspaceId String
+  brandId     String
+  kind        NotificationKind
+  taskId      String?
+  actorId     String?
+  dedupeKey   String           @unique
+  readAt      DateTime?
+  createdAt   DateTime         @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  task  Task? @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([userId, workspaceId, readAt, createdAt])
+  @@index([createdAt])
 }

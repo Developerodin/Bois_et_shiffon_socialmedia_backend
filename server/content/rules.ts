@@ -49,7 +49,8 @@ export function checkDraft(channel: ContentChannel, body: DraftBody): CheckResul
   const text = `${body.hook}\n${caption}\n${(body.slides ?? []).join("\n")}\n${(body.script ?? []).join("\n")}`.toLowerCase();
 
   if (!caption) add("Caption", "blocker", "The caption is empty.");
-  else if (caption.length > LIMITS.captionMax) add("Caption length", "blocker", `${caption.length} characters; the limit is ${LIMITS.captionMax}.`);
+  // LinkedIn and X have their own limits (checked below); 2,200 is Instagram's, and the default for the rest.
+  else if (channel !== "LINKEDIN_POST" && channel !== "X_POST" && caption.length > LIMITS.captionMax) add("Caption length", "blocker", `${caption.length} characters; the limit is ${LIMITS.captionMax}.`);
 
   if (channel.startsWith("INSTAGRAM") && caption) {
     if (/^[#@]|^\p{Extended_Pictographic}/u.test(firstLine)) add("First line", "warn", "Starts with a hashtag, mention or emoji; lead with words.");
@@ -71,6 +72,10 @@ export function checkDraft(channel: ContentChannel, body: DraftBody): CheckResul
     else if (body.pinTitle.length > LIMITS.pinTitleMax) add("Pin title", "warn", `${body.pinTitle.length} characters; keep it under ${LIMITS.pinTitleMax}.`);
   }
   if (channel === "THREADS_POST" && caption.length > LIMITS.threadsMax) add("Threads length", "blocker", `${caption.length} characters; Threads allows ${LIMITS.threadsMax}.`);
+  // LinkedIn and X count the whole post, hashtags included (as posted: caption, blank line, hashtags).
+  const posted = caption.length + (body.hashtags.length ? 2 + body.hashtags.join(" ").length : 0);
+  if (channel === "LINKEDIN_POST" && posted > LIMITS.linkedinMax) add("LinkedIn length", "blocker", `${posted} characters with the hashtags; LinkedIn allows ${LIMITS.linkedinMax}.`);
+  if (channel === "X_POST" && posted > LIMITS.xMax) add("X length", "blocker", `${posted} characters with the hashtags; X allows ${LIMITS.xMax}.`);
   if (channel === "INSTAGRAM_CAROUSEL" && (body.slides?.length ?? 0) < 3) add("Carousel", "blocker", "A carousel needs at least 3 slides.");
   if (channel === "INSTAGRAM_REEL" && (body.script?.length ?? 0) < 2) add("Reel script", "blocker", "A Reel needs a beat-by-beat script.");
   // No AI looks at the video itself, so this stays open for the person sending it (the brief: unresolved checks stay visible).

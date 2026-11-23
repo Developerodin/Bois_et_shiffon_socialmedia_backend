@@ -24,8 +24,8 @@ describe("permission catalog + system roles", () => {
     expect(role("viewer").has("content.create")).toBe(false);
   });
 
-  it("Commercial owner holds commercial.manage and READ only; Approver and Manager don't (brief B7)", () => {
-    expect([...role("commercial-owner")].sort()).toEqual(["agents.read", "analytics.read", "brand.read", "commercial.manage"]);
+  it("Commercial owner holds commercial.manage, READ and the task keys only; Approver and Manager don't (brief B7)", () => {
+    expect([...role("commercial-owner")].sort()).toEqual(["agents.read", "analytics.read", "brand.read", "commercial.manage", "tasks.manage", "tasks.read"]);
     expect(role("approver").has("commercial.manage")).toBe(false);
     expect(role("manager").has("commercial.manage")).toBe(false);
     expect(role("project-admin").has("commercial.manage")).toBe(true);

@@ -128,4 +128,29 @@ describe("Planner and campaigns", () => {
     await expect(plannerAgent.run(ctx(), {})).rejects.toThrow("No ideas to plan");
     expect(ai).not.toHaveBeenCalled();
   });
+
+  it("offers LinkedIn and X only when PLANNER_HAND_CHANNELS=on", async () => {
+    type Call = { system: string; schema: { safeParse: (v: unknown) => { success: boolean } } };
+    const offered = (call: Call, channel: string) => call.schema.safeParse({ posts: [post({ channel })] }).success;
+    try {
+      vi.stubEnv("PLANNER_HAND_CHANNELS", "");
+      await plannerAgent.run(ctx(), {});
+      const off = ai.mock.calls[0]![0] as unknown as Call;
+      expect(offered(off, "LINKEDIN_POST")).toBe(false);
+      expect(offered(off, "X_POST")).toBe(false);
+      expect(offered(off, "INSTAGRAM_POST")).toBe(true);
+      expect(off.system).not.toContain("LINKEDIN_POST");
+      expect(off.system).not.toContain("X_POST");
+
+      vi.stubEnv("PLANNER_HAND_CHANNELS", "on");
+      await plannerAgent.run(ctx(), {});
+      const on = ai.mock.calls[1]![0] as unknown as Call;
+      expect(offered(on, "LINKEDIN_POST")).toBe(true);
+      expect(offered(on, "X_POST")).toBe(true);
+      expect(on.system).toContain("LINKEDIN_POST");
+      expect(on.system).toContain("X_POST");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

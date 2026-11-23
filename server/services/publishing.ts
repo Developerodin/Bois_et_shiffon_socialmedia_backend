@@ -6,7 +6,8 @@ import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefuse
 import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { CAPTION_LIMITS, safeHttpUrl } from "@/shared";
-import { CLIENT_GRANT_WHERE, hasOtherApprover, requirePermission } from "@/server/auth/permissions";
+import { brandMemberPerms, hasOtherApprover, isClientMember, requirePermission } from "@/server/auth/permissions";
+import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { linkedProducts } from "@/server/catalog/linked";
 import { gateIssues, linkedIds, ProductOverride, snapshotOf } from "@/server/content/product-checks";
 import { campaignsById } from "@/server/catalog/campaigns";
@@ -50,6 +51,9 @@ const CHANNEL_PROVIDER: Record<ContentChannel, IntegrationProvider | null> = {
   INSTAGRAM_CAROUSEL: "INSTAGRAM",
   INSTAGRAM_REEL: "INSTAGRAM",
   INSTAGRAM_STORY: "INSTAGRAM",
+  // No publishing API yet: planned, then posted by hand (registerManualPost).
+  LINKEDIN_POST: null,
+  X_POST: null,
 };
 // How many images each channel takes [min, max]; Reels take a video instead.
 const IMAGES: Record<ContentChannel, [number, number]> = {
@@ -60,8 +64,13 @@ const IMAGES: Record<ContentChannel, [number, number]> = {
   THREADS_POST: [0, 1],
   INSTAGRAM_REEL: [0, 0],
   INSTAGRAM_STORY: [0, 0], // frames, not images: see publishRequirements
+  LINKEDIN_POST: [0, 1],
+  X_POST: [0, 1],
 };
-const TEXT_LIMIT: Partial<Record<ContentChannel, number>> = { THREADS_POST: 500, INSTAGRAM_POST: 2200, INSTAGRAM_CAROUSEL: 2200, INSTAGRAM_REEL: 2200 };
+const TEXT_LIMIT: Partial<Record<ContentChannel, number>> = {
+  THREADS_POST: CAPTION_LIMITS.threadsMax, INSTAGRAM_POST: 2200, INSTAGRAM_CAROUSEL: 2200, INSTAGRAM_REEL: 2200,
+  LINKEDIN_POST: CAPTION_LIMITS.linkedinMax, X_POST: CAPTION_LIMITS.xMax,
+};
 const LIVE: Prisma.EnumPublicationStatusFilter = { in: ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PENDING_VERIFY", "PARTIAL"] };
 
 export function publishRequirements(channel: ContentChannel) {
@@ -151,8 +160,10 @@ async function gateWithLinks(db: Prisma.TransactionClient, scope: { workspaceId:
 
 // Callers queue on the per-post lock; allow for a slow database link before giving up.
 export const TX = { maxWait: 10_000, timeout: 20_000 };
+/** Per-row lock for the transaction: posts (people and agents alike) and tasks. */
+export const lockRow = (tx: Prisma.TransactionClient, kind: "content" | "task", id: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${kind}:${id}`}))`;
 /** Per-post lock shared by people (edit, approve, publish) and agents (Creator, Quality). */
-export const lock = (tx: Prisma.TransactionClient, itemId: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`content:${itemId}`}))`;
+export const lock = (tx: Prisma.TransactionClient, itemId: string) => lockRow(tx, "content", itemId);
 
 export type DraftInput = { hook: string; caption: string; hashtags: string[]; slides: string[]; script: string[]; pinTitle: string; altText: string; photoKeys?: string[]; pinLink?: string };
 
@@ -220,13 +231,31 @@ export async function createPost(input: { workspaceId: string; brandId: string; 
  * Names only, never emails: the list is open to anyone who can create posts. `reveal` (the caller holds
  * project.members.manage): nameless people by their email's local part; else "A team member", "A team member (2)", …
  * so the picker can tell them apart. Client reviewers review the work, they don't own it: their grants are left out.
+ * `key` (default brand.read): the permission a person must hold on the brand, e.g. tasks.read for task names (one more
+ * read of the workspace roles holding it). `includeClients`: keep client-reviewer grants that hold `key`.
  * ponytail: reads every member of the workspace; fine for small teams.
  */
-export async function brandOwners(scope: { workspaceId: string; brandId: string }, { reveal }: { reveal: boolean }) {
-  const { viaWorkspace, people } = await listProjectPeople(scope.workspaceId, scope.brandId);
+export async function brandOwners(
+  scope: { workspaceId: string; brandId: string },
+  { reveal = false, key = "brand.read", includeClients = false }: { reveal?: boolean; key?: PermissionKey; includeClients?: boolean } = {},
+) {
+  const [{ viaWorkspace, people }, roles] = await Promise.all([
+    listProjectPeople(scope.workspaceId, scope.brandId),
+    // listProjectPeople's workspace list is already the brand.read holders; another key, or telling clients apart, needs the roles.
+    key === "brand.read" && !includeClients
+      ? null
+      : prisma.workspaceMember.findMany({ where: { workspaceId: scope.workspaceId }, select: { userId: true, roleRef: { select: { permissions: true } } } }),
+  ]);
+  const roleOf = new Map((roles ?? []).map((r) => [r.userId, r.roleRef?.permissions ?? []]));
+  const viaRole = key === "brand.read" ? null : new Set([...roleOf].filter(([, perms]) => perms.includes(key)).map(([userId]) => userId));
+  // With includeClients, each person says whether they are a client here (isClientMember).
+  const clients = new Set(includeClients ? people.filter((g) => isClientMember(g.client, roleOf.get(g.userId) ?? [])).map((g) => g.userId) : []);
   const byId = new Map<string, { id: string; name: string; named: boolean }>();
-  // Project roles are free-form: a grant counts only when its role holds brand.read. Disabled and deleted people never do.
-  const reach = [...viaWorkspace, ...people.filter((g) => g.role.permissions.includes("brand.read") && !g.client)].filter((p) => p.active);
+  // Project roles are free-form: a grant counts only when its role holds `key`. Disabled and deleted people never do.
+  const reach = [
+    ...viaWorkspace.filter((p) => !viaRole || viaRole.has(p.userId)),
+    ...people.filter((g) => g.role.permissions.includes(key) && (includeClients || !g.client)),
+  ].filter((p) => p.active);
   for (const p of reach) {
     const named = !!p.name?.trim();
     const seen = byId.get(p.userId);
@@ -234,25 +263,20 @@ export async function brandOwners(scope: { workspaceId: string; brandId: string 
     if (!seen || (!seen.named && named)) byId.set(p.userId, { id: p.userId, name: personName(p, { reveal }), named });
   }
   let nameless = 0;
-  return [...byId.values()].map(({ id, name, named }) => {
-    if (named || reveal) return { id, name };
+  return [...byId.values()].map(({ id, name, named }): { id: string; name: string; client?: boolean } => {
+    const client = includeClients ? { client: clients.has(id) } : {};
+    if (named || reveal) return { id, name, ...client };
     nameless++;
-    return { id, name: nameless === 1 ? TEAM_MEMBER : `${TEAM_MEMBER} (${nameless})` };
+    return { id, name: nameless === 1 ? TEAM_MEMBER : `${TEAM_MEMBER} (${nameless})`, ...client };
   });
 }
 
 /** Give a post to someone with access to the brand, or to nobody (null). An unknown user and one without access get the same 400. */
 export async function setOwner(scope: { workspaceId: string; brandId: string; userId: string }, itemId: string, userId: string | null) {
   // ponytail: checked outside the transaction, so removing the member in the same instant can still let one assignment through; a lock on membership if that matters.
-  // Two indexed lookups (the same rule as brandOwners, for one person): brand.read through the workspace role or a project
-  // grant that is not the client-reviewer role, and the person is active.
-  if (userId) {
-    const user = { status: "ACTIVE" as const, deletedAt: null };
-    const [viaWorkspace, viaGrant] = await Promise.all([
-      prisma.workspaceMember.findFirst({ where: { workspaceId: scope.workspaceId, userId, roleRef: { permissions: { has: "brand.read" } }, user }, select: { id: true } }),
-      prisma.brandMember.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId, role: { permissions: { has: "brand.read" }, NOT: CLIENT_GRANT_WHERE }, user }, select: { id: true } }),
-    ]);
-    if (!viaWorkspace && !viaGrant) throw new PublishingError("Pick someone who works on this brand.", 400, "owner.invalid");
+  // brand.read through the workspace role or a project grant that is not the client-reviewer role, and the person is active.
+  if (userId && !(await brandMemberPerms(prisma, scope, userId, "brand.read"))) {
+    throw new PublishingError("Pick someone who works on this brand.", 400, "owner.invalid");
   }
   await prisma.$transaction(async (tx) => {
     await lock(tx, itemId);

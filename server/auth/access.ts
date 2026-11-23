@@ -2,7 +2,7 @@ import "server-only";
 import { BrandStatus } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { AccessDeniedError, BrandArchivedError } from "@/server/auth/errors";
-import { brandGrant, isClientGrant, memberRole, permissionsOf } from "@/server/auth/permissions";
+import { brandGrant, isClientGrant, isClientMember, memberRole, permissionsOf } from "@/server/auth/permissions";
 
 export type BrandAccessOptions = {
   /** Allow read-style access when brand is archived (AT-024 history). */
@@ -75,6 +75,6 @@ export async function brandAccess(
   }
 
   // Approves here only as the client (Client reviewer grant, no content.approve from their workspace role).
-  const clientReviewer = !!grant && isClientGrant(grant.role) && !found.role?.permissions.includes("content.approve");
+  const clientReviewer = isClientMember(!!grant && isClientGrant(grant.role), found.role?.permissions ?? []);
   return { brand, perms, clientReviewer };
 }

@@ -1,6 +1,8 @@
 import type { AuditKind, AuditReport, Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
+import { enqueueJob } from "@/server/jobs/queue";
 import type { Finding } from "@/server/seo/checks";
+import { FINDING_CLEAR_JOB } from "@/server/seo/finding-tasks";
 
 export async function saveAuditReport(input: {
   workspaceId: string;
@@ -12,8 +14,17 @@ export async function saveAuditReport(input: {
   metrics: Prisma.InputJsonValue;
   agentRunId: string;
 }) {
-  return prisma.auditReport.create({
-    data: { ...input, score: Math.round(Math.min(100, Math.max(0, input.score))), findings: input.findings as Prisma.InputJsonValue },
+  // An SEO report queues the job that closes the tasks of findings it no longer lists, in the same transaction (so a
+  // saved report always gets its job); the agent run never waits for that job.
+  return prisma.$transaction(async (tx) => {
+    const report = await tx.auditReport.create({
+      data: { ...input, score: Math.round(Math.min(100, Math.max(0, input.score))), findings: input.findings as Prisma.InputJsonValue },
+    });
+    if (input.kind === "SEO") {
+      const scope = { workspaceId: input.workspaceId, brandId: input.brandId };
+      await enqueueJob({ type: FINDING_CLEAR_JOB, ...scope, payload: { ...scope, reportId: report.id }, idempotencyKey: `finding-clear:${report.id}` }, tx);
+    }
+    return report;
   });
 }
 

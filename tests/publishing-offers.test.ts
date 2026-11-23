@@ -58,6 +58,17 @@ beforeEach(() => {
   campaigns(sale());
 });
 
+describe("channels posted by hand", () => {
+  it("publishing LinkedIn is refused", async () => {
+    latest = version([], []);
+    db.contentItem.findFirst.mockResolvedValue(item("APPROVED", { channel: "LINKEDIN_POST" }));
+    db.approvalDecision.findFirst.mockResolvedValue(approval({ packageHash: packageHash({ id: "i1", channel: "LINKEDIN_POST" }, latest) }));
+    await expect(schedulePublication({ ...scope, userId: "boss", itemId: "i1", version: 2, connectionId: "conn" })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/can't be published automatically/) });
+    expect(db.integrationConnection.findFirst).not.toHaveBeenCalled();
+    expect(db.publicationAttempt.create).not.toHaveBeenCalled();
+  });
+});
+
 describe("decide with offer issues", () => {
   it("a post linking no product with an ended whole-catalogue offer is refused", async () => {
     vi.useFakeTimers({ now: new Date("2026-12-01T10:00:00Z"), toFake: ["Date"] });

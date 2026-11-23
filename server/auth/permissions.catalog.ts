@@ -45,15 +45,15 @@ export const SYSTEM_ROLES: ReadonlyArray<{
     name: "Manager",
     scope: "PROJECT",
     description: "Runs agents, strategy, the calendar and publishing",
-    permissions: [...READ, "agents.run", "context.edit", "context.confirm", "content.create", "content.download", "publish.execute", "integrations.manage", "inbox.read"],
+    permissions: [...READ, "agents.run", "context.edit", "context.confirm", "content.create", "content.download", "publish.execute", "integrations.manage", "inbox.read", "tasks.read", "tasks.manage"],
   },
-  { slug: "creator", name: "Creator", scope: "PROJECT", description: "Writes and edits drafts", permissions: [...READ, "content.create"] },
+  { slug: "creator", name: "Creator", scope: "PROJECT", description: "Writes and edits drafts", permissions: [...READ, "content.create", "tasks.read", "tasks.manage"] },
   {
     slug: "approver",
     name: "Approver",
     scope: "PROJECT",
     description: "Reviews posts, brand rules and strategy",
-    permissions: [...READ, "context.edit", "context.confirm", "rules.approve", "content.approve", "content.download", "inbox.read"],
+    permissions: [...READ, "context.edit", "context.confirm", "rules.approve", "content.approve", "content.download", "inbox.read", "tasks.read"],
   },
   {
     slug: CLIENT_REVIEWER,
@@ -61,16 +61,16 @@ export const SYSTEM_ROLES: ReadonlyArray<{
     scope: "PROJECT",
     description: "Sees the work and reports, approves posts and downloads",
     // No agents.read (assistant, Translate) and no inbox.read: customer messages stay with the team that answers them.
-    permissions: ["brand.read", "analytics.read", "content.approve", "content.download"],
+    permissions: ["brand.read", "analytics.read", "content.approve", "content.download", "tasks.read"],
   },
   {
     slug: "commercial-owner",
     name: "Commercial owner",
     scope: "PROJECT",
     description: "Sets product priorities, campaigns and offers",
-    permissions: [...READ, "commercial.manage"],
+    permissions: [...READ, "commercial.manage", "tasks.read", "tasks.manage"],
   },
-  { slug: "viewer", name: "Viewer", scope: "PROJECT", description: "Read-only access to this project", permissions: READ },
+  { slug: "viewer", name: "Viewer", scope: "PROJECT", description: "Read-only access to this project", permissions: [...READ, "tasks.read"] },
 ];
 
 /** Legacy WorkspaceRole enum → system role slug (fallback while roleId is null). */

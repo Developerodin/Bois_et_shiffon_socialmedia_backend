@@ -1,7 +1,7 @@
 import type { ContentChannel } from "@prisma/client";
 import { z } from "zod";
 import { NothingToDoError, startAgentRun } from "@/server/agents/engine";
-import { CONTENT_PROMPT_VERSION, PLANNER_SYSTEM } from "@/server/agents/prompts/content";
+import { CONTENT_PROMPT_VERSION, plannerSystem } from "@/server/agents/prompts/content";
 import type { AgentDefinition } from "@/server/agents/types";
 import { campaignsForPlanning } from "@/server/catalog/campaigns";
 import { linkedProducts } from "@/server/catalog/linked";
@@ -13,10 +13,15 @@ import { prisma } from "@/server/db/prisma";
 // No INSTAGRAM_REEL: a planned reel would have a script but no video to post. Reels are made in the app's Studio.
 // Stories are planned: the Creator writes their frames from the brand's photos (paid by the Planner's own charge).
 const CHANNELS = ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "FACEBOOK_POST", "PINTEREST_PIN", "THREADS_POST", "INSTAGRAM_STORY"] as const;
-const Plan = z.object({
-  // campaignId "" = none; opportunityId "" = a campaign-only post.
-  posts: z.array(z.object({ opportunityId: z.string(), campaignId: z.string(), title: z.string(), channel: z.enum(CHANNELS), pillar: z.string(), angle: z.string() })),
-});
+// LinkedIn and X are posted by hand; the Planner offers them only with PLANNER_HAND_CHANNELS=on, turned on once the
+// phone build that names them is released. Posts on them (made by hand, publishing, limits) work either way.
+const HAND_CHANNELS = ["LINKEDIN_POST", "X_POST"] as const;
+const handChannelsOn = () => process.env.PLANNER_HAND_CHANNELS === "on";
+const planSchema = (hand: boolean) =>
+  z.object({
+    // campaignId "" = none; opportunityId "" = a campaign-only post.
+    posts: z.array(z.object({ opportunityId: z.string(), campaignId: z.string(), title: z.string(), channel: z.enum(hand ? [...CHANNELS, ...HAND_CHANNELS] : CHANNELS), pillar: z.string(), angle: z.string() })),
+  });
 const MAX_OPPORTUNITIES = 5;
 const DAY = 86_400_000;
 /** ponytail: 2 posts per campaign and per standing priority per 30 days, fixed; a per-row number when asked. */
@@ -80,13 +85,14 @@ export const plannerAgent: AgentDefinition = {
         products: c.productIds.map((id) => nameOf.get(id)), categories: c.categories, offer: c.offer, discountPercent: c.discountPercent, posts: needs.get(c.id),
       }),
     );
+    const hand = handChannelsOn();
     await ctx.log("INFO", `Planning ${opps.length} idea(s)${wanted.length ? ` and ${wanted.length} campaign(s) or priorities` : ""}`);
     const out = await ctx.ai.generateObject({
       workflowId: "planner.plan",
       promptVersion: CONTENT_PROMPT_VERSION,
-      schema: Plan,
+      schema: planSchema(hand),
       schemaName: "content_plan",
-      system: PLANNER_SYSTEM,
+      system: plannerSystem(hand),
       prompt: `Brand: ${brand.displayName}\n\nIdeas to plan (use the exact opportunityId):\n${opps
         .map((o) => `- id=${o.id} | ${o.title} | angle: ${o.angle} | suggested channels: ${o.channels.join(", ")} | timing: ${o.timing ?? "any"}`)
         .join("\n") || "(none)"}${

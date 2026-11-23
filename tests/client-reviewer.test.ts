@@ -97,10 +97,10 @@ beforeEach(() => {
 });
 
 describe("Client reviewer role", () => {
-  it("holds exactly brand.read, analytics.read, content.approve and content.download", () => {
+  it("holds exactly brand.read, analytics.read, content.approve, content.download and tasks.read", () => {
     const r = role("client-reviewer");
     expect(r).toMatchObject({ name: "Client reviewer", scope: "PROJECT", description: "Sees the work and reports, approves posts and downloads" });
-    expect([...r.permissions].sort()).toEqual(["analytics.read", "brand.read", "content.approve", "content.download"]);
+    expect([...r.permissions].sort()).toEqual(["analytics.read", "brand.read", "content.approve", "content.download", "tasks.read"]);
   });
 
   it("the catalog matches what the migration grants", () => {
@@ -124,7 +124,8 @@ describe("Client reviewer role", () => {
       expect(p.includes("content.download")).toBe(p.includes("publish.execute") || p.includes("content.approve"));
     }
     const inserted = sql.match(/ARRAY\[([^\]]*)\]::TEXT\[\]/)![1]!.match(/'[^']+'/g)!.map((s) => s.slice(1, -1));
-    expect(inserted).toEqual([...role("client-reviewer").permissions]);
+    // tasks.read came later, with the phase1_tasks migration.
+    expect(inserted).toEqual(role("client-reviewer").permissions.filter((k) => k !== "tasks.read"));
     expect(sql).toMatch(/SET "slug" = 'client-reviewer-custom-' \|\| "id"[\s\S]*WHERE "slug" = 'client-reviewer' AND NOT "isSystem"/);
   });
 
