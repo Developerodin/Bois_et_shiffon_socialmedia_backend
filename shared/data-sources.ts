@@ -49,3 +49,50 @@ export type DataSourceDto = {
   /** The zone the provider's days are in (Google: Pacific; Meta Ads: the account's), when it says */
   reportsInZone: string | null;
 };
+
+// ---- Search Console ----------------------------------------------------------------------------------------------
+
+/** Google reports Search Console days in Pacific time; SearchDay keeps them as Google's days. */
+export const SEARCH_CONSOLE_ZONE = "America/Los_Angeles";
+/** The longest from..to a search read accepts, in days. */
+export const SEARCH_RANGE_MAX_DAYS = 90;
+
+/** GET google/sites?connectionId: the Google account's verified sites, and the brand's chosen one. */
+export type SearchSiteDto = { siteUrl: string; permissionLevel: string };
+export type SearchSitesDto = { sites: SearchSiteDto[]; chosen: string | null };
+/** PUT data-sources/search-console */
+export type ChooseSearchSiteBody = { connectionId: string; siteUrl: string };
+
+/** ctr = clicks / impressions; position = impression-weighted average. Both null with no impressions. */
+export type SearchMetrics = { clicks: number; impressions: number; ctr: number | null; position: number | null };
+export type SearchDayRow = SearchMetrics & { day: string };
+export type SearchPageRow = SearchMetrics & { page: string };
+
+export const SEARCH_PAGE_SORTS = ["clicks", "impressions"] as const;
+export type SearchPageSort = (typeof SEARCH_PAGE_SORTS)[number];
+export const SEARCH_PAGES_LIMIT = 50;
+
+/**
+ * GET search/summary?from&to (inclusive "YYYY-MM-DD", Google's days). `siteUrl` null: no site chosen yet (all zero).
+ * `previous`: the equal-length range just before. `days`: the SITE rows held in the range (a day not synced yet is
+ * missing).
+ */
+export type SearchSummaryDto = {
+  siteUrl: string | null;
+  daysIn: typeof SEARCH_CONSOLE_ZONE;
+  range: { from: string; to: string };
+  previousRange: { from: string; to: string };
+  totals: SearchMetrics;
+  previous: SearchMetrics;
+  days: SearchDayRow[];
+};
+
+/**
+ * GET search/pages?from&to&sort=clicks|impressions&cursor: pages summed over the range, SEARCH_PAGES_LIMIT at a time.
+ * Built from each day's top pages, so their sums sit below the site total; say so on screen. `nextCursor` is opaque
+ * and only valid with the same sort.
+ */
+export type SearchPagesDto = { pages: SearchPageRow[]; nextCursor: string | null };
+
+/** GET data-sources. `timeZone`: the brand's zone (dates we bucket ourselves); a provider's own is `reportsInZone`. */
+export type DataSourcesDto = { sources: DataSourceDto[]; timeZone: string };
