@@ -11,6 +11,7 @@ import { AGENTS } from "@/server/agents/registry";
 import { AiProviderError } from "@/server/ai/provider";
 import { CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
 import { DATA_SYNC_JOB, enqueueDailyDataSyncs, runDataSync } from "@/server/data/sources";
+import { ensurePostMetricSources } from "@/server/data/post-metric-sync"; // also registers the POST_METRICS runner
 import { prisma } from "@/server/db/prisma";
 import { EMAIL_SEND_JOB, sendOutboxEmail } from "@/server/email/outbox";
 import { notifyOverdueTasks, notifyRechecks, pruneNotifications } from "@/server/notifications/daily-tasks";
@@ -167,8 +168,9 @@ async function dailySweep() {
   await startScheduledAgents();
   // Last, and each on its own: a failing step is logged and never blocks the steps above (billing renewals).
   const now = new Date();
-  // "data" only queues each data source's sync (no provider calls), spread over the next two hours.
-  for (const [name, step] of [["data", enqueueDailyDataSyncs], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications]] as const) {
+  // "data" only queues each data source's sync (no provider calls), spread over the next two hours; "post-metric
+  // sources" first gives each brand with published posts its POST_METRICS source.
+  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications]] as const) {
     try {
       await step(now);
     } catch (e) {
