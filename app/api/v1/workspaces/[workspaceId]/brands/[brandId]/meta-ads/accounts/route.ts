@@ -19,7 +19,7 @@ export async function GET(request: Request, context: Params) {
     if (scope instanceof Response) return scope;
     const id = ConnectionId.safeParse(new URL(request.url).searchParams.get("connectionId"));
     if (!id.success) return invalid();
-    return Response.json({ accounts: await listMetaAdAccounts(scope, id.data) });
+    return Response.json(await listMetaAdAccounts(scope, id.data));
   } catch (error) {
     return metaAdsProblem(error);
   }

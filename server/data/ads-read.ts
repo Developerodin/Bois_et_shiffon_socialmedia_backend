@@ -9,6 +9,9 @@ import { prisma } from "@/server/db/prisma";
  * (no FX until the money settings are built). Days are each ad account's own days.
  * ponytail: sums run per request over the (brandId, platform, accountId, day) index; at many campaigns × 366 days
  * a per-day rollup would replace them.
+ * ponytail: reads filter (brandId, platform, day) without accountId, so that index seeks on its (brandId, platform)
+ * prefix only and filters the days. Upgrade: `@@index([brandId, platform, day])` in a NEW migration (never edit
+ * 20261125123000_ad_day).
  */
 type Scope = { workspaceId: string; brandId: string };
 

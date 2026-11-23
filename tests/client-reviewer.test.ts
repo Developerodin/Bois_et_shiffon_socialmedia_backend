@@ -185,6 +185,17 @@ describe("connections list", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).connections).toEqual([{ id: "c1" }]);
   });
+
+  it("Meta Ads and Shopify rows only for integrations.manage: an Approver sees the others", async () => {
+    const { listConnections } = await import("@/server/services/connections");
+    const rows = [{ id: "ig", provider: "INSTAGRAM" }, { id: "ads", provider: "META_ADS" }, { id: "shop", provider: "SHOPIFY" }];
+    vi.mocked(listConnections).mockResolvedValue(rows as never);
+    callerInScope([], { isSystem: true, slug: "approver", permissions: ["brand.read", "publish.execute", "content.approve"] });
+    expect((await (await list()).json()).connections).toEqual([{ id: "ig" }]);
+    vi.mocked(listConnections).mockResolvedValue(rows as never);
+    callerInScope([], { isSystem: false, slug: "custom", permissions: ["brand.read", "integrations.manage"] });
+    expect((await (await list()).json()).connections).toEqual([{ id: "ig" }, { id: "ads" }, { id: "shop" }]);
+  });
 });
 
 describe("hasOtherApprover", () => {

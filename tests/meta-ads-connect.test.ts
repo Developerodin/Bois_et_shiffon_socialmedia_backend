@@ -135,10 +135,13 @@ describe("ad account picker", () => {
   it("lists the live accounts and chooses the connection's account with its currency and zone", async () => {
     db.integrationConnection.findFirst.mockResolvedValue(conn);
     graph({ "/me/adaccounts": [{ data: [account("act_1"), account("act_3")] }, { data: [account("act_1")] }] });
-    expect(await listMetaAdAccounts(scope, "c1")).toEqual([
-      { id: "act_1", name: "Account act_1", currency: "EUR", timeZone: "Europe/Paris" },
-      { id: "act_3", name: "Account act_3", currency: "EUR", timeZone: "Europe/Paris" },
-    ]);
+    expect(await listMetaAdAccounts(scope, "c1")).toEqual({
+      accounts: [
+        { id: "act_1", name: "Account act_1", currency: "EUR", timeZone: "Europe/Paris" },
+        { id: "act_3", name: "Account act_3", currency: "EUR", timeZone: "Europe/Paris" },
+      ],
+      connectionAccountId: "act_1",
+    });
     expect(await chooseMetaAdAccount(scope, "c1")).toBe("ds1");
     expect(db.dataSource.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { brandId_kind_externalId: { brandId: "b1", kind: "META_ADS", externalId: "act_1" } },

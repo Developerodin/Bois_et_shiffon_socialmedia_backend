@@ -6,6 +6,7 @@ import { DATA_SYNC_JOB } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { metaAdAccounts, ProviderError, type MetaAdAccount } from "@/server/integrations/providers";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
+import type { MetaAdAccountDto, MetaAdAccountsDto } from "@/shared";
 
 /**
  * The Meta Ads account picker: which ad accounts a connected Meta Ads login can read, and choosing the one a brand's
@@ -64,13 +65,13 @@ async function liveAccounts(conn: IntegrationConnection): Promise<MetaAdAccount[
   }
 }
 
-const toDto = (a: MetaAdAccount) => ({ id: a.id, name: a.name, currency: a.currency, timeZone: a.timezone_name });
+const toDto = (a: MetaAdAccount): MetaAdAccountDto => ({ id: a.id, name: a.name, currency: a.currency, timeZone: a.timezone_name });
 
-/** The active ad accounts the connection's Meta login can read now. */
-export async function listMetaAdAccounts(scope: Scope, connectionId: string) {
+/** The active ad accounts the connection's Meta login can read now, and the connection's own account id. */
+export async function listMetaAdAccounts(scope: Scope, connectionId: string): Promise<MetaAdAccountsDto> {
   const conn = await adsConnection(scope, connectionId);
   await limit(scope);
-  return (await liveAccounts(conn)).map(toDto);
+  return { accounts: (await liveAccounts(conn)).map(toDto), connectionAccountId: conn.externalAccountId };
 }
 
 /**

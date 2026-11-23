@@ -140,6 +140,13 @@ describe("PUT data-sources/shopify-orders", () => {
     });
   }
 
+  it("is limited to 10 presses a minute per brand and person (429)", async () => {
+    await prisma.rateLimitBucket.deleteMany({});
+    for (let i = 0; i < 10; i++) expect((await put({ connectionId: "missing" })).status).toBe(404);
+    expect((await put({ connectionId: "missing" })).status).toBe(429);
+    await prisma.rateLimitBucket.deleteMany({});
+  });
+
   it("turns the sync on with the stored token, ignoring a token in the body, and queues the first run", async () => {
     const c = await connection("so-a");
     const res = await put({ connectionId: c.id, accessToken: "shpat_from_body" });

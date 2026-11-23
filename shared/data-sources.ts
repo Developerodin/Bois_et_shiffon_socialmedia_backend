@@ -160,6 +160,13 @@ export function parseRange(from: string | null | undefined, to: string | null | 
   return days <= maxDays ? { from, to } : null;
 }
 
+/** GET meta-ads/accounts?connectionId (integrations.manage): the login's live ad accounts. */
+export type MetaAdAccountDto = { id: string; name: string; currency: string; timeZone: string };
+/** `connectionAccountId`: the connection's own account ("act_…"), the one PUT data-sources/meta-ads chooses. */
+export type MetaAdAccountsDto = { accounts: MetaAdAccountDto[]; connectionAccountId: string };
+/** PUT data-sources/meta-ads */
+export type ChooseMetaAdAccountBody = { connectionId: string };
+
 /** Ads totals in one currency (never summed across currencies). Money as decimal strings, 2 places. */
 export type AdsTotals = {
   currency: string;

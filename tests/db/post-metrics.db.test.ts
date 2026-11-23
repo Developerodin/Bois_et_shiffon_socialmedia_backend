@@ -161,9 +161,9 @@ describe("GET insights/posts", () => {
   });
 
   it("rejects a bad or too long range", async () => {
-    expect((await get("from=2026-11-23&to=2026-11-01")).status).toBe(400);
-    expect((await get("from=2026-01-01&to=2026-11-23")).status).toBe(400);
-    expect((await get("from=x&to=2026-11-23")).status).toBe(400);
+    expect((await get("from=2026-11-23&to=2026-11-01")).status).toBe(422);
+    expect((await get("from=2026-01-01&to=2026-11-23")).status).toBe(422);
+    expect((await get("from=x&to=2026-11-23")).status).toBe(422);
   });
 
   it("the brand's posts in range with their latest read, most reach first, never another brand's", async () => {

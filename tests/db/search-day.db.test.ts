@@ -183,7 +183,8 @@ describe("site picker", () => {
     const res = await put({ connectionId: conn.id, siteUrl: SITE });
     expect(res.status).toBe(200);
     const source = await prisma.dataSource.findFirstOrThrow({ where: { brandId: "sc-a", externalId: SITE } });
-    expect(source).toMatchObject({ status: "ACTIVE", connectionId: conn.id, settings: { reportsIn: "America/Los_Angeles" }, syncedThrough: null });
+    expect(await res.json()).toMatchObject({ source: { id: source.id, kind: "SEARCH_CONSOLE", status: "ACTIVE" } });
+    expect(source).toMatchObject({ status: "ACTIVE", connectionId: conn.id, settings: { reportsIn: "America/Los_Angeles", backfill: { days: 30 } }, syncedThrough: null });
     expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: old.id } })).status).toBe("OFF");
     const jobs = await prisma.job.findMany({ where: { type: DATA_SYNC_JOB } });
     expect(jobs).toHaveLength(1);
@@ -229,11 +230,18 @@ describe("search reads", () => {
       { day: "2026-11-08", clicks: 10, impressions: 100, ctr: 0.1, position: 2 },
       { day: "2026-11-09", clicks: 30, impressions: 300, ctr: 0.1, position: 10 },
     ]);
+    expect(body).toMatchObject({ hasSite: true, siteUrl: SITE });
+    // The site's URL only for people who manage integrations.
+    auth.perms = new Set(["analytics.read", "brand.read"]);
+    const plain = await (await summary("from=2026-11-08&to=2026-11-14")).json();
+    expect(plain.hasSite).toBe(true);
+    expect(plain).not.toHaveProperty("siteUrl");
+    expect(plain.totals).toEqual(body.totals);
   });
 
   it("no site chosen: zeros, no rows", async () => {
     const body = await (await summary("from=2026-11-08&to=2026-11-14")).json();
-    expect(body).toMatchObject({ siteUrl: null, days: [], totals: { clicks: 0, position: null } });
+    expect(body).toMatchObject({ hasSite: false, siteUrl: null, days: [], totals: { clicks: 0, position: null } });
   });
 
   it("top pages summed over the range, 50 a page with a cursor, this brand only", async () => {
@@ -249,12 +257,12 @@ describe("search reads", () => {
     const second = await (await pages(`from=2026-11-08&to=2026-11-14&sort=clicks&cursor=${first.nextCursor}`)).json();
     expect(second.pages).toHaveLength(5);
     expect(second.nextCursor).toBeNull();
-    expect((await pages(`from=2026-11-08&to=2026-11-14&sort=impressions&cursor=${first.nextCursor}`)).status).toBe(400);
+    expect((await pages(`from=2026-11-08&to=2026-11-14&sort=impressions&cursor=${first.nextCursor}`)).status).toBe(422);
   });
 
-  it("over 90 days is 400; without analytics.read is 403", async () => {
-    expect((await summary("from=2026-01-01&to=2026-11-14")).status).toBe(400);
-    expect((await pages("from=2026-01-01&to=2026-11-14")).status).toBe(400);
+  it("over 90 days is 422; without analytics.read is 403", async () => {
+    expect((await summary("from=2026-01-01&to=2026-11-14")).status).toBe(422);
+    expect((await pages("from=2026-01-01&to=2026-11-14")).status).toBe(422);
     auth.perms = new Set(["brand.read", "integrations.manage"]);
     expect((await summary("from=2026-11-08&to=2026-11-14")).status).toBe(403);
     expect((await pages("from=2026-11-08&to=2026-11-14")).status).toBe(403);

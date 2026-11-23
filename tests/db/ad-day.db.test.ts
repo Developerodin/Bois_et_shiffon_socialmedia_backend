@@ -215,11 +215,11 @@ describe("ads routes", () => {
     }
   });
 
-  it("bad dates, too long a range or a bad format → 400", async () => {
+  it("bad dates, too long a range or a bad format → 422 (a bad format 400)", async () => {
     for (const q of ["", "from=2026-11-01", "from=2026-11-31&to=2026-12-01", "from=2026-11-02&to=2026-11-01", "from=2025-01-01&to=2026-01-02", "from=2026-1-1&to=2026-01-02", "from=x&to=y"]) {
-      expect((await summary(req(`ads/summary?${q}`), { params })).status, q).toBe(400);
-      expect((await campaigns(req(`ads/campaigns?${q}`), { params })).status, q).toBe(400);
-      expect((await exportAds(req(`ads/export?format=xlsx&${q}`), { params })).status, q).toBe(400);
+      expect((await summary(req(`ads/summary?${q}`), { params })).status, q).toBe(422);
+      expect((await campaigns(req(`ads/campaigns?${q}`), { params })).status, q).toBe(422);
+      expect((await exportAds(req(`ads/export?format=xlsx&${q}`), { params })).status, q).toBe(422);
     }
     expect((await exportAds(req("ads/export?format=pdf&from=2026-11-01&to=2026-11-02"), { params })).status).toBe(400);
     expect((await summary(req("ads/summary?from=2025-01-01&to=2026-01-01"), { params })).status).toBe(200); // 366 days
