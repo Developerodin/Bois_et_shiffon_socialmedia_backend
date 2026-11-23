@@ -56,7 +56,11 @@ export type ShopOrderRow = {
   /** currentSubtotalPriceSet: after discounts, refunds and edits. */
   netSales: string;
   discounts: string;
-  /** netSales + discounts. */
+  /**
+   * netSales + discounts. Caveat: Shopify documents currentTotalDiscountsSet as "order and line level discounts" without
+   * saying whether a shipping discount (free-shipping code) counts; if a live store shows it does, gross overstates
+   * merchandise by that amount (separable via shippingLines.discountAllocations).
+   */
   gross: string;
   shipping: string;
   /** Sum of currentTaxLines (not totalTaxSet), kept with taxesIncluded so VAT can be taken out later. */

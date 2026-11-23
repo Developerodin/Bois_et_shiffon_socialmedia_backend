@@ -19,6 +19,15 @@ const DISCOUNTED = {
   currentTotalPriceSet: money("91.3"), totalRefundedSet: money("0.0"),
   currentTaxLines: [{ priceSet: money("12.0") }, { priceSet: money("2.4") }],
 };
+// Free shipping: 50.00 subtotal, shipping 5.00 waived by a free-shipping code → 0.00 shipping, 50.00 total. Shopify
+// documents currentTotalDiscountsSet as order and line level discounts, so the waived shipping is not in it here.
+const FREE_SHIPPING = {
+  id: "gid://shopify/Order/1003", name: "#1003", processedAt: "2026-11-22T12:00:00Z", cancelledAt: null, test: false,
+  updatedAt: "2026-11-22T12:00:00Z", taxesIncluded: true, sourceName: "web",
+  currentSubtotalPriceSet: money("50.0"), currentTotalDiscountsSet: money("0.0"), currentShippingPriceSet: money("0.0"),
+  currentTotalPriceSet: money("50.0"), totalRefundedSet: money("0.0"),
+  currentTaxLines: [{ priceSet: money("8.33") }],
+};
 const COST = { requestedQueryCost: 10, actualQueryCost: 10, throttleStatus: { currentlyAvailable: 1000, restoreRate: 50 } };
 const page = (nodes: unknown[], endCursor: string | null) => ({
   data: { orders: { pageInfo: { hasNextPage: endCursor !== null, endCursor }, nodes } },
@@ -63,6 +72,12 @@ describe("fetchOrders", () => {
       netSales: "72.00", discounts: "18.00", gross: "90.00", shipping: "4.90", taxes: "14.40", taxesIncluded: false,
       total: "91.30", refunded: "0.00", processedAt: new Date("2026-11-21T23:30:00Z"),
     });
+  });
+
+  it("a free-shipping order: gross is merchandise only, shipping 0.00", async () => {
+    stubFetch({ body: page([FREE_SHIPPING], null) });
+    const { orders } = await fetchOrders(CONN, SINCE);
+    expect(orders[0]).toMatchObject({ netSales: "50.00", discounts: "0.00", gross: "50.00", shipping: "0.00", taxes: "8.33", total: "50.00" });
   });
 
   it("filters from one hour before the cursor and follows endCursor across pages", async () => {
