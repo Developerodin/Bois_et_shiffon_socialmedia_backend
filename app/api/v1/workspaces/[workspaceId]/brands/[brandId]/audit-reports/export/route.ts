@@ -5,7 +5,12 @@ import { prisma } from "@/server/db/prisma";
 import type { Finding } from "@/server/seo/checks";
 import { toCsv } from "@/shared";
 
-const COLUMNS = ["Severity", "Category", "Title", "Detail", "URLs", "Fix"].map((label) => ({ key: label, label }));
+// One flat row per finding, in report order (most important first), so a spreadsheet row stays one line high: Fix next to
+// Detail, the URLs last and on one line. ponytail: CSV can't set column widths; an .xlsx export if people want those.
+const COLUMNS = ["#", "Severity", "Category", "Title", "Detail", "Fix", "Pages", "URLs"].map((label) => ({ key: label, label }));
+const SEVERITY: Record<string, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
+/** Report text is markdown-ish: drop the backticks and fold line breaks, so each cell reads as one line. */
+const flatCell = (s: string | undefined) => (s ?? "").replace(/`/g, "").replace(/\s*\n+\s*/g, " ").trim();
 
 /** The findings of the latest SEO or GEO report (?kind=SEO|GEO, default SEO) as CSV. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
@@ -19,7 +24,16 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const findings = (Array.isArray(report?.findings) ? report.findings : []) as Finding[];
     const csv = toCsv(
       COLUMNS,
-      findings.map((f) => ({ Severity: f.severity, Category: f.category, Title: f.title, Detail: f.detail, URLs: (f.urls ?? []).join("\n"), Fix: f.fix })),
+      findings.map((f, i) => ({
+        "#": i + 1,
+        Severity: SEVERITY[f.severity] ?? f.severity,
+        Category: f.category,
+        Title: flatCell(f.title),
+        Detail: flatCell(f.detail),
+        Fix: flatCell(f.fix),
+        Pages: f.urls?.length ?? 0,
+        URLs: (f.urls ?? []).join(" ; "),
+      })),
     );
     await prisma.auditEvent.create({
       data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "report.export", entityType: "Brand", entityId: scope.brandId, metadata: { kind, rows: findings.length } },

@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/server/db/prisma";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { taskViewer } from "@/server/tasks/access";
-import { clearFindings, taskFromFinding, tasksFromReport } from "@/server/seo/finding-tasks";
+import { clearFindings, fileFindingTasks, taskFromFinding, tasksFromReport } from "@/server/seo/finding-tasks";
 
 /** Make-task races and the clear job against a real Postgres: the partial unique index and the status re-check. */
 let scope: { workspaceId: string; brandId: string; userId: string; perms: Set<PermissionKey>; clientReviewer: boolean };
@@ -163,5 +163,17 @@ describe("tasks from a report", () => {
     expect(await prisma.task.count({ where: { brandId, findingId: { startsWith: "cap-" } } })).toBe(50);
     await run(await save("SEO", many));
     expect(await tasksOf("cap-50")).toHaveLength(1);
+  });
+
+  it("Make all tasks files the report's findings as the person's tasks, once; an older report is refused", async () => {
+    const reportId = await save("SEO", [f("bulk-a"), f("bulk-b")]);
+    const ids = { workspaceId: scope.workspaceId, brandId, reportId };
+    expect(await fileFindingTasks(ids, scope.userId)).toBe(2);
+    expect(await fileFindingTasks(ids, scope.userId)).toBe(0);
+    expect((await tasksOf("bulk-a")).map((t) => t.createdById)).toEqual([scope.userId]);
+    const audit = await prisma.auditEvent.findFirstOrThrow({ where: { entityId: (await tasksOf("bulk-a"))[0]!.id, action: "task.create" } });
+    expect(audit).toMatchObject({ actorUserId: scope.userId, metadata: expect.objectContaining({ source: "report-page" }) });
+    await save("SEO", []);
+    expect(await fileFindingTasks(ids, scope.userId)).toBeNull();
   });
 });

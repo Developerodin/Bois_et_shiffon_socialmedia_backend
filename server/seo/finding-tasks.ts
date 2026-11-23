@@ -174,12 +174,20 @@ const TASKS_PER_REPORT = 50;
  * A report with a newer one of its kind does nothing: the newer report's job decides.
  */
 export async function tasksFromReport(payload: unknown): Promise<void> {
-  const ids = ReportPayload.parse(payload);
+  await fileFindingTasks(ReportPayload.parse(payload), null);
+}
+
+/**
+ * The work of tasksFromReport, and "Make all tasks" on the reports page (tasks.manage) with the person's `userId`: their
+ * tasks are theirs (creator, audit actor), like "Make a task", so a later GEO review never replaces them.
+ * Returns how many tasks it made; null when the report isn't found or a newer one of its kind exists.
+ */
+export async function fileFindingTasks(ids: z.infer<typeof ReportPayload>, userId: string | null): Promise<number | null> {
   const report = await prisma.auditReport.findFirst({ where: { id: ids.reportId, workspaceId: ids.workspaceId, brandId: ids.brandId } });
-  if (!report) return;
+  if (!report) return null;
   const { workspaceId, brandId, kind } = report;
   const newer = await prisma.auditReport.findFirst({ where: { workspaceId, brandId, kind, createdAt: { gt: report.createdAt } }, select: { id: true } });
-  if (newer) return;
+  if (newer) return null;
   const run = report.agentRunId
     ? await prisma.agentRun.findFirst({ where: { id: report.agentRunId, workspaceId, brandId }, select: { id: true, triggeredByUserId: true, createdAt: true } })
     : null;
@@ -207,17 +215,20 @@ export async function tasksFromReport(payload: unknown): Promise<void> {
     if (last.status === "CANCELLED") return !replaced.has(last.id);
     return last.status === "DONE" && ((last.completedAt !== null && last.completedAt > started) || (last.recheckOn !== null && last.recheckOn > now));
   };
-  const scope = { workspaceId, brandId, userId: null };
-  const metadata = { source: "audit", agentRunId: run?.id ?? null, triggeredByUserId: run?.triggeredByUserId ?? null };
+  const scope = { workspaceId, brandId, userId };
+  const metadata = userId ? { source: "report-page" } : { source: "audit", agentRunId: run?.id ?? null, triggeredByUserId: run?.triggeredByUserId ?? null };
+  let made = 0;
   // The cap counts only findings that get a task, so findings already handled don't hold back the ones after them.
   for (const finding of findings.filter((f) => !hasTask(f.id)).slice(0, TASKS_PER_REPORT)) {
     try {
       await prisma.$transaction((tx) => createFindingTask(tx, scope, report, finding, metadata), TX);
+      made++;
     } catch (e) {
       if (!isUniqueViolation(e)) throw e;
     }
   }
   if (kind === "GEO") await replaceReviewTasks(report, new Set(findings.map((f) => f.id)));
+  return made;
 }
 
 /**
