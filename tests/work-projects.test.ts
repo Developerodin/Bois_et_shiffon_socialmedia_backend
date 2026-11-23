@@ -125,6 +125,19 @@ describe("listProjects", () => {
     expect(db.workProject.findMany.mock.calls[0]![0].where).toMatchObject({ workspaceId: "w1", brandId: "b1", clientVisible: true });
   });
 
+  it("a cursor that isn't a project this viewer sees on the brand → 400, nothing listed", async () => {
+    db.workProject.findFirst.mockResolvedValue(null);
+    await expect(listProjects(scope, v(), { cursor: "p9" })).rejects.toMatchObject({ status: 400, message: "Invalid cursor" });
+    expect(db.workProject.findFirst.mock.calls[0]![0].where).toMatchObject({ id: "p9", workspaceId: "w1", brandId: "b1" });
+    expect(db.workProject.findMany).not.toHaveBeenCalled();
+  });
+
+  it("a cursor on the brand pages from it", async () => {
+    db.workProject.findFirst.mockResolvedValue({ id: "p1" });
+    await listProjects(scope, v(), { cursor: "p1" });
+    expect(db.workProject.findMany.mock.calls[0]![0]).toMatchObject({ cursor: { id: "p1" }, skip: 1 });
+  });
+
   it("staff list is not limited to shared projects", async () => {
     await listProjects(scope, v(), {});
     expect(db.workProject.findMany.mock.calls[0]![0].where).not.toHaveProperty("clientVisible");

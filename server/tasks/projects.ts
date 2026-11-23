@@ -108,6 +108,8 @@ const people = (scope: TaskScope) => brandOwners(scope, { key: "tasks.read", inc
  */
 export async function listProjects(scope: TaskScope, v: TaskViewer, q: z.infer<typeof ListProjectsQuery>): Promise<{ projects: WorkProjectDto[]; nextCursor: string | null }> {
   const where: Prisma.WorkProjectWhereInput = { ...projectWhere(v), status: q.status ?? { not: "ARCHIVED" } };
+  // Prisma's cursor reads the row by id alone: one of another brand (or not shared, for a client) would still page.
+  if (q.cursor && !(await prisma.workProject.findFirst({ where: projectWhere(v, q.cursor), select: { id: true } }))) throw new TaskError("Invalid cursor", 400);
   const [rows, names] = await Promise.all([
     prisma.workProject.findMany({
       where,
