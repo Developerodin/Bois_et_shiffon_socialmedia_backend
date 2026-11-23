@@ -5,6 +5,7 @@ const db = vi.hoisted(() => {
   const d = {
     task: { findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
     workProject: { findFirst: vi.fn() },
+    taskComment: { findFirst: vi.fn() },
     contentItem: { findFirst: vi.fn() },
     auditReport: { findFirst: vi.fn() },
     taskChecklistItem: { groupBy: vi.fn(), findMany: vi.fn() },
@@ -80,6 +81,7 @@ beforeEach(() => {
   db.task.create.mockImplementation(async ({ data }: { data: object }) => ({ id: "t1", ...data }));
   db.task.update.mockResolvedValue({});
   db.workProject.findFirst.mockResolvedValue(null);
+  db.taskComment.findFirst.mockResolvedValue(null);
   db.contentItem.findFirst.mockResolvedValue(null);
   db.auditReport.findFirst.mockResolvedValue(null);
   db.taskChecklistItem.groupBy.mockResolvedValue([]);
@@ -259,6 +261,36 @@ describe("patchTask", () => {
     db.task.findUnique.mockResolvedValue(row({ status: "IN_REVIEW", reviewerId: "u2" }));
     await patchTask(scope, v, "t1", { reviewerId: "u3" });
     expect(updated()).toEqual({ reviewerId: "u3" });
+  });
+
+  it("a reviewer replaced on a task in review is asked to review", async () => {
+    staff.delete("u2");
+    db.task.findUnique.mockResolvedValue(row({ status: "IN_REVIEW", reviewerId: "u2" }));
+    await patchTask(scope, v, "t1", { reviewerId: "u3" });
+    expect(db.notification.createMany.mock.calls[0]![0].data[0]).toMatchObject({ userId: "u3", kind: "REVIEW_REQUESTED", taskId: "t1", actorId: "u1" });
+  });
+
+  it("a reviewer set outside review is not asked to review yet", async () => {
+    await patchTask(scope, v, "t1", { reviewerId: "u3" });
+    expect(updated()).toEqual({ reviewerId: "u3" });
+    expect(db.notification.createMany).not.toHaveBeenCalled();
+  });
+
+  it("clearing the reviewer of a task with a review verdict is refused (409)", async () => {
+    db.task.findUnique.mockResolvedValue(row({ status: "TODO", reviewerId: "u2" }));
+    db.taskComment.findFirst.mockResolvedValue({ id: "c1" });
+    await expect(patchTask(scope, v, "t1", { reviewerId: null })).rejects.toMatchObject({ status: 409, code: "task.reviewed" });
+    expect(db.taskComment.findFirst.mock.calls[0]![0].where).toEqual({ taskId: "t1", kind: { in: ["APPROVED", "CHANGES_REQUESTED"] } });
+    expect(db.task.update).not.toHaveBeenCalled();
+  });
+
+  it("clearing the reviewer of a task never reviewed is allowed; another reviewer is always allowed", async () => {
+    db.task.findUnique.mockResolvedValue(row({ status: "TODO", reviewerId: "u2" }));
+    await patchTask(scope, v, "t1", { reviewerId: null });
+    expect(updated()).toEqual({ reviewerId: null });
+    db.taskComment.findFirst.mockResolvedValue({ id: "c1" });
+    await patchTask(scope, v, "t1", { reviewerId: "u3" });
+    expect(db.task.update.mock.calls[1]![0].data).toEqual({ reviewerId: "u3" });
   });
 
   it("url change clears checked live", async () => {

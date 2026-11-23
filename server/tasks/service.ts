@@ -188,7 +188,8 @@ export async function createTask(scope: TaskScope, v: TaskViewer, input: TaskInp
 /**
  * Edit a task's manage fields (tasks.manage); anything else in the body (status, completedAt, …) is ignored. Only
  * changed fields are written and checked, so a gone owner doesn't block an unrelated edit.
- * - The reviewer of a task in review is kept, unless they can no longer see it (then they may be replaced).
+ * - The reviewer of a task in review is kept, unless they can no longer see it (then they may be replaced, and the new
+ *   one is asked to review). A task with an APPROVED or CHANGES_REQUESTED comment can't lose its reviewer (409).
  * - Moving it to another project re-checks the current owner, reviewer and blocked-on, who must still see it.
  * - A new url clears "checked live".
  * ponytail: last write wins per field (the apps send only changed fields); add an updatedAt precondition if people clash.
@@ -211,6 +212,10 @@ export async function patchTask(scope: TaskScope, v: TaskViewer, taskId: string,
         throw new TaskError("The reviewer can't be changed while the task is in review.", 409, "task.inReview");
       }
     }
+    // A reviewed task keeps a reviewer: dropping it would let cancel → reopen → mark done skip the review.
+    if ("reviewerId" in write && !write.reviewerId && (await tx.taskComment.findFirst({ where: { taskId, kind: { in: ["APPROVED", "CHANGES_REQUESTED"] } }, select: { id: true } }))) {
+      throw new TaskError("This task has been reviewed, so it keeps a reviewer. Pick another reviewer instead.", 409, "task.reviewed");
+    }
     const people = "workProjectId" in write ? { ownerId: current.ownerId, reviewerId: current.reviewerId, blockedOnId: current.blockedOnId } : {};
     await checkTaskLinks(tx, scope, { ...people, ...write }, current);
     if ("url" in write) Object.assign(write, { checkedLiveAt: null, checkedLiveById: null });
@@ -218,6 +223,10 @@ export async function patchTask(scope: TaskScope, v: TaskViewer, taskId: string,
     const event = await taskAudit(tx, scope, "task.update", { type: "Task", id: taskId, title: (write.title as string | undefined) ?? current.title }, { fields: changed });
     if ("ownerId" in write) {
       await notifyTx(tx, { userId: write.ownerId as string | null, workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "TASK_ASSIGNED", taskId, actorId: scope.userId, auditEventId: event.id });
+    }
+    // A new reviewer on a task already in review has a review waiting.
+    if ("reviewerId" in write && current.status === "IN_REVIEW") {
+      await notifyTx(tx, { userId: write.reviewerId as string, workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "REVIEW_REQUESTED", taskId, actorId: scope.userId, auditEventId: event.id });
     }
   }, TX);
   return getTask(scope, v, taskId);
