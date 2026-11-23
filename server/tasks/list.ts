@@ -10,10 +10,14 @@ import { TASK_DTO_INCLUDE, toTaskDtos, type TaskScope } from "@/server/tasks/ser
 import { brandLocalDay, openTaskSql } from "@/server/tasks/sql";
 import { DONE_DAYS, isBlocked, isOverdue, OPEN_STATUSES, TASK_AREAS, TASK_VIEWS, type PostRow, type TaskDto, type TaskView, type TodayDto } from "@/shared";
 
-/** GET tasks query (every view but today). `area` may come lower-case from a link (`?area=website`). */
+/**
+ * GET tasks query (every view but today). `area` may come lower-case from a link (`?area=website`); `source` keeps the
+ * tasks made from that kind of audit report (`?source=geo`).
+ */
 export const ListQuery = z.object({
   view: z.enum(TASK_VIEWS),
   area: z.string().transform((s) => s.toUpperCase()).pipe(z.enum(TASK_AREAS)).optional(),
+  source: z.string().transform((s) => s.toUpperCase()).pipe(z.enum(["SEO", "GEO"])).optional(),
   workProjectId: z.string().min(1).max(100).optional(),
   ownerId: z.string().min(1).max(100).optional(),
   cursor: z.string().min(1).max(500).optional(),
@@ -69,6 +73,7 @@ export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.S
   if (q.view === "overdue") where.push(Prisma.sql`${DUE} < ${localToday(v.brandId, now)}`);
   if (q.view === "blocked") where.push(Prisma.sql`t."blockedReason" IS NOT NULL`);
   if (q.area) where.push(Prisma.sql`${q.area}::"TaskArea" = ANY(t.areas)`);
+  if (q.source) where.push(Prisma.sql`t."findingKind" = ${q.source}::"AuditKind"`);
   if (q.workProjectId) where.push(Prisma.sql`t."workProjectId" = ${q.workProjectId}`);
   if (q.ownerId) where.push(Prisma.sql`t."ownerId" = ${q.ownerId}`);
   if (q.cursor && done) {

@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { taskViewer } from "@/server/tasks/access";
-import { listTasks, todayTasks } from "@/server/tasks/list";
+import { ListQuery, listTasks, todayTasks } from "@/server/tasks/list";
 import type { TaskView } from "@/shared";
 
 /**
@@ -130,5 +130,33 @@ describe("Today", () => {
     const dueToday = await listTasks(s, taskViewer(s), { view: "due-today" }, NOW);
     expect(dueToday.tasks.map((t) => t.id)).toEqual([today!.id]);
     await prisma.task.deleteMany({ where: { brandId: plain } });
+  });
+});
+
+describe("source filter", () => {
+  it("keeps the tasks of one audit kind, with the area and across pages", async () => {
+    const perf = (await prisma.brand.create({ data: { workspaceId: ws, slug: "perf", displayName: "Perf" } })).id;
+    // 52 GEO tasks (two pages), 3 SEO, 2 by hand; one GEO task outside the SEO area.
+    const geo = await make(perf, Array.from({ length: 52 }, (_, i) => ({ areas: ["SEO" as const], findingKind: "GEO" as const, findingId: `g${i}` })));
+    const seo = await make(perf, Array.from({ length: 3 }, (_, i) => ({ areas: ["SEO" as const], findingKind: "SEO" as const, findingId: `s${i}` })));
+    await make(perf, [{ areas: ["SEO"] }, { areas: ["WEBSITE"] }]);
+    const other = await make(perf, [{ areas: ["WEBSITE"], findingKind: "GEO", findingId: "w" }]);
+    const s = scopeOf(perf);
+    /** Every page, each asked with the same filters and the last page's cursor. */
+    const all = async (q: Record<string, string>) => {
+      const ids: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const out = await listTasks(s, taskViewer(s), ListQuery.parse({ view: "open", ...q, ...(cursor ? { cursor } : {}) }));
+        expect(out.tasks.every((t) => t.findingKind === q.source.toUpperCase())).toBe(true);
+        ids.push(...out.tasks.map((t) => t.id));
+        cursor = out.nextCursor ?? undefined;
+      } while (cursor);
+      return ids.sort();
+    };
+    expect(await all({ area: "seo", source: "geo" })).toEqual(geo.map((t) => t.id).sort());
+    expect(await all({ source: "SEO" })).toEqual(seo.map((t) => t.id).sort());
+    expect(await all({ source: "geo" })).toEqual([...geo, ...other].map((t) => t.id).sort());
+    expect(ListQuery.safeParse({ view: "open", source: "ads" }).success).toBe(false);
   });
 });

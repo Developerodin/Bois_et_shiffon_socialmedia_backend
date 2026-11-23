@@ -7,6 +7,7 @@ import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
 import { PlaceId, placeDetails } from "@/server/integrations/places";
 import { nameFromWebsite } from "@/server/research/brand-assets";
+import { slugify } from "@/server/services/slug";
 
 /** A listing's website, if it's an http(s) address (it's Google data; the crawler still applies its own guards). */
 const listingWebsite = (u: string | null | undefined) => (u && /^https?:\/\//i.test(u) && z.string().url().safeParse(u).success ? u : undefined);
@@ -44,9 +45,6 @@ export const EditBrandInput = BrandFields.pick({ displayName: true, websiteUrl: 
   "Change the name or the website",
 );
 
-const slugify = (s: string) =>
-  s.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "brand";
-
 /** New brand + profile, then the Research agent drafts its context docs (design §8b-5). */
 export async function createBrandWithResearch(
   workspaceId: string,
@@ -67,7 +65,7 @@ export async function createBrandWithResearch(
   if (!websiteUrl && !about) throw new AgentStartError("Say what the business sells", 422);
   const location = input.location ?? place?.address ?? undefined;
   const displayName = input.displayName ?? place?.name ?? (await nameFromWebsite(websiteUrl!));
-  const base = slugify(displayName);
+  const base = slugify(displayName, { max: 48, fallback: "brand" });
   let brand;
   for (let i = 0; !brand; i++) {
     try {

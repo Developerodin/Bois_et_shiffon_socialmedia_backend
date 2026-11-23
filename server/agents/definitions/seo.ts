@@ -20,6 +20,7 @@ export const seoAgent: AgentDefinition = {
   name: "SEO",
   description: "Audits the website's technical and on-page SEO and lists the fixes that matter most.",
   inputSchema: z.object({}).strict(),
+  schedule: "weekly",
   async run(ctx) {
     const { brand } = ctx;
     if (!brand.websiteUrl) throw new Error("Brand has no website URL — add one in Context settings");

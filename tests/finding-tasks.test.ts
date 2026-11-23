@@ -27,7 +27,7 @@ vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: m.authorize })
 import { AccessDeniedError } from "@/server/auth/errors";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { taskViewer } from "@/server/tasks/access";
-import { clearFindings, FINDING_CLEAR_JOB, isStableFindingId, taskFromFinding } from "@/server/seo/finding-tasks";
+import { clearFindings, FINDING_CLEAR_JOB, FINDING_TASKS_JOB, isAutoClearable, isPositionalFindingId, taskFromFinding } from "@/server/seo/finding-tasks";
 import { saveAuditReport } from "@/server/services/audit-reports";
 import { POST as makeTask } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/audit-reports/[reportId]/findings/[findingId]/task/route";
 
@@ -152,12 +152,19 @@ describe("taskFromFinding", () => {
   });
 });
 
-describe("isStableFindingId", () => {
-  it("positional AI-review ids are not stable", () => {
-    expect(isStableFindingId("content-1")).toBe(false);
-    expect(isStableFindingId("content-12")).toBe(false);
-    expect(isStableFindingId("title-missing")).toBe(true);
-    expect(isStableFindingId("content-schema")).toBe(true);
+describe("finding id rules", () => {
+  it("only the old numbered AI-review ids are positional", () => {
+    expect(isPositionalFindingId("content-1")).toBe(true);
+    expect(isPositionalFindingId("content-12")).toBe(true);
+    expect(isPositionalFindingId("content-missing-faq")).toBe(false);
+    expect(isPositionalFindingId("title-missing")).toBe(false);
+  });
+
+  it("no AI-review id is cleared by a later audit", () => {
+    expect(isAutoClearable("content-1")).toBe(false);
+    expect(isAutoClearable("content-missing-faq")).toBe(false);
+    expect(isAutoClearable("title-missing")).toBe(true);
+    expect(isAutoClearable("not-recommended")).toBe(true);
   });
 });
 
@@ -246,6 +253,28 @@ describe("clearFindings", () => {
     expect((db.auditEvent.createMany.mock.calls[0]![0].data as { entityId: string }[]).map((a) => a.entityId)).toEqual(["t2"]);
   });
 
+  it("a GEO AI-review task (title id) is never cleared", async () => {
+    db.auditReport.findFirst.mockResolvedValue(report({ kind: "GEO", findings: [], metrics: { pagesChecked: ["https://x.com/"], visibilityMeasured: true } }));
+    db.task.findMany.mockResolvedValue([candidate({ findingId: "content-missing-faq" })]);
+    await clearFindings(payload);
+    expect(updateIds()).toBeUndefined();
+    expect(db.taskComment.createMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps GEO's not-recommended task when visibility wasn't measured", async () => {
+    db.auditReport.findFirst.mockResolvedValue(report({ kind: "GEO", findings: [], metrics: { pagesChecked: ["https://x.com/"] } }));
+    db.task.findMany.mockResolvedValue([candidate({ findingId: "not-recommended" })]);
+    await clearFindings(payload);
+    expect(updateIds()).toBeUndefined();
+  });
+
+  it("closes GEO's not-recommended task once a measured report no longer finds it", async () => {
+    db.auditReport.findFirst.mockResolvedValue(report({ kind: "GEO", findings: [], metrics: { pagesChecked: ["https://x.com/"], visibilityMeasured: true } }));
+    db.task.findMany.mockResolvedValue([candidate({ findingId: "not-recommended" })]);
+    await clearFindings(payload);
+    expect(updateIds()).toEqual(["t1"]);
+  });
+
   it("positional ids never clear", async () => {
     db.task.findMany.mockResolvedValue([candidate({ findingId: "content-1" })]);
     await clearFindings(payload);
@@ -280,16 +309,14 @@ describe("clearFindings", () => {
 describe("saveAuditReport", () => {
   const input = (kind: "SEO" | "GEO") => ({ workspaceId: "w1", brandId: "b1", kind, score: 80, summary: "s", findings: [], metrics: {}, agentRunId: "run1" });
 
-  it("an SEO report queues the clear job", async () => {
+  it.each(["SEO", "GEO"] as const)("a %s report queues the clear job and the make-tasks job", async (kind) => {
     db.auditReport.create.mockResolvedValue({ id: "r1" });
-    await saveAuditReport(input("SEO"));
-    expect(db.job.upsert.mock.calls[0]![0].create).toMatchObject({ type: FINDING_CLEAR_JOB, workspaceId: "w1", brandId: "b1", payload: { workspaceId: "w1", brandId: "b1", reportId: "r1" } });
-  });
-
-  it("GEO reports enqueue nothing", async () => {
-    db.auditReport.create.mockResolvedValue({ id: "r2" });
-    await saveAuditReport(input("GEO"));
-    expect(db.job.upsert).not.toHaveBeenCalled();
-    expect(db.job.create).not.toHaveBeenCalled();
+    await saveAuditReport(input(kind));
+    const jobs = db.job.upsert.mock.calls.map((c) => c[0].create);
+    const payload = { workspaceId: "w1", brandId: "b1", reportId: "r1" };
+    expect(jobs).toEqual([
+      expect.objectContaining({ type: FINDING_CLEAR_JOB, workspaceId: "w1", brandId: "b1", payload, idempotencyKey: "finding-clear:r1" }),
+      expect.objectContaining({ type: FINDING_TASKS_JOB, workspaceId: "w1", brandId: "b1", payload, idempotencyKey: "finding-tasks:r1" }),
+    ]);
   });
 });

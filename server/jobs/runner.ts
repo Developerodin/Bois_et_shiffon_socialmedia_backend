@@ -21,7 +21,7 @@ import { onAssetFailure, REEL_ASSET_JOB, runAsset } from "@/server/reels/assets"
 import "@/server/reels/templates"; // registers its asset kind
 import "@/server/reels/presenters"; // registers its asset kind
 import { purgeOldRecordings } from "@/server/reels/recordings";
-import { clearFindings, FINDING_CLEAR_JOB } from "@/server/seo/finding-tasks";
+import { clearFindings, FINDING_CLEAR_JOB, FINDING_TASKS_JOB, tasksFromReport } from "@/server/seo/finding-tasks";
 import { purgeStaleUploads } from "@/server/stories/uploads";
 import { onStoryRenderFailure, runStoryRender, STORY_RENDER_JOB } from "@/server/stories/service";
 import { onVoiceDeleteFailure, reclaimAbandonedClones, runVoiceDelete, VOICE_DELETE_JOB } from "@/server/reels/clones";
@@ -43,6 +43,7 @@ const HANDLERS: Record<string, Handler> = {
   [DAILY_SWEEP_JOB]: { run: dailySweep },
   [EMAIL_SEND_JOB]: { run: sendOutboxEmail },
   [FINDING_CLEAR_JOB]: { run: clearFindings },
+  [FINDING_TASKS_JOB]: { run: tasksFromReport },
   [PHOTOSHOOT_JOB]: { run: runShoot, onFailure: onShootFailure },
   [PUBLISH_JOB]: { run: executePublication, onFailure: onPublishJobLost },
   [REEL_ASSET_JOB]: { run: runAsset, onFailure: onAssetFailure },
@@ -161,7 +162,7 @@ async function dailySweep() {
   await purgeOldRecordings();
   await purgeStaleUploads();
   await reclaimAbandonedClones();
-  await startDailyAgents();
+  await startScheduledAgents();
   // Last, and each on its own: a failing task step is logged and never blocks the steps above (billing renewals).
   const now = new Date();
   for (const [name, step] of [["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications]] as const) {
@@ -173,32 +174,58 @@ async function dailySweep() {
   }
 }
 
-/** Start each daily agent once per brand per UTC day. */
-async function startDailyAgents() {
-  const scheduled = AGENTS.filter((a) => a.schedule === "daily");
-  if (scheduled.length === 0) return;
-  const startOfDay = new Date(new Date().toISOString().slice(0, 10));
+/** The UTC weekday (0–6) a brand's weekly agents run on, from its id, so the brands spread over the week. */
+export const weeklySlot = (brandId: string) => [...brandId].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 0) % 7;
+
+/**
+ * Start each daily agent once per brand per UTC day, and each weekly agent (SEO, GEO) for an active brand with a
+ * website when that agent has had no run of any trigger (so a manual run pushes the next one back) since 6 days before
+ * today, on the brand's weekday (weeklySlot); a brand that missed its day (no run in the last 8 days, today included)
+ * catches up on the next sweep, whatever the weekday.
+ * ponytail: the queue runs jobs one at a time per worker, and a weekly run is an SEO audit (crawl + PageSpeed + 1 AI
+ * call) and a GEO audit (crawl + ~8 AI calls, 5 with web search), free to the user: at N brands that is ~2N/7 audits
+ * queued behind the day's posts each sweep. A catch-up or manual run moves a brand off its weekday (8-day cycles until
+ * it lands on it again). Make the cadence a brand setting, or add workers, if the backlog delays publishing.
+ */
+export async function startScheduledAgents(now = new Date()) {
+  const startOfDay = new Date(now.toISOString().slice(0, 10));
+  const daysBefore = (n: number) => new Date(startOfDay.getTime() - n * 86_400_000);
+  const start = (brand: { id: string; workspaceId: string }, agentKey: string) =>
+    startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.id, agentKey, trigger: "schedule" }).catch(() => {}); // disabled for brand → skip
+
+  const daily = AGENTS.filter((a) => a.schedule === "daily");
+  if (daily.length) {
+    const brands = await prisma.brand.findMany({ where: { status: "ACTIVE" }, select: { id: true, workspaceId: true } });
+    for (const brand of brands) {
+      for (const agent of daily) {
+        const already = await prisma.agentRun.count({
+          where: { brandId: brand.id, agentKey: agent.key, trigger: "schedule", createdAt: { gte: startOfDay } },
+        });
+        if (already === 0) await start(brand, agent.key);
+      }
+    }
+  }
+
+  const weekly = AGENTS.filter((a) => a.schedule === "weekly");
+  if (!weekly.length) return;
+  // Brands without a website are skipped: SEO and GEO would only fail.
   const brands = await prisma.brand.findMany({
-    where: { status: "ACTIVE" },
+    where: { status: "ACTIVE", profile: { websiteUrl: { not: null } } },
     select: { id: true, workspaceId: true },
   });
+  if (!brands.length) return;
+  const runs = await prisma.agentRun.groupBy({
+    by: ["brandId", "agentKey"],
+    where: { brandId: { in: brands.map((b) => b.id) }, agentKey: { in: weekly.map((a) => a.key) }, createdAt: { gte: daysBefore(7) } },
+    _max: { createdAt: true },
+  });
+  const lastRun = new Map(runs.map((r) => [`${r.brandId}:${r.agentKey}`, r._max.createdAt]));
   for (const brand of brands) {
-    for (const agent of scheduled) {
-      const already = await prisma.agentRun.count({
-        where: {
-          brandId: brand.id,
-          agentKey: agent.key,
-          trigger: "schedule",
-          createdAt: { gte: startOfDay },
-        },
-      });
-      if (already > 0) continue;
-      await startAgentRun({
-        workspaceId: brand.workspaceId,
-        brandId: brand.id,
-        agentKey: agent.key,
-        trigger: "schedule",
-      }).catch(() => {}); // disabled for brand → skip
+    const today = weeklySlot(brand.id) === now.getUTCDay();
+    for (const agent of weekly) {
+      const last = lastRun.get(`${brand.id}:${agent.key}`);
+      if (last && (last >= daysBefore(6) || !today)) continue;
+      await start(brand, agent.key);
     }
   }
 }
