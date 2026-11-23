@@ -212,6 +212,7 @@ model Brand {
   taskComments  TaskComment[]
   notifications Notification[]
   dataSources   DataSource[]
+  adDays        AdDay[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1609,4 +1610,36 @@ model DataSource {
 
   @@unique([brandId, kind, externalId])
   @@index([status])
+}
+
+enum AdPlatform {
+  META
+}
+
+/// One ad campaign's numbers for one day of its ad account (the account's own zone), filled by the META_ADS data sync
+/// (server/data/ad-days.ts). Money is in the account's currency on the same row; never summed across currencies.
+/// A synced range is replaced in full (delete by brand, platform, account and day range, then insert), so a campaign
+/// Meta stops reporting for a day is gone from it.
+model AdDay {
+  id            String     @id @default(cuid())
+  workspaceId   String
+  brandId       String
+  platform      AdPlatform
+  /// "act_123"
+  accountId     String
+  campaignId    String
+  campaignName  String
+  /// the ad account's day
+  day           DateTime   @db.Date
+  currency      String
+  spend         Decimal    @db.Decimal(14, 2)
+  impressions   Int
+  clicks        Int
+  purchases     Int
+  purchaseValue Decimal    @db.Decimal(14, 2)
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([brandId, platform, accountId, campaignId, day])
+  @@index([brandId, platform, accountId, day])
 }
