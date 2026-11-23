@@ -1,7 +1,8 @@
 import type { PostInsightsDto } from "@/shared";
-import { fromAccessError, problemResponse } from "@/server/api/http-error";
+import { fromAccessError } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
-import { postsWithMetrics, PostsRange } from "@/server/data/post-metrics-read";
+import { POSTS_MAX_DAYS, postsWithMetrics } from "@/server/data/post-metrics-read";
+import { badRange, parseDayRange } from "@/server/data/sources";
 
 /**
  * How each published Instagram, Facebook and Threads post did: `?from&to` (brand-local "YYYY-MM-DD", at most 90 days)
@@ -12,11 +13,9 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const scope = await authorizeBrandRoute(request, context.params, "analytics.read");
     if (scope instanceof Response) return scope;
     const params = new URL(request.url).searchParams;
-    const range = PostsRange.safeParse({ from: params.get("from"), to: params.get("to") });
-    if (!range.success) {
-      return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 400, detail: "from and to must be days, from first, at most 90 days apart" });
-    }
-    const body: PostInsightsDto = { posts: await postsWithMetrics(scope, range.data) };
+    const range = parseDayRange(params, POSTS_MAX_DAYS);
+    if (!range) return badRange(POSTS_MAX_DAYS);
+    const body: PostInsightsDto = { posts: await postsWithMetrics(scope, range) };
     return Response.json(body);
   } catch (error) {
     return fromAccessError(error);

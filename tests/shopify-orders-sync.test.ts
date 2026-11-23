@@ -12,7 +12,7 @@ vi.mock("@/server/services/connections", async (orig) => ({ ...(await orig<objec
 import type { IntegrationConnection } from "@prisma/client";
 import type { ShopOrderRow } from "@/server/data/shopify-orders";
 import { FIRST_RUN_DAYS, syncShopifyOrders } from "@/server/data/shopify-orders-sync";
-import { salesRange } from "@/server/data/sales-read";
+import { parseRange } from "@/shared";
 import { ReconnectNeeded } from "@/server/services/connections";
 
 const conn = { id: "c1", externalAccountId: "shop.myshopify.com" } as IntegrationConnection;
@@ -66,14 +66,14 @@ describe("syncShopifyOrders", () => {
   });
 });
 
-describe("salesRange", () => {
+describe("parseRange (sales, 366 days)", () => {
   it("takes real brand-local days, in order, up to a year", () => {
-    expect(salesRange("2026-11-01", "2026-11-30")).toEqual({ from: "2026-11-01", to: "2026-11-30", days: 30 });
-    expect(salesRange("2026-11-23", "2026-11-23")?.days).toBe(1);
-    expect(salesRange("2026-11-30", "2026-11-01")).toBeNull();
-    expect(salesRange("2026-02-30", "2026-03-01")).toBeNull();
-    expect(salesRange("2025-01-01", "2026-11-01")).toBeNull();
-    expect(salesRange(null, "2026-11-01")).toBeNull();
-    expect(salesRange("2026-11-01'", "2026-11-02")).toBeNull();
+    expect(parseRange("2026-11-01", "2026-11-30", 366)).toEqual({ from: "2026-11-01", to: "2026-11-30" });
+    expect(parseRange("2026-11-23", "2026-11-23", 366)).toEqual({ from: "2026-11-23", to: "2026-11-23" });
+    expect(parseRange("2026-11-30", "2026-11-01", 366)).toBeNull();
+    expect(parseRange("2026-02-30", "2026-03-01", 366)).toBeNull();
+    expect(parseRange("2025-01-01", "2026-11-01", 366)).toBeNull();
+    expect(parseRange(null, "2026-11-01", 366)).toBeNull();
+    expect(parseRange("2026-11-01'", "2026-11-02", 366)).toBeNull();
   });
 });

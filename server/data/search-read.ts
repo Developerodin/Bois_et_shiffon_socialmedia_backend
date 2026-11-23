@@ -1,35 +1,14 @@
-import { z } from "zod";
 import {
-  SEARCH_CONSOLE_ZONE, SEARCH_PAGE_SORTS, SEARCH_PAGES_LIMIT, SEARCH_RANGE_MAX_DAYS, type SearchMetrics, type SearchPageSort, type SearchPagesDto,
+  SEARCH_CONSOLE_ZONE, SEARCH_PAGE_SORTS, SEARCH_PAGES_LIMIT, type DateRange, type SearchMetrics, type SearchPageSort, type SearchPagesDto,
   type SearchSummaryDto,
 } from "@/shared";
 import { prisma } from "@/server/db/prisma";
-import { addDays } from "@/server/data/sources";
+import { previousRange } from "@/server/data/sources";
 
 /**
  * Search Console reads for the Performance page: only SearchDay, never Google. Every query is scoped to the brand and
  * to its chosen site (the source that isn't OFF), so another brand's rows or a previously chosen site never show.
  */
-
-const Day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((d) => !Number.isNaN(Date.parse(`${d}T00:00:00Z`)) && new Date(`${d}T00:00:00Z`).toISOString().startsWith(d));
-const Range = z.object({ from: Day, to: Day })
-  .refine((r) => r.from <= r.to, "from must not be after to")
-  .refine((r) => daysIn(r.from, r.to) <= SEARCH_RANGE_MAX_DAYS, `At most ${SEARCH_RANGE_MAX_DAYS} days`);
-export type DayRange = { from: string; to: string };
-
-const daysIn = (from: string, to: string) => (Date.parse(to) - Date.parse(from)) / 86_400_000 + 1;
-
-/** `?from&to` → the range, or null when missing, malformed, reversed or over 90 days. */
-export function parseSearchRange(params: URLSearchParams): DayRange | null {
-  const r = Range.safeParse({ from: params.get("from"), to: params.get("to") });
-  return r.success ? r.data : null;
-}
-
-/** The equal-length range just before. */
-export function previousRange(r: DayRange): DayRange {
-  const n = daysIn(r.from, r.to);
-  return { from: addDays(r.from, -n), to: addDays(r.from, -1) };
-}
 
 type Sums = { clicks: number | null; impressions: number | null; positionSum: number | null };
 export function metrics(s: Sums): SearchMetrics {
@@ -52,11 +31,11 @@ async function chosenSite(scope: Scope) {
 }
 // No workspaceId filter: the brand is already the route's (scoped with its workspace by chosenSite), and the
 // (brandId, siteUrl, dimension, day) INCLUDE index then answers index-only.
-const rowsOf = (scope: Scope, siteUrl: string, r: DayRange, dimension: "SITE" | "PAGE") =>
+const rowsOf = (scope: Scope, siteUrl: string, r: DateRange, dimension: "SITE" | "PAGE") =>
   ({ brandId: scope.brandId, siteUrl, dimension, day: { gte: asDate(r.from), lte: asDate(r.to) } });
 
 /** `manage` (integrations.manage): only they see the site's URL; everyone else gets `hasSite`. */
-export async function searchSummary(scope: Scope, range: DayRange, opts: { manage: boolean }): Promise<SearchSummaryDto> {
+export async function searchSummary(scope: Scope, range: DateRange, opts: { manage: boolean }): Promise<SearchSummaryDto> {
   const prev = previousRange(range);
   const base = { daysIn: SEARCH_CONSOLE_ZONE, range, previousRange: prev } as const;
   const siteUrl = await chosenSite(scope);
@@ -102,7 +81,7 @@ export function parsePagesQuery(params: URLSearchParams): { sort: SearchPageSort
  * ponytail: grouped per request with an offset over ≤ 90 days × 500 pages (≤ 45k index-only rows). Precompute per
  * sync if it gets slow.
  */
-export async function searchPages(scope: Scope, range: DayRange, q: { sort: SearchPageSort; offset: number }): Promise<SearchPagesDto> {
+export async function searchPages(scope: Scope, range: DateRange, q: { sort: SearchPageSort; offset: number }): Promise<SearchPagesDto> {
   const siteUrl = await chosenSite(scope);
   if (!siteUrl) return { pages: [], nextCursor: null };
   const rows = await prisma.searchDay.groupBy({

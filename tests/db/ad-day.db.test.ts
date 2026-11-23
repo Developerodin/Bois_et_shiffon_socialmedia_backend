@@ -45,7 +45,7 @@ const window = (days: AdWindow["days"], extra: Partial<AdWindow> = {}): AdWindow
 
 async function adSource(brandId: string, externalId: string, currency = "EUR") {
   return prisma.dataSource.create({
-    data: { workspaceId: ws, brandId, kind: "META_ADS", connectionId: conn.id, externalId, label: "Acct", settings: { currency, timeZone: "Europe/Paris" } },
+    data: { workspaceId: ws, brandId, kind: "META_ADS", connectionId: conn.id, externalId, label: "Acct", settings: { currency, reportsIn: "Europe/Paris" } },
   });
 }
 const ctx = (source: DataSource, w?: { from: string; to: string }): SyncContext => ({
@@ -77,13 +77,13 @@ describe("choosing an ad account", () => {
     await chooseMetaAdAccount({ workspaceId: ws, brandId: "ad-a", userId: "u1" }, conn.id);
     const sources = await prisma.dataSource.findMany({ where: { brandId: "ad-a" } });
     expect(sources).toHaveLength(1);
-    expect(sources[0]).toMatchObject({ kind: "META_ADS", externalId: "act_1", connectionId: conn.id, label: "Shop ads", settings: { currency: "EUR", timeZone: "Europe/Paris" }, status: "ACTIVE" });
+    expect(sources[0]).toMatchObject({ kind: "META_ADS", externalId: "act_1", connectionId: conn.id, label: "Shop ads", settings: { currency: "EUR", reportsIn: "Europe/Paris" }, status: "ACTIVE" });
     const jobs = await prisma.job.findMany({ where: { type: DATA_SYNC_JOB } });
     expect(jobs).toHaveLength(1);
     const p = jobs[0]!.payload as { mode: string; from: string; to: string; end: string; dataSourceId: string };
     expect(p).toMatchObject({ mode: "backfill", dataSourceId: sources[0]!.id });
-    // 90 days ending yesterday, 7-day windows oldest first
-    expect((Date.parse(p.end) - Date.parse(p.from)) / 86_400_000 + 1).toBe(90);
+    // 180 days ending yesterday, 7-day windows oldest first
+    expect((Date.parse(p.end) - Date.parse(p.from)) / 86_400_000 + 1).toBe(180);
     expect((Date.parse(p.to) - Date.parse(p.from)) / 86_400_000 + 1).toBe(7);
     expect(JSON.stringify(p)).not.toContain("EAAB");
 

@@ -15,7 +15,7 @@ vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
 import { prisma } from "@/server/db/prisma";
 import { enqueueDailyCatalogSyncs, CATALOG_SYNC_JOB } from "@/server/catalog/sync";
 import { claimNextJob, enqueueJob } from "@/server/jobs/queue";
-import { DATA_SYNC_JOB, enqueueDailyDataSyncs, enqueueSourceSync, registerSync, runDataSync, spreadSecs, type SyncContext } from "@/server/data/sources";
+import { DATA_SYNC_JOB, enqueueDailyDataSyncs, enqueueSourceSync, registerSync, runDataSync, spreadSecs, type SyncContext, type SyncOutcome } from "@/server/data/sources";
 import { ReconnectNeeded } from "@/server/services/connections";
 import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/data-sources/route";
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/data-sources/[kind]/sync/route";
@@ -40,7 +40,7 @@ const dataJobs = (sourceId: string) => prisma.job.findMany({ where: { type: DATA
 
 // Kinds whose client is "built" for these tests.
 const calls: SyncContext[] = [];
-let next: (ctx: SyncContext) => Promise<{ count: number; complete?: boolean; reason?: "partial" | null }> = async () => ({ count: 0 });
+let next: (ctx: SyncContext) => Promise<SyncOutcome> = async () => ({ count: 0 });
 registerSync("SEARCH_CONSOLE", async (ctx) => (calls.push(ctx), next(ctx)));
 
 beforeAll(async () => {
@@ -73,6 +73,21 @@ describe("enqueueDailyDataSyncs", () => {
     expect(jobs.some((j) => (j.payload as { dataSourceId: string }).dataSourceId === off.id)).toBe(false);
   });
 
+  it("restarts a backfill chain that died from syncedThrough; not one that's alive or done", async () => {
+    const backfill = { start: "2026-08-01", end: "2026-10-29", days: 30 };
+    const dead = await source("ds-a", "SEARCH_CONSOLE", { settings: { backfill }, syncedThrough: new Date("2026-08-30") });
+    const done = await source("ds-a", "META_ADS", { settings: { backfill }, syncedThrough: new Date("2026-10-29") });
+    const alive = await source("ds-b", "SEARCH_CONSOLE", { settings: { backfill } });
+    await enqueueSourceSync(alive, "backfill", { window: { from: "2026-08-01", to: "2026-08-30", end: backfill.end }, runAt: new Date(Date.now() + 3_600_000) });
+    await enqueueDailyDataSyncs();
+    await enqueueDailyDataSyncs(); // a second sweep restarts it once
+    const restarted = (await dataJobs(dead.id)).filter((j) => (j.payload as { mode: string }).mode === "backfill");
+    expect(restarted).toHaveLength(1);
+    expect(restarted[0].payload).toMatchObject({ from: "2026-08-31", to: "2026-09-29", end: "2026-10-29" });
+    expect((await dataJobs(done.id)).map((j) => (j.payload as { mode: string }).mode)).toEqual(["daily"]);
+    expect((await dataJobs(alive.id)).filter((j) => (j.payload as { mode: string }).mode === "backfill")).toHaveLength(1);
+  });
+
   it("leaves the catalogue sync's jobs as they were", async () => {
     await source("ds-a", "SEARCH_CONSOLE");
     await enqueueDailyCatalogSyncs();
@@ -101,11 +116,31 @@ describe("runDataSync", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("a kind not built yet completes and writes nothing", async () => {
+  it("a kind with no registered runner throws and records failed", async () => {
     const s = await source("ds-a", "SHOPIFY_ORDERS");
-    vi.spyOn(console, "info").mockImplementation(() => {});
-    await runDataSync(payload(s), lease);
-    expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } })).lastResult).toBeNull();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(runDataSync(payload(s), lease)).rejects.toThrow("no data sync registered");
+    expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } })).lastResult).toMatchObject({ reason: "failed" });
+  });
+
+  it("a complete window whose syncedThrough can't move queues the window after it, not itself again", async () => {
+    const s = await source("ds-a", "SEARCH_CONSOLE", { syncedThrough: new Date("2026-08-01") });
+    next = async () => ({ count: 1, complete: true });
+    await runDataSync(payload(s, { mode: "backfill", from: "2026-08-10", to: "2026-08-16", end: "2026-09-30" }), lease);
+    expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } })).syncedThrough?.toISOString().slice(0, 10)).toBe("2026-08-01");
+    const queued = await dataJobs(s.id);
+    expect(queued).toHaveLength(1);
+    expect(queued[0].payload).toMatchObject({ mode: "backfill", from: "2026-08-17", to: "2026-08-23" });
+  });
+
+  it("a complete daily run extends a held syncedThrough contiguously, and never starts one", async () => {
+    const held = await source("ds-a", "SEARCH_CONSOLE", { syncedThrough: new Date("2026-11-18") });
+    const none = await source("ds-b", "SEARCH_CONSOLE");
+    next = async () => ({ count: 1, complete: true, window: { from: "2026-11-19", to: "2026-11-21" } });
+    await runDataSync(payload(held), lease);
+    await runDataSync(payload(none), lease);
+    expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: held.id } })).syncedThrough?.toISOString().slice(0, 10)).toBe("2026-11-21");
+    expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: none.id } })).syncedThrough).toBeNull();
   });
 
   it("a connection of another brand records reconnect and never runs the client", async () => {

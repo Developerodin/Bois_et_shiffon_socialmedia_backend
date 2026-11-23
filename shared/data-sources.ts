@@ -154,7 +154,7 @@ const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const isDay = (s: string) => ISO_DAY.test(s) && new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s;
 
 /** `?from&to` as real YYYY-MM-DD days, from ≤ to, at most `maxDays` long (both ends counted); else null. */
-export function parseRange(from: string | null | undefined, to: string | null | undefined, maxDays = 90): DateRange | null {
+export function parseRange(from: string | null | undefined, to: string | null | undefined, maxDays: number): DateRange | null {
   if (!from || !to || !isDay(from) || !isDay(to) || from > to) return null;
   const days = (Date.parse(to) - Date.parse(from)) / 86_400_000 + 1;
   return days <= maxDays ? { from, to } : null;

@@ -1,18 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { metrics, parsePagesQuery, parseSearchRange, previousRange } from "@/server/data/search-read";
+import { metrics, parsePagesQuery } from "@/server/data/search-read";
+import { parseDayRange, previousRange } from "@/server/data/sources";
+import { SEARCH_RANGE_MAX_DAYS } from "@/shared";
 
 const q = (s: string) => new URLSearchParams(s);
 
-describe("parseSearchRange", () => {
+describe("parseDayRange", () => {
   it("accepts up to 90 inclusive days", () => {
-    expect(parseSearchRange(q("from=2026-08-01&to=2026-10-29"))).toEqual({ from: "2026-08-01", to: "2026-10-29" });
-    expect(parseSearchRange(q("from=2026-11-01&to=2026-11-01"))).toEqual({ from: "2026-11-01", to: "2026-11-01" });
+    expect(parseDayRange(q("from=2026-08-01&to=2026-10-29"), SEARCH_RANGE_MAX_DAYS)).toEqual({ from: "2026-08-01", to: "2026-10-29" });
+    expect(parseDayRange(q("from=2026-11-01&to=2026-11-01"), SEARCH_RANGE_MAX_DAYS)).toEqual({ from: "2026-11-01", to: "2026-11-01" });
   });
   it("refuses 91 days, a reversed range, a missing or impossible day", () => {
-    expect(parseSearchRange(q("from=2026-08-01&to=2026-10-30"))).toBeNull();
-    expect(parseSearchRange(q("from=2026-11-02&to=2026-11-01"))).toBeNull();
-    expect(parseSearchRange(q("from=2026-11-01"))).toBeNull();
-    expect(parseSearchRange(q("from=2026-02-30&to=2026-03-01"))).toBeNull();
+    expect(parseDayRange(q("from=2026-08-01&to=2026-10-30"), SEARCH_RANGE_MAX_DAYS)).toBeNull();
+    expect(parseDayRange(q("from=2026-11-02&to=2026-11-01"), SEARCH_RANGE_MAX_DAYS)).toBeNull();
+    expect(parseDayRange(q("from=2026-11-01"), SEARCH_RANGE_MAX_DAYS)).toBeNull();
+    expect(parseDayRange(q("from=2026-02-30&to=2026-03-01"), SEARCH_RANGE_MAX_DAYS)).toBeNull();
   });
 });
 

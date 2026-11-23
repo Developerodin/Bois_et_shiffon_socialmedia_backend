@@ -1,20 +1,10 @@
 import type { Prisma } from "@prisma/client";
-import type { SalesCurrency, SalesSummaryDto, SalesTotals } from "@/shared";
+import type { DateRange, SalesCurrency, SalesSummaryDto, SalesTotals } from "@/shared";
 import { prisma } from "@/server/db/prisma";
-import { addDays } from "./sources";
+import { addDays, previousRange } from "./sources";
 
 /** Longest range a summary reads (and the previous period is as long again). */
 export const MAX_SALES_DAYS = 366;
-const DAY = /^\d{4}-\d{2}-\d{2}$/;
-
-/** `from`..`to` as brand-local days, or null when either isn't a real day, they're reversed or the span is too long. */
-export function salesRange(from: string | null, to: string | null): { from: string; to: string; days: number } | null {
-  if (!from || !to || !DAY.test(from) || !DAY.test(to)) return null;
-  if (addDays(from, 0) !== from || addDays(to, 0) !== to) return null; // 2026-02-30 and the like
-  const days = (Date.parse(to) - Date.parse(from)) / 86_400_000 + 1;
-  return days >= 1 && days <= MAX_SALES_DAYS ? { from, to, days } : null;
-}
-
 type Row = {
   period: "cur" | "prev";
   currency: string;
@@ -45,8 +35,8 @@ const totals = (r: Row): SalesTotals => ({
  * bucketed on its brand-local date. Test and cancelled orders are left out. One query (GROUPING SETS for the totals).
  * ponytail: sums raw rows; past ~100k orders in a range add a per-day rollup written by the sync.
  */
-export async function salesSummary(scope: { workspaceId: string; brandId: string }, range: { from: string; to: string; days: number }): Promise<SalesSummaryDto> {
-  const prevFrom = addDays(range.from, -range.days);
+export async function salesSummary(scope: { workspaceId: string; brandId: string }, range: DateRange): Promise<SalesSummaryDto> {
+  const prevFrom = previousRange(range).from;
   const nextDay = addDays(range.to, 1);
   const rows = await prisma.$queryRaw<Row[]>`
     WITH bp AS (

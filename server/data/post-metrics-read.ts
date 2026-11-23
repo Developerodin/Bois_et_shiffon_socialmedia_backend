@@ -1,19 +1,10 @@
-import { z } from "zod";
-import type { PostChannel, PostInsightDto } from "@/shared";
+import type { DateRange, PostChannel, PostInsightDto } from "@/shared";
 import { prisma } from "@/server/db/prisma";
-import { addDays } from "./sources";
 
-const MAX_DAYS = 90;
+/** The longest `?from&to` insights/posts accepts. */
+export const POSTS_MAX_DAYS = 90;
 /** ponytail: posts returned per request; a brand publishing more than this in 90 days sees its top ones by reach. */
 const MAX_POSTS = 500;
-const Day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((d) => !Number.isNaN(Date.parse(`${d}T00:00:00Z`)));
-
-/** `?from&to`: brand-local days, from ≤ to, at most 90 days. Null when they don't parse. */
-export const PostsRange = z
-  .object({ from: Day, to: Day })
-  .refine((r) => r.from <= r.to && r.to <= addDays(r.from, MAX_DAYS - 1));
-export type PostsRange = z.infer<typeof PostsRange>;
-
 type Row = {
   attemptId: string; contentItemId: string; title: string; channel: PostChannel; publishedAt: Date; final: boolean;
   readAt: Date | null; views: number | null; reach: number | null; likes: number | null; comments: number | null;
@@ -24,7 +15,7 @@ type Row = {
  * The brand's Instagram, Facebook and Threads posts (stories have no lasting numbers) published in the brand-local
  * range, each with its latest read, most reach first. The range's bounds are the brand's local midnights as instants.
  */
-export async function postsWithMetrics(scope: { workspaceId: string; brandId: string }, range: PostsRange, now = new Date()): Promise<PostInsightDto[]> {
+export async function postsWithMetrics(scope: { workspaceId: string; brandId: string }, range: DateRange, now = new Date()): Promise<PostInsightDto[]> {
   const rows = await prisma.$queryRaw<Row[]>`
     WITH bp AS (SELECT COALESCE((SELECT "timeZone" FROM "BrandProfile" WHERE "workspaceId" = ${scope.workspaceId} AND "brandId" = ${scope.brandId} LIMIT 1), 'UTC') AS tz)
     SELECT a.id AS "attemptId", a."contentItemId", c.title, c.channel::text AS channel, a."publishedAt",

@@ -1,8 +1,9 @@
 import type { SyncStop } from "./sync-stop";
 import type { DataSource, IntegrationConnection, Prisma } from "@prisma/client";
 import { z } from "zod";
-import { DATA_SOURCE_KINDS, DATA_SYNC_ERRORS, READ_KEY, type DataSourceDto, type DataSourceKind, type DataSyncReason, type DataSyncResult } from "@/shared";
+import { DATA_SOURCE_KINDS, DATA_SYNC_ERRORS, parseRange, READ_KEY, type DateRange, type DataSourceDto, type DataSourceKind, type DataSyncReason, type DataSyncResult } from "@/shared";
 import { prisma } from "@/server/db/prisma";
+import { problemResponse } from "@/server/api/http-error";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { enqueueJob, type Lease } from "@/server/jobs/queue";
 import { ReconnectNeeded } from "@/server/services/connections";
@@ -106,6 +107,16 @@ export function advanceSyncedThrough(current: string | null, window: DayWindow, 
   if (!complete) return current;
   if (current !== null && window.from > addDays(current, 1)) return current;
   return current !== null && current >= window.to ? current : window.to;
+}
+/** `?from&to` of a read route: real days, from ≤ to, at most `maxDays` long; else null (answer with badRange). */
+export const parseDayRange = (params: URLSearchParams, maxDays: number) => parseRange(params.get("from"), params.get("to"), maxDays);
+/** The one answer to a range parseDayRange refused (or another bad query, with its own detail). */
+export const badRange = (maxDays: number, detail = `from and to must be YYYY-MM-DD days, from not after to, at most ${maxDays} days.`) =>
+  problemResponse({ type: "https://api.brandpilot/errors/invalid-range", title: "Invalid range", status: 422, detail });
+/** The same number of days right before `range`. */
+export function previousRange(range: DateRange): DateRange {
+  const days = (Date.parse(range.to) - Date.parse(range.from)) / 86_400_000 + 1;
+  return { from: addDays(range.from, -days), to: addDays(range.from, -1) };
 }
 const dayOf = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
 

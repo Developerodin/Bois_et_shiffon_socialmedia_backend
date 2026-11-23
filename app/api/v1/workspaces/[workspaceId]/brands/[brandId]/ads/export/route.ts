@@ -4,7 +4,8 @@ import { badExport, csvResponse, exportAllowed, tooManyExports } from "@/server/
 import { toXlsx, xlsxResponse } from "@/server/api/xlsx";
 import { ADS_MAX_DAYS, adsExportRows, EXPORT_COLUMNS } from "@/server/data/ads-read";
 import { prisma } from "@/server/db/prisma";
-import { parseRange, toCsv } from "@/shared";
+import { badRange, parseDayRange } from "@/server/data/sources";
+import { toCsv } from "@/shared";
 
 /**
  * The ads table for `?from&to` as `?format=xlsx|csv`: one row per campaign day, numbers as numbers. Shares the
@@ -17,8 +18,8 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const q = new URL(request.url).searchParams;
     const format = q.get("format");
     if (format !== "xlsx" && format !== "csv") return badExport("format must be xlsx or csv");
-    const range = parseRange(q.get("from"), q.get("to"), ADS_MAX_DAYS);
-    if (!range) return badExport(`from and to must be YYYY-MM-DD days, from ≤ to, at most ${ADS_MAX_DAYS} days`);
+    const range = parseDayRange(q, ADS_MAX_DAYS);
+    if (!range) return badRange(ADS_MAX_DAYS);
     if (!(await exportAllowed(scope.userId))) return tooManyExports();
     const rows = await adsExportRows(scope, range);
     await prisma.auditEvent.create({

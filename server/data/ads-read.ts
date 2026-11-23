@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import { addDays } from "./sources";
+import { previousRange } from "./sources";
 import type { AdsCampaignDto, AdsSummaryDto, AdsTotals, DateRange } from "@/shared";
 import { prisma } from "@/server/db/prisma";
 
@@ -28,13 +28,6 @@ export function totalsOf(currency: string, spend: Prisma.Decimal, purchases: num
     roas: spend.isZero() ? null : purchaseValue.div(spend).toDecimalPlaces(2).toNumber(),
     costPerPurchase: purchases === 0 ? null : spend.div(purchases).toFixed(2),
   };
-}
-
-/** The same number of days right before `range`. */
-export function previousRange(range: DateRange): DateRange {
-  const days = (Date.parse(range.to) - Date.parse(range.from)) / 86_400_000 + 1;
-  const to = addDays(range.from, -1);
-  return { from: addDays(to, -(days - 1)), to };
 }
 
 async function totals(scope: Scope, range: DateRange): Promise<AdsTotals[]> {

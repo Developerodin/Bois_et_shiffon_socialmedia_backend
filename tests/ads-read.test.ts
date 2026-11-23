@@ -1,18 +1,19 @@
 import { Prisma } from "@prisma/client";
 import { describe, expect, it } from "vitest";
-import { previousRange, totalsOf } from "@/server/data/ads-read";
+import { totalsOf } from "@/server/data/ads-read";
+import { previousRange } from "@/server/data/sources";
 import { parseRange } from "@/shared";
 
 describe("parseRange", () => {
   it("takes real YYYY-MM-DD days, from ≤ to, within the cap (both ends counted)", () => {
-    expect(parseRange("2026-11-01", "2026-11-30")).toEqual({ from: "2026-11-01", to: "2026-11-30" });
-    expect(parseRange("2026-11-01", "2026-11-01")).toEqual({ from: "2026-11-01", to: "2026-11-01" });
+    expect(parseRange("2026-11-01", "2026-11-30", 90)).toEqual({ from: "2026-11-01", to: "2026-11-30" });
+    expect(parseRange("2026-11-01", "2026-11-01", 90)).toEqual({ from: "2026-11-01", to: "2026-11-01" });
     expect(parseRange("2025-01-01", "2026-01-01", 366)).not.toBeNull();
     expect(parseRange("2025-01-01", "2026-01-02", 366)).toBeNull();
-    expect(parseRange("2026-01-01", "2026-03-31")).toEqual({ from: "2026-01-01", to: "2026-03-31" }); // 90
-    expect(parseRange("2026-01-01", "2026-04-01")).toBeNull();
+    expect(parseRange("2026-01-01", "2026-03-31", 90)).toEqual({ from: "2026-01-01", to: "2026-03-31" }); // 90
+    expect(parseRange("2026-01-01", "2026-04-01", 90)).toBeNull();
     for (const [f, t] of [[null, "2026-11-01"], ["2026-11-02", "2026-11-01"], ["2026-02-30", "2026-03-01"], ["2026-1-1", "2026-01-02"], ["2026-11-01T00:00", "2026-11-02"], ["../x", "2026-11-02"]]) {
-      expect(parseRange(f, t), `${f} ${t}`).toBeNull();
+      expect(parseRange(f, t, 90), `${f} ${t}`).toBeNull();
     }
   });
 });

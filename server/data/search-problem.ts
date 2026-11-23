@@ -13,5 +13,3 @@ export function toSearchProblem(error: unknown) {
   return fromAccessError(error);
 }
 
-export const badRange = (detail = "from and to must be YYYY-MM-DD, from not after to, at most 90 days.") =>
-  problemResponse({ type: "https://api.brandpilot/errors/invalid-range", title: "Invalid range", status: 400, detail });

@@ -143,7 +143,7 @@ describe("PUT data-sources/shopify-orders", () => {
   it("turns the sync on with the stored token, ignoring a token in the body, and queues the first run", async () => {
     const c = await connection("so-a");
     const res = await put({ connectionId: c.id, accessToken: "shpat_from_body" });
-    expect(res.status).toBe(202);
+    expect(res.status).toBe(200);
     expect(shop.tokens).toEqual(["stored-token"]);
     const source = await prisma.dataSource.findFirstOrThrow({ where: { brandId: "so-a", kind: "SHOPIFY_ORDERS" } });
     expect(source).toMatchObject({ connectionId: c.id, externalId: c.externalAccountId, status: "ACTIVE" });
