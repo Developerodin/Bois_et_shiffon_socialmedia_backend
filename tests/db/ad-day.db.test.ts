@@ -113,7 +113,8 @@ describe("META_ADS sync", () => {
     meta.fetchAdWindow.mockResolvedValue(window(days));
     await runSync("META_ADS", ctx(s, { from: "2026-11-01", to: "2026-11-02" }));
     const second = await rows("ad-a");
-    expect(second.map(({ id: _, ...r }) => r)).toEqual(first.map(({ id: _, ...r }) => r));
+    const noId = (list: typeof first) => list.map((r) => ({ ...r, id: undefined }));
+    expect(noId(second)).toEqual(noId(first));
     expect(second.find((r) => r.campaignId === "c1" && r.day.toISOString().startsWith("2026-11-01"))?.spend.toString()).toBe("12.3");
     expect(meta.fetchAdWindow).toHaveBeenCalledWith("EAAB-secret", "1", "2026-11-01", "2026-11-02");
 
