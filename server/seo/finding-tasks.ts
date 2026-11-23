@@ -85,9 +85,10 @@ const ClearPayload = z.object({ workspaceId: z.string().min(1), brandId: z.strin
  * FINDING_CLEAR_JOB: open tasks of the report's kind whose finding (a stable id) the report no longer lists, and whose
  * pages it re-read (all of `findingUrls` in metrics.pagesChecked; a site-wide finding needs none), move to DONE with a
  * SYSTEM comment and an audit event, in one transaction. The UPDATE re-checks the status, so a task moved to review
- * since the read is left alone. Tasks in review get the comment only (a client approval may be pending).
+ * since the read is left alone. Tasks in review, and tasks with a reviewer, get the comment only: a reviewed task
+ * finishes only by approval (a client approval may be pending).
  * A finding that comes back later reopens nothing.
- * ponytail: a task in review is told again by every later audit that still misses its finding; dedupe if that's noisy.
+ * ponytail: a task in review or with a reviewer is told again by every later audit that still misses its finding; dedupe if that's noisy.
  */
 export async function clearFindings(payload: unknown): Promise<void> {
   const { workspaceId, brandId, reportId } = ClearPayload.parse(payload);
@@ -98,24 +99,26 @@ export async function clearFindings(payload: unknown): Promise<void> {
   const pages = new Set(Array.isArray(checked) ? checked.filter((u): u is string => typeof u === "string") : []);
   const open = await prisma.task.findMany({
     where: { workspaceId, brandId, findingKind: report.kind, findingId: { not: null }, status: { in: OPEN } },
-    select: { id: true, title: true, status: true, findingId: true, findingUrls: true },
+    select: { id: true, title: true, status: true, reviewerId: true, findingId: true, findingUrls: true },
   });
   const cleared = open.filter((t) => isStableFindingId(report.kind, t.findingId!) && !notMeasured(report.metrics, t.findingId!) && !present.has(t.findingId!) && t.findingUrls.every((u) => pages.has(u)));
   if (!cleared.length) return;
-  const toClose = cleared.filter((t) => t.status !== "IN_REVIEW").map((t) => t.id);
+  const toClose = cleared.filter((t) => t.status !== "IN_REVIEW" && !t.reviewerId).map((t) => t.id);
   const inReview = cleared.filter((t) => t.status === "IN_REVIEW").map((t) => t.id);
+  const reviewed = cleared.filter((t) => t.status !== "IN_REVIEW" && t.reviewerId).map((t) => t.id);
   const day = report.createdAt.toISOString().slice(0, 10);
   const titleOf = new Map(cleared.map((t) => [t.id, t.title]));
   const now = new Date();
   await prisma.$transaction(async (tx) => {
     const closed = toClose.length
-      ? await tx.$queryRaw<{ id: string }[]>`UPDATE "Task" SET status = 'DONE', "completedAt" = ${now}, "findingClearedAt" = ${now}, "blockedReason" = NULL, "blockedOnId" = NULL, "updatedAt" = ${now} WHERE id = ANY(${toClose}) AND status IN ('TODO', 'IN_PROGRESS') RETURNING id`
+      ? await tx.$queryRaw<{ id: string }[]>`UPDATE "Task" SET status = 'DONE', "completedAt" = ${now}, "findingClearedAt" = ${now}, "blockedReason" = NULL, "blockedOnId" = NULL, "updatedAt" = ${now} WHERE id = ANY(${toClose}) AND status IN ('TODO', 'IN_PROGRESS') AND "reviewerId" IS NULL RETURNING id`
       : [];
     const ids = closed.map((r) => r.id);
     const comment = (taskId: string, body: string) => ({ workspaceId, brandId, taskId, authorId: null, kind: "SYSTEM" as const, body, byClient: false, internal: false });
     const comments = [
       ...ids.map((id) => comment(id, `The ${day} audit no longer finds this`)),
       ...inReview.map((id) => comment(id, `The ${day} audit no longer finds this. It stays in review until the reviewer decides.`)),
+      ...reviewed.map((id) => comment(id, `The ${day} audit no longer finds this. It stays open until the reviewer approves it.`)),
     ];
     if (comments.length) await tx.taskComment.createMany({ data: comments });
     if (ids.length) {

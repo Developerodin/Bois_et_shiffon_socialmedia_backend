@@ -47,7 +47,7 @@ const taskRow = (o: Record<string, unknown> = {}) => ({
   findingKind: "SEO", findingId: "title-missing", findingUrls: [], findingClearedAt: null, recheckOn: null, completedAt: null, requestId: null,
   createdAt: new Date(), updatedAt: new Date(), workProject: null, contentItem: null, ...o,
 });
-const candidate = (o: Record<string, unknown> = {}) => ({ id: "t1", title: "Old issue", status: "TODO", findingId: "gone", findingUrls: [] as string[], ...o });
+const candidate = (o: Record<string, unknown> = {}) => ({ id: "t1", title: "Old issue", status: "TODO", reviewerId: null as string | null, findingId: "gone", findingUrls: [] as string[], ...o });
 const updateIds = () => {
   const call = db.$queryRaw.mock.calls.find((c) => (c[0] as string[]).join("?").includes(`UPDATE "Task"`));
   return call ? (call as unknown[]).slice(1).find(Array.isArray) : undefined;
@@ -199,6 +199,23 @@ describe("clearFindings", () => {
     expect(updateIds()).toBeUndefined();
     expect(comments()).toEqual([expect.objectContaining({ taskId: "t1", kind: "SYSTEM" })]);
     expect(db.auditEvent.createMany).not.toHaveBeenCalled();
+  });
+
+  it("never closes a task with a reviewer: comment only, it finishes by approval", async () => {
+    db.task.findMany.mockResolvedValue([candidate({ reviewerId: "u2" }), candidate({ id: "t2", status: "IN_PROGRESS", reviewerId: "u3" })]);
+    await clearFindings(payload);
+    expect(updateIds()).toBeUndefined();
+    expect(comments().map((c) => [c.taskId, c.kind, c.body])).toEqual([
+      ["t1", "SYSTEM", "The 2026-11-23 audit no longer finds this. It stays open until the reviewer approves it."],
+      ["t2", "SYSTEM", "The 2026-11-23 audit no longer finds this. It stays open until the reviewer approves it."],
+    ]);
+    expect(db.auditEvent.createMany).not.toHaveBeenCalled();
+  });
+
+  it("the close re-checks that no reviewer was set since the read", async () => {
+    db.task.findMany.mockResolvedValue([candidate()]);
+    await clearFindings(payload);
+    expect((db.$queryRaw.mock.calls[0]![0] as string[]).join("?")).toContain('"reviewerId" IS NULL');
   });
 
   it("only the tasks the update returned get comments and audits", async () => {
