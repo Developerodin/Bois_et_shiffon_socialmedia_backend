@@ -14,7 +14,8 @@ async function main() {
   const stamp = Date.now();
   const invitedEmail = `smoke-g-invited-${stamp}@example.com`;
   const newEmail = `smoke-g-new-${stamp}@example.com`;
-  const ws = await prisma.workspace.findFirstOrThrow({ include: { roles: true } });
+  const owner = await prisma.workspaceMember.findFirstOrThrow({ where: { roleRef: { slug: "owner" }, workspace: { brands: { some: {} } } } });
+  const ws = await prisma.workspace.findUniqueOrThrow({ where: { id: owner.workspaceId }, include: { roles: true } });
   const creator = ws.roles.find((r) => r.slug === "creator")!;
   const brand = await prisma.brand.findFirstOrThrow({ where: { workspaceId: ws.id } });
   const userIds: string[] = [];
@@ -22,7 +23,7 @@ async function main() {
   let ownWs: string | null = null;
   try {
     await prisma.invitation.create({
-      data: { workspaceId: ws.id, brandId: brand.id, email: invitedEmail, roleId: creator.id, tokenHash: hashToken(`t-${stamp}`), expiresAt: new Date(Date.now() + 86_400_000) },
+      data: { workspaceId: ws.id, brandId: brand.id, email: invitedEmail, roleId: creator.id, invitedByUserId: owner.userId, tokenHash: hashToken(`t-${stamp}`), expiresAt: new Date(Date.now() + 86_400_000) },
     });
     const invited = await prisma.user.create({ data: { email: invitedEmail, name: "Invited Person" } });
     userIds.push(invited.id);
