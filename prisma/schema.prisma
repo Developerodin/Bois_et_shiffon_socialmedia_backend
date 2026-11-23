@@ -212,6 +212,7 @@ model Brand {
   taskComments  TaskComment[]
   notifications Notification[]
   dataSources   DataSource[]
+  postMetrics   PostMetric[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1214,10 +1215,12 @@ model PublicationAttempt {
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
 
-  item ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  item    ContentItem  @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  metrics PostMetric[]
 
   @@index([contentItemId, createdAt])
   @@index([status, runAt])
+  @@index([brandId, status, publishedAt])
 }
 
 /// Paid Higgsfield assets for reels (templates.ts): a brand's template preview, later its presenters.
@@ -1609,4 +1612,29 @@ model DataSource {
 
   @@unique([brandId, kind, externalId])
   @@index([status])
+}
+
+/// A published post's numbers as read on one brand-local day (server/data/post-metric-sync.ts). Read on a decaying
+/// schedule for 30 days; after that only the final row is kept. A null metric is one the platform didn't give.
+model PostMetric {
+  id                   String   @id @default(cuid())
+  workspaceId          String
+  brandId              String
+  publicationAttemptId String
+  /// brand-local day of the read
+  day                  DateTime @db.Date
+  readAt               DateTime
+  reach                Int?
+  views                Int?
+  likes                Int?
+  comments             Int?
+  shares               Int?
+  saves                Int?
+  interactions         Int?
+
+  attempt PublicationAttempt @relation(fields: [publicationAttemptId], references: [id], onDelete: Cascade)
+  brand   Brand              @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([publicationAttemptId, day])
+  @@index([brandId])
 }
