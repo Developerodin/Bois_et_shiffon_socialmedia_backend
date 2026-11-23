@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, isClientGrant, memberRole } from "@/server/auth/permissions";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
+import { lockRow } from "@/server/services/publishing";
+import { TaskError } from "@/server/tasks/errors";
 
 /** Who is looking at a brand's tasks, from the route scope already loaded (no extra read). */
 export type TaskViewer = { userId: string; workspaceId: string; brandId: string; canRead: boolean; canManage: boolean; client: boolean };
@@ -74,6 +76,21 @@ export async function visibleTasksAcrossSql(userId: string, workspaceId: string,
 export async function findVisibleTask(tx: Db, v: TaskViewer, id: string): Promise<{ id: string } | null> {
   const rows = await tx.$queryRaw<{ id: string }[]>`SELECT t.id FROM "Task" t WHERE t.id = ${id} AND ${visibleTaskSql(v)}`;
   return rows[0] ?? null;
+}
+
+/**
+ * Start a write to a task's children (checklist, attachments): 404 unless the viewer sees it, then the task lock, then
+ * owner or tasks.manage (403). `ownerNeeds`: a key the owner must also hold (attachments need content.create).
+ * Returns the task's title for the audit event.
+ */
+export async function lockTaskForEdit(tx: Prisma.TransactionClient, v: TaskViewer, perms: Set<PermissionKey>, taskId: string, ownerNeeds?: PermissionKey): Promise<{ title: string }> {
+  if (!(await findVisibleTask(tx, v, taskId))) throw new TaskError("Task not found", 404);
+  await lockRow(tx, "task", taskId);
+  const task = await tx.task.findUnique({ where: { id: taskId }, select: { title: true, ownerId: true } });
+  if (!task) throw new TaskError("Task not found", 404);
+  const owner = task.ownerId === v.userId && (!ownerNeeds || perms.has(ownerNeeds));
+  if (!v.canManage && !owner) throw new TaskError("Only the task's owner or a manager can change this.", 403);
+  return { title: task.title };
 }
 
 /** Comments a viewer may read: a client never sees internal ones. */

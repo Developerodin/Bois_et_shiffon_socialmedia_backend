@@ -10,7 +10,7 @@ import { canBeAssigned, findVisibleTask, isSoleStaff, type TaskViewer } from "@/
 import { taskAudit } from "@/server/tasks/audit";
 import { TaskError } from "@/server/tasks/errors";
 import { checkTaskLinks } from "@/server/tasks/links";
-import { allowedActions, MANAGE_PATCH_FIELDS, pickPatch, safeHttpUrl, TASK_AREAS, TASK_PRIORITIES, WEBSITE_CHANGE_KINDS, type TaskDto, type TaskRow } from "@/shared";
+import { allowedActions, MANAGE_PATCH_FIELDS, pickPatch, safeHttpUrl, TASK_AREAS, TASK_PRIORITIES, WEBSITE_CHANGE_KINDS, type TaskDto, type TaskPersonDto, type TaskRow } from "@/shared";
 
 /** The route scope the task services take (authorizeBrandRoute's result). */
 export type TaskScope = { userId: string; workspaceId: string; brandId: string; perms: Set<PermissionKey> };
@@ -79,6 +79,12 @@ export const rowOf = (t: Task): TaskRow => ({
   recheckOn: dayOf(t.recheckOn),
 });
 
+/** A user id → the person on a task, named from the brand's tasks.read people; someone not among them is `gone`. */
+export function personOf(names: { id: string; name: string }[]) {
+  const nameOf = new Map(names.map((p) => [p.id, p.name]));
+  return (userId: string | null): TaskPersonDto | null => (userId ? { id: userId, name: nameOf.get(userId) ?? TEAM_MEMBER, gone: !nameOf.has(userId) } : null);
+}
+
 /**
  * Rows → DTOs for the viewer: names from the brand's tasks.read people (`people`, when the caller already read them in
  * parallel; a person not among them is `gone`), checklist counts in one groupBy, and the actions the viewer can take.
@@ -92,9 +98,8 @@ export async function toTaskDtos(scope: TaskScope, rows: TaskWithLinks[], people
     prisma.taskChecklistItem.groupBy({ by: ["taskId"], where: { taskId: { in: rows.map((r) => r.id) } }, _count: { _all: true, doneAt: true } }),
     owns ? isSoleStaff(scope.workspaceId, scope.brandId, scope.userId) : false,
   ]);
-  const nameOf = new Map(names.map((p) => [p.id, p.name]));
   const countOf = new Map(counts.map((c) => [c.taskId, { done: c._count.doneAt, total: c._count._all }]));
-  const person = (userId: string | null) => (userId ? { id: userId, name: nameOf.get(userId) ?? TEAM_MEMBER, gone: !nameOf.has(userId) } : null);
+  const person = personOf(names);
   const canManage = scope.perms.has("tasks.manage");
   return rows.map((t) => {
     const isOwner = t.ownerId === scope.userId;
