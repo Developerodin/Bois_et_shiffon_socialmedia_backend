@@ -18,6 +18,12 @@ const SOURCES = "{ts,tsx,js,jsx,mjs}";
 // "./../" climb out as well. no-restricted-imports doesn't see import(), so no-restricted-syntax repeats the escapes
 // for it (esquery regexes can't hold "/", hence \x2F).
 const LEAVES = "Leaves apps/server: import from inside the app, or from @/shared.";
+// Raw SQL only through the tagged templates ($queryRaw`…`, $executeRaw`…`), which send values as parameters. Sits in
+// the boundary blocks because ESLint keeps only the last matching block's options for no-restricted-syntax.
+const RAW_UNSAFE = {
+  selector: "CallExpression[callee.property.name=/^\\$(queryRawUnsafe|executeRawUnsafe)$/]",
+  message: "No $queryRawUnsafe / $executeRawUnsafe: use the $queryRaw`…` / $executeRaw`…` tagged templates (values become parameters).",
+};
 const boundary = (depth) => {
   const escapes = [`^(\\./)?(\\.\\./){${depth + 1},}`, "^@/\\.\\.(/|$)", "^(web-frontend|mobile-app)(/|$)"];
   return {
@@ -35,6 +41,7 @@ const boundary = (depth) => {
       "no-restricted-syntax": [
         "error",
         { selector: `ImportExpression[source.value=/${escapes.join("|").replaceAll("/", "\\x2F")}/]`, message: LEAVES },
+        RAW_UNSAFE,
       ],
     },
   };
@@ -56,6 +63,8 @@ const eslintConfig = [
       "out/**",
       "build/**",
       "next-env.d.ts",
+      // Gitignored working notes and one-off probes (one uses $executeRawUnsafe on a dev database), not app code.
+      ".superpowers/**",
     ],
   },
 ];
