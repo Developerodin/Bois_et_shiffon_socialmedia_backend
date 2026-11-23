@@ -75,6 +75,7 @@ const params = (o: Record<string, string> = {}) => ({ params: Promise.resolve({ 
 
 beforeEach(() => {
   vi.clearAllMocks();
+  scope.perms = new Set(MANAGER); // tests that narrow it can't leak, even when an assertion fails first
   staff = new Set(["u1", "u2", "u3"]);
   db.$queryRaw.mockResolvedValue([{ id: "t1" }]);
   db.task.findFirst.mockResolvedValue(null);
@@ -324,14 +325,12 @@ describe("routes", () => {
     scope.perms = new Set(["brand.read", "tasks.read"]);
     const res = await taskPatch(req("PATCH", { title: "x" }), params());
     expect(res.status).toBe(403);
-    scope.perms = new Set(MANAGER);
   });
 
   it("reader cannot POST tasks (403)", async () => {
     scope.perms = new Set(["brand.read", "tasks.read"]);
     const res = await tasksPost(req("POST", input()), params());
     expect(res.status).toBe(403);
-    scope.perms = new Set(MANAGER);
   });
 
   it("POST creates (201), GET reads, TaskError maps to a problem", async () => {
