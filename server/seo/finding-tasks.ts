@@ -1,9 +1,9 @@
 import "server-only";
-import type { AuditKind, Prisma, TaskArea } from "@prisma/client";
+import type { Prisma, TaskArea } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import type { Finding } from "@/server/seo/checks";
-import { TX } from "@/server/services/publishing";
+import { lockRow, TX } from "@/server/services/publishing";
 import type { TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { taskStatusInSql } from "@/server/tasks/sql";
@@ -24,7 +24,7 @@ export const FINDING_CLEAR_JOB = "tasks.clear-findings";
  * Does this finding id name the same check in every audit? GEO's AI content review numbers its findings by position
  * (`content-1`, `content-2`), so the same id means a different finding next time: those never clear a task.
  */
-export function isStableFindingId(_kind: AuditKind, id: string): boolean {
+export function isStableFindingId(id: string): boolean {
   return !/^content-\d+$/.test(id);
 }
 
@@ -58,7 +58,7 @@ export async function taskFromFinding(scope: TaskScope, v: TaskViewer, reportId:
   const finding = findingsOf(report.findings).find((f) => f.id === findingId);
   if (!finding) throw new TaskError("Finding not found", 404);
   // A positional id names another finding in each report: only a task made from this same report is that finding's.
-  const sameReport = isStableFindingId(report.kind, findingId) ? {} : { auditReportId: report.id };
+  const sameReport = isStableFindingId(findingId) ? {} : { auditReportId: report.id };
   const openTask = () =>
     prisma.task.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, findingKind: report.kind, findingId, status: { in: OPEN }, ...sameReport }, select: { id: true } });
   const found = await openTask();
@@ -87,9 +87,10 @@ const ClearPayload = z.object({ workspaceId: z.string().min(1), brandId: z.strin
 /**
  * FINDING_CLEAR_JOB: open tasks of the report's kind whose finding (a stable id) the report no longer lists, and whose
  * pages it re-read (all of `findingUrls` in metrics.pagesChecked; a site-wide finding needs none), move to DONE with a
- * SYSTEM comment and an audit event, in one transaction. The UPDATE re-checks the status, so a task moved to review
- * since the read is left alone. Tasks in review, and tasks with a reviewer, get the comment only: a reviewed task
- * finishes only by approval (a client approval may be pending).
+ * SYSTEM comment and an audit event, in one transaction. Each task is locked (the lock runTaskAction and patchTask
+ * take, in id order) and its status and reviewer read again under the lock, so a task moved to review since the first
+ * read is left alone and told the right thing. Tasks in review, and tasks with a reviewer, get the comment only: a
+ * reviewed task finishes only by approval (a client approval may be pending).
  * A finding that comes back later reopens nothing.
  * ponytail: a task in review or with a reviewer is told again by every later audit that still misses its finding; dedupe if that's noisy.
  */
@@ -104,15 +105,19 @@ export async function clearFindings(payload: unknown): Promise<void> {
     where: { workspaceId, brandId, findingKind: report.kind, findingId: { not: null }, status: { in: OPEN } },
     select: { id: true, title: true, status: true, reviewerId: true, findingId: true, findingUrls: true },
   });
-  const cleared = open.filter((t) => isStableFindingId(report.kind, t.findingId!) && !notMeasured(report.metrics, t.findingId!) && !present.has(t.findingId!) && t.findingUrls.every((u) => pages.has(u)));
+  const cleared = open.filter((t) => isStableFindingId(t.findingId!) && !notMeasured(report.metrics, t.findingId!) && !present.has(t.findingId!) && t.findingUrls.every((u) => pages.has(u)));
   if (!cleared.length) return;
-  const toClose = cleared.filter((t) => t.status !== "IN_REVIEW" && !t.reviewerId).map((t) => t.id);
-  const inReview = cleared.filter((t) => t.status === "IN_REVIEW").map((t) => t.id);
-  const reviewed = cleared.filter((t) => t.status !== "IN_REVIEW" && t.reviewerId).map((t) => t.id);
   const day = report.createdAt.toISOString().slice(0, 10);
   const titleOf = new Map(cleared.map((t) => [t.id, t.title]));
   const now = new Date();
   await prisma.$transaction(async (tx) => {
+    const lockIds = cleared.map((t) => t.id).sort();
+    for (const id of lockIds) await lockRow(tx, "task", id);
+    const locked = await tx.task.findMany({ where: { id: { in: lockIds }, status: { in: OPEN } }, select: { id: true, status: true, reviewerId: true } });
+    const toClose = locked.filter((t) => t.status !== "IN_REVIEW" && !t.reviewerId).map((t) => t.id);
+    const inReview = locked.filter((t) => t.status === "IN_REVIEW").map((t) => t.id);
+    const reviewed = locked.filter((t) => t.status !== "IN_REVIEW" && t.reviewerId).map((t) => t.id);
+    // The same fields shared markDone writes (status, completedAt, block cleared): keep the two in step.
     const closed = toClose.length
       ? await tx.$queryRaw<{ id: string }[]>`UPDATE "Task" t SET status = 'DONE', "completedAt" = ${now}, "findingClearedAt" = ${now}, "blockedReason" = NULL, "blockedOnId" = NULL, "updatedAt" = ${now} WHERE t.id = ANY(${toClose}) AND ${CLOSABLE_BY_AUDIT} AND t."reviewerId" IS NULL RETURNING t.id`
       : [];

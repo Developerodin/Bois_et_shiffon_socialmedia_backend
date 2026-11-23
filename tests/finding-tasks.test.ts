@@ -154,10 +154,10 @@ describe("taskFromFinding", () => {
 
 describe("isStableFindingId", () => {
   it("positional AI-review ids are not stable", () => {
-    expect(isStableFindingId("GEO", "content-1")).toBe(false);
-    expect(isStableFindingId("SEO", "content-12")).toBe(false);
-    expect(isStableFindingId("SEO", "title-missing")).toBe(true);
-    expect(isStableFindingId("GEO", "content-schema")).toBe(true);
+    expect(isStableFindingId("content-1")).toBe(false);
+    expect(isStableFindingId("content-12")).toBe(false);
+    expect(isStableFindingId("title-missing")).toBe(true);
+    expect(isStableFindingId("content-schema")).toBe(true);
   });
 });
 
@@ -218,6 +218,26 @@ describe("clearFindings", () => {
     expect((db.$queryRaw.mock.calls[0]![0] as string[]).join("?")).toContain('"reviewerId" IS NULL');
   });
 
+  it("locks each task in id order and decides from a second read under the locks", async () => {
+    db.task.findMany.mockResolvedValueOnce([candidate({ id: "t2" }), candidate({ id: "t1" })]).mockResolvedValueOnce([candidate({ id: "t1", status: "IN_REVIEW", reviewerId: "u2" }), candidate({ id: "t2" })]);
+    await clearFindings(payload);
+    const locks = db.$executeRaw.mock.calls.map((c) => (c as unknown[]).slice(1).join());
+    expect(locks).toEqual(["task:t1", "task:t2"]);
+    expect(db.task.findMany.mock.calls[1]![0].where).toMatchObject({ id: { in: ["t1", "t2"] } });
+    expect(updateIds()).toEqual(["t2"]);
+    expect(comments().map((c) => [c.taskId, c.body])).toEqual([
+      ["t2", "The 2026-11-23 audit no longer finds this"],
+      ["t1", "The 2026-11-23 audit no longer finds this. It stays in review until the reviewer decides."],
+    ]);
+  });
+
+  it("a task finished since the first read gets nothing", async () => {
+    db.task.findMany.mockResolvedValueOnce([candidate({ status: "IN_REVIEW" })]).mockResolvedValueOnce([]);
+    await clearFindings(payload);
+    expect(updateIds()).toBeUndefined();
+    expect(db.taskComment.createMany).not.toHaveBeenCalled();
+  });
+
   it("only the tasks the update returned get comments and audits", async () => {
     db.task.findMany.mockResolvedValue([candidate(), candidate({ id: "t2" })]);
     db.$queryRaw.mockResolvedValue([{ id: "t2" }]);
@@ -235,8 +255,11 @@ describe("clearFindings", () => {
 
   it("keeps PageSpeed tasks when PageSpeed didn't run", async () => {
     db.auditReport.findFirst.mockResolvedValue(report({ findings: [], metrics: { pagesChecked: ["https://x.com/"], pageSpeed: null, pageSpeedError: "quota" } }));
-    db.task.findMany.mockResolvedValue([candidate({ findingId: "pagespeed-performance" }), candidate({ id: "t2", findingId: "sitemap-missing" })]);
+    const t2 = candidate({ id: "t2", findingId: "sitemap-missing" });
+    // The second read (under the locks) is of the tasks to clear only.
+    db.task.findMany.mockResolvedValueOnce([candidate({ findingId: "pagespeed-performance" }), t2]).mockResolvedValueOnce([t2]);
     await clearFindings(payload);
+    expect(db.task.findMany.mock.calls[1]![0].where.id).toEqual({ in: ["t2"] });
     expect(updateIds()).toEqual(["t2"]);
   });
 

@@ -32,7 +32,7 @@ describe("make a task from a finding", () => {
 });
 
 describe("clear job", () => {
-  it("task moved to review mid-job is not closed", async () => {
+  it("task moved to review mid-job is not closed, and is told it stays in review", async () => {
     const task = await prisma.task.findFirstOrThrow({ where: { brandId: scope.brandId, findingId: "title-missing" } });
     const original = prisma.$transaction.bind(prisma);
     // The candidates are read before this transaction opens: move the task to review in between.
@@ -45,11 +45,14 @@ describe("clear job", () => {
     expect(after.status).toBe("IN_REVIEW");
     expect(after.findingClearedAt).toBeNull();
     expect(await prisma.auditEvent.count({ where: { entityId: task.id, action: "task.cleared-by-audit" } })).toBe(0);
-    expect(await prisma.taskComment.count({ where: { taskId: task.id } })).toBe(0);
+    // Re-read under the lock: the comment matches what the task is now.
+    const comments = await prisma.taskComment.findMany({ where: { taskId: task.id } });
+    expect(comments.map((c) => c.body)).toEqual([expect.stringContaining("It stays in review until the reviewer decides.")]);
   });
 
   it("closes the task once the finding is gone and its page was re-read", async () => {
     const task = await prisma.task.findFirstOrThrow({ where: { brandId: scope.brandId, findingId: "title-missing" } });
+    await prisma.taskComment.deleteMany({ where: { taskId: task.id } });
     await prisma.task.update({ where: { id: task.id }, data: { status: "TODO", reviewerId: null, blockedReason: "waiting", blockedOnId: scope.userId } });
     await clearFindings({ workspaceId: scope.workspaceId, brandId: scope.brandId, reportId: laterReportId });
     const after = await prisma.task.findUniqueOrThrow({ where: { id: task.id } });
