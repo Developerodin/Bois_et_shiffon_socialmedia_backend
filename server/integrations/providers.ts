@@ -22,6 +22,11 @@ type Adapter = {
   exchange: (p: { code: string; clientId: string; secret: string; redirectUri: string }) => Promise<ConnectedAccount[]>;
   /** Swap a token that is about to expire for a fresh one. Absent = the token doesn't expire (Facebook Pages). */
   refresh?: (p: { credentials: ConnectedAccount["credentials"]; clientId: string; secret: string }) => Promise<Pick<ConnectedAccount, "credentials" | "tokenExpiresAt">>;
+  /**
+   * The token can't be refreshed and is used until it actually expires, then the account needs reconnecting
+   * (Meta Ads: a 60-day user token). Without it, an expiring token with no `refresh` is treated as refused 3 days early.
+   */
+  noRefresh?: true;
 };
 
 export class ProviderError extends Error {}
@@ -120,6 +125,71 @@ const pinterest: Adapter = {
       body: qs({ grant_type: "refresh_token", refresh_token: credentials.refreshToken }),
     });
     return { credentials: { accessToken: tok.access_token, refreshToken: tok.refresh_token ?? credentials.refreshToken }, tokenExpiresAt: expiry(tok.expires_in) };
+  },
+};
+
+/** A Meta ad account as /me/adaccounts lists it. account_status 1 = active. */
+export type MetaAdAccount = { id: string; name: string; currency: string; timezone_name: string; account_status: number };
+const AD_ACCOUNT_PAGES = 20; // ponytail: 20 × 100 accounts; an agency login with more sees the first 2,000
+
+/**
+ * The active ad accounts this Meta login can read. The token rides in a header and each page is built from the
+ * `after` cursor (never `paging.next`, which carries the token), so no URL here ever holds it.
+ */
+export async function metaAdAccounts(token: string): Promise<MetaAdAccount[]> {
+  const out: MetaAdAccount[] = [];
+  let after: string | undefined;
+  for (let i = 0; i < AD_ACCOUNT_PAGES; i++) {
+    const page = await call<{ data?: MetaAdAccount[]; paging?: { cursors?: { after?: string }; next?: string } }>(
+      `${GRAPH}/me/adaccounts?${qs({ fields: "id,name,currency,timezone_name,account_status", limit: "100", ...(after ? { after } : {}) })}`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    out.push(...(page.data ?? []).filter((a) => a.account_status === 1));
+    after = page.paging?.cursors?.after;
+    if (!page.paging?.next || !after) break; // `next` only says another page exists; it is never fetched
+  }
+  return out;
+}
+
+const META_ADS_SCOPES = ["ads_read"];
+const SIXTY_DAYS_S = 60 * 86_400;
+
+/**
+ * Meta ad accounts: their own login (same Meta app as META), asking ads_read only, so Facebook Pages logins never
+ * gain ad access. The 60-day user token can't be refreshed without the person (noRefresh); one connection per account.
+ */
+const metaAds: Adapter = {
+  label: "Meta Ads",
+  envId: "META_APP_ID",
+  envSecret: "META_APP_SECRET",
+  scopes: META_ADS_SCOPES,
+  noRefresh: true,
+  authorizeUrl: ({ clientId, redirectUri, state, scope }) =>
+    `https://www.facebook.com/v23.0/dialog/oauth?${qs({ client_id: clientId, redirect_uri: redirectUri, state, scope, response_type: "code" })}`,
+  async exchange({ code, clientId, secret, redirectUri }) {
+    const short = await call<{ access_token: string }>(
+      `${GRAPH}/oauth/access_token?${qs({ client_id: clientId, client_secret: secret, redirect_uri: redirectUri, code })}`,
+    );
+    const long = await call<{ access_token: string; expires_in?: number }>(
+      `${GRAPH}/oauth/access_token?${qs({ grant_type: "fb_exchange_token", client_id: clientId, client_secret: secret, fb_exchange_token: short.access_token })}`,
+    );
+    const auth = { headers: { authorization: `Bearer ${long.access_token}` } };
+    // The dialog lets people untick ads_read and still come back with a code.
+    const perms = await call<{ data?: { permission: string; status: string }[] }>(`${GRAPH}/me/permissions`, auth);
+    if (!perms.data?.some((p) => p.permission === "ads_read" && p.status === "granted")) {
+      throw new ProviderError("Meta didn't grant ad access. Connect again and allow access to your ad accounts.");
+    }
+    const accounts = await metaAdAccounts(long.access_token);
+    if (!accounts.length) throw new ProviderError("This Meta login has no active ad accounts. Sign in with the account that runs your ads.");
+    // Meta sometimes leaves expires_in out of the long-lived answer; it is 60 days.
+    const tokenExpiresAt = expiry(long.expires_in ?? SIXTY_DAYS_S);
+    return accounts.map((a) => ({
+      externalAccountId: a.id, // "act_123"
+      displayName: a.name,
+      credentials: { accessToken: long.access_token },
+      tokenExpiresAt,
+      scopes: META_ADS_SCOPES,
+    }));
   },
 };
 
@@ -307,6 +377,7 @@ export const PROVIDERS: Record<OAuthProvider, Adapter> = {
       }];
     },
   },
+  META_ADS: metaAds,
 };
 
 /** URL slug ↔ enum. Callback paths match the *_REDIRECT_URI values in .env. */
@@ -318,6 +389,7 @@ export const PROVIDER_SLUGS: Record<string, OAuthProvider> = {
   google_business: "GOOGLE_BUSINESS",
   reddit: "REDDIT",
   pinterest: "PINTEREST",
+  meta_ads: "META_ADS",
 };
 export const providerSlug = (p: IntegrationProvider) => p.toLowerCase();
 

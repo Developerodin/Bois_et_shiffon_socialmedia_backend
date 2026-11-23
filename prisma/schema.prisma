@@ -683,6 +683,7 @@ enum IntegrationProvider {
   REDDIT
   PINTEREST
   SHOPIFY // Admin API custom-app token, not OAuth: connected from its own form (server/catalog/shopify.ts)
+  META_ADS // Meta ad accounts (ads_read only), its own login apart from META: one connection per ad account
 }
 
 enum ConnectionStatus {
