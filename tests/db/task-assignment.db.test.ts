@@ -10,7 +10,9 @@ import { brandAccess } from "@/server/auth/access";
 import { SYSTEM_ROLES } from "@/server/auth/permissions.catalog";
 import { countUnread, listNotifications } from "@/server/notifications/list";
 import { changeProjectRole } from "@/server/services/project-members";
-import { changeMemberRole, deleteRole } from "@/server/services/workspace-admin";
+import { hashToken } from "@/server/auth/tokens";
+import { acceptInvitation } from "@/server/services/accounts";
+import { changeMemberRole, createRole, deleteRole, updateRole } from "@/server/services/workspace-admin";
 import { taskViewer, visibleTaskSql, visibleTasksAcrossSql } from "@/server/tasks/access";
 import { runTaskAction } from "@/server/tasks/actions";
 import { assignTasks } from "@/server/tasks/assign";
@@ -160,6 +162,7 @@ describe("assigning", () => {
     await expect(assignTasks(s, v, { ids: [task.unassigned!, "nope"], ownerId: user.cy })).rejects.toMatchObject({ status: 404 });
     const out = await assignTasks(s, v, { ids: [task.unassigned!, task.others!, done], ownerId: user.cid });
     expect(out.tasks.map((t) => t.id).sort()).toEqual(named("unassigned", "others"));
+    expect(out.skipped).toBe(1);
     expect((await prisma.task.findUniqueOrThrow({ where: { id: done } })).ownerId).toBeNull();
     expect(await prisma.notification.count({ where: { userId: user.cid, kind: "TASK_ASSIGNED", taskId: { in: [task.unassigned!, task.others!] } } })).toBe(2);
     const toRole = await assignTasks(s, v, { ids: [task.unassigned!], ownerRoleId: role.creator });
@@ -198,6 +201,27 @@ describe("roles", () => {
     await changeMemberRole(ws, user.admin!, await member("vi"), role.admin!);
     await changeMemberRole(ws, user.admin!, await member("vi"), role.member!);
     await expect(changeMemberRole(ws, user.cus!, await member("vi"), role.admin!)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("a non-owner shapes roles only with permissions they hold, and never a role they hold", async () => {
+    const shape = { name: "Helper", scope: "WORKSPACE" as const };
+    await expect(createRole(ws, user.cus!, { ...shape, permissions: ["brand.read", "tasks.all"] })).rejects.toMatchObject({ status: 403 });
+    const made = await createRole(ws, user.cus!, { ...shape, permissions: ["brand.read", "tasks.read"] });
+    await expect(updateRole(ws, user.cus!, made.id, { permissions: ["brand.read", "tasks.manage"] })).rejects.toMatchObject({ status: 403 });
+    await expect(updateRole(ws, user.cus!, role.custom!, { permissions: ["brand.read", "tasks.read"] })).rejects.toMatchObject({ status: 403, message: "You can't change a role you hold" });
+  });
+
+  it("an invitation stops working once its inviter could no longer give its role, or has left", async () => {
+    const gone = (await prisma.user.create({ data: { email: "gone@task-assignment.test" } })).id;
+    const invite = (email: string, roleId: string, invitedByUserId: string) =>
+      prisma.invitation.create({ data: { workspaceId: ws, email, roleId, invitedByUserId, tokenHash: hashToken(email), expiresAt: new Date(Date.now() + 86_400_000) } });
+    const refused = { status: 409, message: "This invitation is no longer valid. Ask for a new one." };
+    await invite("raised@task-assignment.test", role.admin!, user.cus!);
+    await expect(acceptInvitation({ token: "raised@task-assignment.test", password: "a-long-password-1" })).rejects.toMatchObject(refused);
+    await invite("left@task-assignment.test", role.member!, gone);
+    await expect(acceptInvitation({ token: "left@task-assignment.test", password: "a-long-password-1" })).rejects.toMatchObject(refused);
+    await invite("fine@task-assignment.test", role.member!, user.admin!);
+    expect(await acceptInvitation({ token: "fine@task-assignment.test", password: "a-long-password-1" })).toMatchObject({ workspaceId: ws });
   });
 
   it("the migration moves Commercial owner holders, invitations and tasks to Manager and drops the role", async () => {

@@ -26,19 +26,27 @@ export const taskOwnerRoleWhere = (workspaceId: string): Prisma.RoleWhereInput =
  * one (the client visibility clause relies on the project being on the task's brand). Owner, reviewer and blocked-on
  * must see the task as it will be after the write (`current` = the stored task, for a patch); an owning role must be
  * one of taskOwnerRoleWhere. Throws TaskError("Invalid <field>", 400).
- * The assign rule: without tasks.all, a new or changed owner can only be the caller or nobody, and no role (403).
+ * The assign rule, without tasks.all (else 403 task.assignNotAllowed): on create the owner is the caller or nobody, and
+ * no role; on a change the only owner moves are taking an unowned task with no role as yourself, or dropping your own
+ * ownership of a task you created (so you still see it after).
  */
 export async function checkTaskLinks(
   tx: Db,
   scope: { workspaceId: string; brandId: string; userId: string; perms: Set<PermissionKey>; clientReviewer?: boolean },
   input: TaskLinks,
-  current?: { reviewerId: string | null; workProjectId: string | null; ownerId?: string | null },
+  current?: { reviewerId: string | null; workProjectId: string | null; ownerId?: string | null; ownerRoleId?: string | null; createdById?: string | null },
 ): Promise<void> {
   if (!seesAllTasks(scope)) {
-    const ownerChanged = input.ownerId !== undefined && input.ownerId !== (current?.ownerId ?? null);
-    if ((ownerChanged && input.ownerId && input.ownerId !== scope.userId) || input.ownerRoleId) {
-      throw new TaskError("Only an admin can give a task to someone else.", 403, "task.assignNotAllowed");
-    }
+    const me = scope.userId;
+    const was = { ownerId: current?.ownerId ?? null, ownerRoleId: current?.ownerRoleId ?? null };
+    const ownerChanged = input.ownerId !== undefined && input.ownerId !== was.ownerId;
+    const roleChanged = input.ownerRoleId !== undefined && input.ownerRoleId !== was.ownerRoleId;
+    const allowed = !current
+      ? (!input.ownerId || input.ownerId === me) && !input.ownerRoleId
+      : !(ownerChanged || roleChanged) ||
+        (!input.ownerRoleId &&
+          ((input.ownerId === me && !was.ownerId && !was.ownerRoleId) || (was.ownerId === me && input.ownerId === null && current.createdById === me)));
+    if (!allowed) throw new TaskError("Only an admin can give a task to someone else.", 403, "task.assignNotAllowed");
   }
   const where = (id: string) => ({ id, workspaceId: scope.workspaceId, brandId: scope.brandId });
   const select = { id: true } as const;

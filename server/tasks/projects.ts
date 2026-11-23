@@ -5,7 +5,7 @@ import { prisma } from "@/server/db/prisma";
 import { brandMemberPerms, CLIENT_GRANT_WHERE, type Db } from "@/server/auth/permissions";
 import { contentWindow } from "@/server/content/window";
 import { brandOwners, lockRow, TX } from "@/server/services/publishing";
-import { visibleTaskSql, type TaskViewer } from "@/server/tasks/access";
+import { seesAllTasks, visibleTaskSql, type TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { isUniqueViolation, TaskError } from "@/server/tasks/errors";
 import { dateOf, day, dayOf, personOf, type TaskScope } from "@/server/tasks/service";
@@ -163,7 +163,13 @@ export async function getProject(scope: TaskScope, v: TaskViewer, projectId: str
 }
 
 /** A new project (tasks.manage). With a requestId, a repeat returns the project the first request made. */
+/** Sharing a project with clients, archiving it or giving it to someone else needs tasks.all (403 otherwise). */
+function adminOnlyUnless(scope: TaskScope, allowed: boolean) {
+  if (!allowed && !seesAllTasks(scope)) throw new TaskError("Only an admin can share, archive or hand over a project.", 403);
+}
+
 export async function createProject(scope: TaskScope, v: TaskViewer, input: WorkProjectInput): Promise<WorkProjectDetailDto> {
+  adminOnlyUnless(scope, !input.clientVisible && input.status !== "ARCHIVED" && (!input.ownerId || input.ownerId === scope.userId));
   const projectId = await prisma.$transaction(async (tx) => {
     if (input.requestId) {
       await lockRow(tx, "task", `project-request:${scope.brandId}:${input.requestId}`);
@@ -189,7 +195,7 @@ export async function createProject(scope: TaskScope, v: TaskViewer, input: Work
 
 /**
  * Edit a project (tasks.manage); status ARCHIVED archives it (no hard delete). Only changed fields are written and
- * checked. Unsharing it (clientVisible off) is refused while a client reviews, owns or unblocks an open task in it,
+ * checked. Sharing it with clients, archiving it or changing its owner needs tasks.all (else 403). Unsharing it (clientVisible off) is refused while a client reviews, owns or unblocks an open task in it,
  * since they would lose sight of that task.
  * ponytail: the check reads the project's tasks under the project lock, not each task's lock; a client made reviewer in
  * the same instant can slip through (they then keep the task through reviewerId anyway).
@@ -205,6 +211,7 @@ export async function patchProject(scope: TaskScope, v: TaskViewer, projectId: s
     const changed = Object.keys(data).filter((k) => !same(k));
     if (!changed.length) return;
     const write = Object.fromEntries(changed.map((k) => [k, data[k]]));
+    adminOnlyUnless(scope, !("clientVisible" in write || "ownerId" in write || write.status === "ARCHIVED"));
     await checkProjectLinks(tx, scope, write as { campaignId?: string | null; ownerId?: string | null });
     if (write.clientVisible === false) {
       const clients = await tx.brandMember.findMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, role: CLIENT_GRANT_WHERE }, select: { userId: true } });

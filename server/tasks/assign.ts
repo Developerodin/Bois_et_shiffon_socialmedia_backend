@@ -33,27 +33,28 @@ const OPEN: readonly string[] = OPEN_TASK_STATUSES;
  * checked once (checkTaskLinks, against no project: a client can't be given tasks in bulk), and a task in review can't
  * get its reviewer as owner (409 naming it, unless sole staff). Finished and cancelled tasks, and those that already
  * have this owner, are left alone. One update, one audit event per changed task, one TASK_ASSIGNED notice each.
- * Returns the changed tasks.
+ * Returns the changed tasks and `skipped`, the count of finished or cancelled ones left alone.
  */
-export async function assignTasks(scope: TaskScope, v: TaskViewer, input: AssignInput): Promise<{ tasks: TaskDto[] }> {
+export async function assignTasks(scope: TaskScope, v: TaskViewer, input: AssignInput): Promise<{ tasks: TaskDto[]; skipped: number }> {
   if (!v.all) throw new TaskError("Only an admin can assign tasks in bulk.", 403);
   const ownerRoleId = input.ownerRoleId ?? null;
   const ownerId = ownerRoleId ? null : (input.ownerId ?? null);
   const ids = [...input.ids].sort();
-  const changed = await prisma.$transaction(async (tx) => {
+  const { changed, skipped } = await prisma.$transaction(async (tx) => {
     await lockRows(tx, "task", ids);
     const seen = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT t.id FROM "Task" t WHERE t.id IN (${Prisma.join(ids)}) AND ${visibleTaskSql(v)}`);
     if (seen.length !== ids.length) throw new TaskError("Task not found", 404);
     await checkTaskLinks(tx, scope, { ownerId, ownerRoleId });
     const rows = await tx.task.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, status: true, reviewerId: true, ownerId: true, ownerRoleId: true } });
     const open = rows.filter((t) => OPEN.includes(t.status));
+    const skipped = rows.length - open.length;
     // The submitForReview rule, kept while in review (as patchTask): the owner doesn't review their own task.
     const clash = ownerId ? open.find((t) => t.status === "IN_REVIEW" && t.reviewerId === ownerId) : undefined;
     if (clash && !(await isSoleStaff(scope.workspaceId, scope.brandId, ownerId!))) {
       throw new TaskError(`The reviewer can't be the owner: "${clash.title}" is in review with them.`, 409, "task.reviewerIsOwner");
     }
     const toChange = open.filter((t) => t.ownerId !== ownerId || t.ownerRoleId !== ownerRoleId);
-    if (!toChange.length) return [];
+    if (!toChange.length) return { changed: [], skipped };
     const changeIds = toChange.map((t) => t.id);
     await tx.task.updateMany({ where: { id: { in: changeIds } }, data: { ownerId, ownerRoleId } });
     const events = await tx.auditEvent.createManyAndReturn({
@@ -70,10 +71,10 @@ export async function assignTasks(scope: TaskScope, v: TaskViewer, input: Assign
     });
     const to = await assigneesOf(tx, { workspaceId: scope.workspaceId, brandId: scope.brandId, ownerId, ownerRoleId });
     await notifyManyTx(tx, to, events.map((e) => ({ workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "TASK_ASSIGNED" as const, taskId: e.entityId, actorId: scope.userId, auditEventId: e.id })));
-    return changeIds;
+    return { changed: changeIds, skipped };
   }, TX);
-  if (!changed.length) return { tasks: [] };
+  if (!changed.length) return { tasks: [], skipped };
   const found = await prisma.task.findMany({ where: { id: { in: changed } }, include: TASK_DTO_INCLUDE });
   const byId = new Map(found.map((t) => [t.id, t]));
-  return { tasks: await toTaskDtos(scope, changed.flatMap((taskId) => byId.get(taskId) ?? [])) };
+  return { tasks: await toTaskDtos(scope, changed.flatMap((taskId) => byId.get(taskId) ?? [])), skipped };
 }

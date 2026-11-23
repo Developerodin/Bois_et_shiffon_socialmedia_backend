@@ -58,7 +58,9 @@ export async function runTaskAction(scope: TaskScope, v: TaskViewer, taskId: str
     const result = applyAction(rowOf(current), action, actor, { reviewerId: body.reviewerId, reason: body.reason, blockedOnId: body.blockedOnId, now: new Date().toISOString() });
     if (!result.ok) throw new TaskError(result.reason, 409, result.code);
     const { patch } = result;
-    await checkTaskLinks(tx, scope, { ownerId: patch.ownerId, reviewerId: patch.reviewerId, blockedOnId: patch.blockedOnId }, current);
+    // take moves a role's task to its taker; applyAction already checked they hold the role, so the assign rule sees no role.
+    const linksCurrent = action === "take" ? { ...current, ownerRoleId: null } : current;
+    await checkTaskLinks(tx, scope, { ownerId: patch.ownerId, reviewerId: patch.reviewerId, blockedOnId: patch.blockedOnId }, linksCurrent);
     if ((action === "approve" || action === "requestChanges") && !(await canBeAssigned(tx, scope, scope.userId, current))) {
       throw new TaskError("You can no longer review this task.", 403);
     }

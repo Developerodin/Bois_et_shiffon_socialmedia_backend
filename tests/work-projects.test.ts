@@ -78,6 +78,15 @@ beforeEach(() => {
 });
 
 describe("createProject", () => {
+  it("without tasks.all: no project made shared, archived or owned by someone else (403); owned by you is fine", async () => {
+    for (const body of [{ clientVisible: true }, { status: "ARCHIVED" as const }, { ownerId: "u2" }]) {
+      await expect(createProject(scope, v(), { name: "Launch", ...body })).rejects.toMatchObject({ status: 403 });
+    }
+    expect(db.workProject.create).not.toHaveBeenCalled();
+    await createProject(scope, v(), { name: "Launch", ownerId: "u1" });
+    expect(db.workProject.create).toHaveBeenCalledTimes(1);
+  });
+
   it("campaign of another brand → 400", async () => {
     const err = await createProject(scope, v(), { name: "Launch", campaignId: "c9" }).catch((e) => e);
     expect(err).toMatchObject({ status: 400, message: "Invalid campaignId" });
@@ -93,12 +102,14 @@ describe("createProject", () => {
   });
 
   it("foreign project owner → 400", async () => {
+    scope = scopeOf([...MANAGER, "tasks.all"]);
     const err = await createProject(scope, v(), { name: "Launch", ownerId: "u9" }).catch((e) => e);
     expect(err).toMatchObject({ status: 400, message: "Invalid ownerId" });
     expect(db.workProject.create).not.toHaveBeenCalled();
   });
 
   it("writes the project and an audit event", async () => {
+    scope = scopeOf([...MANAGER, "tasks.all"]);
     await createProject(scope, v(), { name: "Launch", ownerId: "u2", dueOn: "2026-12-20" });
     expect(db.workProject.create.mock.calls[0]![0].data).toMatchObject({ workspaceId: "w1", brandId: "b1", name: "Launch", ownerId: "u2", dueOn: new Date("2026-12-20T00:00:00Z") });
     expect(db.auditEvent.create.mock.calls[0]![0].data).toMatchObject({ action: "workProject.create", entityType: "WorkProject", entityId: "p1" });
@@ -164,6 +175,20 @@ describe("getProject", () => {
 });
 
 describe("patchProject", () => {
+  beforeEach(() => {
+    scope = scopeOf([...MANAGER, "tasks.all"]);
+  });
+
+  it("without tasks.all: no sharing, archiving or changing the owner (403); other fields are fine", async () => {
+    scope = scopeOf();
+    for (const body of [{ clientVisible: true }, { status: "ARCHIVED" }, { ownerId: "u2" }]) {
+      await expect(patchProject(scope, v(), "p1", body)).rejects.toMatchObject({ status: 403 });
+    }
+    expect(db.workProject.update).not.toHaveBeenCalled();
+    await patchProject(scope, v(), "p1", { name: "Relaunch" });
+    expect(db.workProject.update.mock.calls[0]![0].data).toEqual({ name: "Relaunch" });
+  });
+
   it("cannot hide a project a client is reviewing in", async () => {
     db.workProject.findFirst.mockResolvedValue(project({ clientVisible: true }));
     db.brandMember.findMany.mockResolvedValue([{ userId: "u5" }]);

@@ -197,14 +197,16 @@ describe("visibleTasksAcrossSql", () => {
 
 describe("managesTask", () => {
   const perms = (...p: PermissionKey[]) => ({ userId: "u1", perms: new Set(p) });
-  it("tasks.all manages any task; tasks.manage only one you own or created", () => {
+  it("tasks.manage + tasks.all manages any task; tasks.manage alone only one you own or created", () => {
     const other = { ownerId: "u2", createdById: "u3" };
-    expect(managesTask(perms("tasks.all"), other)).toBe(true);
+    expect(managesTask(perms("tasks.manage", "tasks.all"), other)).toBe(true);
+    expect(managesTask(perms("tasks.all"), other)).toBe(false);
+    expect(managesTask(perms("tasks.all"), { ownerId: "u1", createdById: "u1" })).toBe(false);
     expect(managesTask(perms("tasks.manage"), other)).toBe(false);
     expect(managesTask(perms("tasks.manage"), { ownerId: "u1", createdById: null })).toBe(true);
     expect(managesTask(perms("tasks.manage"), { ownerId: null, createdById: "u1" })).toBe(true);
     expect(managesTask(perms("tasks.read"), { ownerId: "u1", createdById: "u1" })).toBe(false);
-    expect(managesTask({ ...perms("tasks.all"), clientReviewer: true }, other)).toBe(false);
+    expect(managesTask({ ...perms("tasks.manage", "tasks.all"), clientReviewer: true }, other)).toBe(false);
   });
 });
 

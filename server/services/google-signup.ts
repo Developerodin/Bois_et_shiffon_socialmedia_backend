@@ -1,10 +1,11 @@
 import { prisma } from "@/server/db/prisma";
-import { ensurePersonalWorkspace, joinFromInvitation } from "@/server/services/accounts";
+import { ensurePersonalWorkspace, inviterCanStillGive, joinFromInvitation } from "@/server/services/accounts";
 
 /**
  * Runs once when "Continue with Google" creates a new account (Google has verified the email).
  * Pending invitations for that email are accepted — the verified address proves the same thing
- * the emailed invite link does. Everyone also gets a workspace of their own as Owner.
+ * the emailed invite link does; one whose inviter could no longer give its role is left unaccepted.
+ * Everyone also gets a workspace of their own as Owner.
  * ponytail: open sign-up means anyone with a Google account can create a workspace and run agents
  * (OpenAI cost). Add an allow-list, waitlist or per-workspace run quota before a public launch.
  */
@@ -13,9 +14,11 @@ export async function provisionGoogleUser(user: { id: string; email: string; nam
   return prisma.$transaction(async (tx) => {
     const invites = await tx.invitation.findMany({
       where: { email, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
+      include: { role: true },
     });
     let joined = 0;
     for (const inv of invites) {
+      if (!(await inviterCanStillGive(inv))) continue;
       const claimed = await tx.invitation.updateMany({
         where: { id: inv.id, acceptedAt: null, revokedAt: null },
         data: { acceptedAt: new Date() },

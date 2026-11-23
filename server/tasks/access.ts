@@ -28,11 +28,11 @@ export function taskViewer(scope: { userId: string; workspaceId: string; brandId
 }
 
 /**
- * May this person edit the task and run its manager actions: tasks.all, or tasks.manage on a task they own or created
- * (a role's task is taken first). actorRole, patchTask and lockTaskForEdit share it.
+ * May this person edit the task and run its manager actions: tasks.manage always, and then tasks.all or a task they own
+ * or created (a role's task is taken first). actorRole, patchTask and lockTaskForEdit share it.
  */
 export const managesTask = (scope: { userId: string; perms: Set<PermissionKey>; clientReviewer?: boolean }, t: { ownerId: string | null; createdById: string | null }) =>
-  seesAllTasks(scope) || (scope.perms.has("tasks.manage") && (t.ownerId === scope.userId || t.createdById === scope.userId));
+  scope.perms.has("tasks.manage") && (seesAllTasks(scope) || t.ownerId === scope.userId || t.createdById === scope.userId);
 
 /** A table alias for raw SQL: a plain identifier only, since it is spliced in as text. */
 function ref(alias: string) {

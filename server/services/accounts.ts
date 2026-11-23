@@ -24,7 +24,8 @@ export class AccountFlowError extends Error {
 /**
  * No handing out more than you hold: giving someone `role` (a grant, a role change or an invitation) needs every one of
  * its permissions (rolePermissions) among the actor's own, on that project (`brandId`) or in the workspace. Owners are
- * never blocked. Also covers raising your own role. Invitations are checked when made; accepting one grants its role.
+ * never blocked. Also covers raising your own role. Invitations are checked when made and again when accepted
+ * (inviterCanStillGive).
  */
 export async function assertCanGive(workspaceId: string, actorUserId: string, role: { isSystem: boolean; slug: string; permissions: string[] }, brandId?: string) {
   const actor = await memberRole(workspaceId, actorUserId);
@@ -32,6 +33,21 @@ export async function assertCanGive(workspaceId: string, actorUserId: string, ro
   const held = await effectivePermissions(workspaceId, actorUserId, brandId);
   if (rolePermissions(role).some((p) => !held.has(p as never))) {
     throw new AccountFlowError("You can't give a role with permissions you don't have", 403);
+  }
+}
+
+/**
+ * An invitation holds only while its inviter is still a member who could still give its role (assertCanGive, so owners
+ * are never blocked): a demoted or removed inviter's open invitations stop working. No inviter on record counts as gone.
+ */
+export async function inviterCanStillGive(inv: { workspaceId: string; brandId: string | null; invitedByUserId: string | null; role: { isSystem: boolean; slug: string; permissions: string[] } }) {
+  if (!inv.invitedByUserId || !(await memberRole(inv.workspaceId, inv.invitedByUserId))) return false;
+  try {
+    await assertCanGive(inv.workspaceId, inv.invitedByUserId, inv.role, inv.brandId ?? undefined);
+    return true;
+  } catch (e) {
+    if (e instanceof AccountFlowError) return false;
+    throw e;
   }
 }
 
@@ -160,6 +176,7 @@ export async function previewInvitation(rawToken: string) {
 
 export async function acceptInvitation(input: { token: string; name?: string; password?: string }) {
   const inv = await findOpenInvitation(input.token);
+  if (!(await inviterCanStillGive(inv))) throw new AccountFlowError("This invitation is no longer valid. Ask for a new one.", 409);
   const existing = await prisma.user.findUnique({ where: { email: inv.email } });
   const needsPassword = existing?.status !== "ACTIVE";
   if (needsPassword) {

@@ -52,8 +52,22 @@ async function assertCanGrant(workspaceId: string, actorUserId: string, permissi
   }
 }
 
+/**
+ * No making a role stronger than yourself (assertCanGive on the permissions put in), and no editing a role you hold
+ * (else you could raise yourself). Owners are never blocked.
+ */
+async function assertCanShapeRole(workspaceId: string, actorUserId: string, permissions: string[] | undefined, heldRoleId?: string) {
+  const actor = await memberRole(workspaceId, actorUserId);
+  if (actor?.role?.isSystem && actor.role.slug === "owner") return;
+  if (heldRoleId && (actor?.role?.id === heldRoleId || (await prisma.brandMember.findFirst({ where: { workspaceId, userId: actorUserId, roleId: heldRoleId }, select: { id: true } })))) {
+    throw new AccountFlowError("You can't change a role you hold", 403);
+  }
+  if (permissions) await assertCanGive(workspaceId, actorUserId, { isSystem: false, slug: "", permissions });
+}
+
 export async function createRole(workspaceId: string, actorUserId: string, input: z.infer<typeof RoleInput>) {
   await assertCanGrant(workspaceId, actorUserId, input.permissions);
+  await assertCanShapeRole(workspaceId, actorUserId, input.permissions);
   assertFitsScope(input.scope, input.permissions);
   const base = slugify(input.name);
   const taken = await prisma.role.count({ where: { workspaceId, slug: { startsWith: base } } });
@@ -90,6 +104,7 @@ export async function updateRole(
     }
   }
   await assertCanGrant(workspaceId, actorUserId, input.permissions);
+  await assertCanShapeRole(workspaceId, actorUserId, input.permissions, role.id);
   assertFitsScope(role.scope, input.permissions);
   // A client sees only what they review or what is shared with them: never every task.
   if (isClientGrant(role) && input.permissions?.includes("tasks.all")) {

@@ -364,6 +364,22 @@ describe("patchTask", () => {
     expect(updated()).toEqual({ ownerId: null });
   });
 
+  it("without tasks.all: only taking an unowned, role-free task or dropping your own on a task you made", async () => {
+    // Someone else's task you created: can't take it over or clear their ownership.
+    db.task.findUnique.mockResolvedValue(row({ ownerId: "u2", createdById: "u1" }));
+    await expect(patchTask(scope, v, "t1", { ownerId: "u1" })).rejects.toMatchObject({ status: 403, code: "task.assignNotAllowed" });
+    await expect(patchTask(scope, v, "t1", { ownerId: null })).rejects.toMatchObject({ status: 403 });
+    // A role's task: taking it is the take action, not a PATCH.
+    db.task.findUnique.mockResolvedValue(row({ ownerId: null, ownerRoleId: "r1", createdById: "u1" }));
+    await expect(patchTask(scope, v, "t1", { ownerId: "u1" })).rejects.toMatchObject({ status: 403 });
+    // Your own task someone else created: dropping it would hide it from you.
+    db.task.findUnique.mockResolvedValue(row({ ownerId: "u1", createdById: "u2" }));
+    await expect(patchTask(scope, v, "t1", { ownerId: null })).rejects.toMatchObject({ status: 403 });
+    db.task.findUnique.mockResolvedValue(row({ ownerId: null, createdById: "u1" }));
+    await patchTask(scope, v, "t1", { ownerId: "u1" });
+    expect(updated()).toEqual({ ownerId: "u1" });
+  });
+
   it("without tasks.all, a task you neither own nor made can't be edited (403); with it, it can", async () => {
     db.task.findUnique.mockResolvedValue(row({ ownerId: "u2", createdById: "u3" }));
     await expect(patchTask(scope, v, "t1", { title: "New" })).rejects.toMatchObject({ status: 403 });
