@@ -92,6 +92,11 @@ unflagged but permission-checked, so it is harmless with the web flag off.
   brand), screenshot upload (needs bucket CORS), notes to tasks (needs AI credits).
 - Second four-lens review 2026-11-23 fixed: owner made their own reviewer while in review (409 `task.reviewerIsOwner`),
   month 00/13 dates crashing date checks (now 400).
+- Merged to main 2026-11-23 (server 7bf4717, web 9e76bb7, mobile f843cdd); not pushed. Third four-lens review on main
+  fixed: whoever sent a task for review can't approve it unless sole staff (409 `task.selfApproval`; closes hand the
+  task away, name yourself reviewer, submit, approve), and the bell count no longer seq-scans Notification (measured
+  38 ms → 0.08 ms at 1M rows). Known: the panel still shows Approve to the submitter (allowedActions doesn't know who
+  submitted); the click answers with the refusal.
 - Storage bucket CORS must allow browser PUT for screenshot uploads.
 - Set `PLANNER_HAND_CHANNELS=on` only after the phone build with the LinkedIn and X labels is released.
 - Tell the owner about the extra name-only "New project" form.
