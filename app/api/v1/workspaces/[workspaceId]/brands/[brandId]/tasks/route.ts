@@ -3,7 +3,7 @@ import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-r
 import { taskViewer } from "@/server/tasks/access";
 import { taskProblem } from "@/server/tasks/errors";
 import { ListQuery, listTasks, todayTasks } from "@/server/tasks/list";
-import { createTask, TaskInput } from "@/server/tasks/service";
+import { createTask, limitTaskWrites, TaskInput } from "@/server/tasks/service";
 
 /** A view of the tasks the caller can see, 50 a page (tasks.read); `view=today` gives Today's counts and first rows. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
@@ -25,6 +25,7 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
   try {
     const scope = await authorizeBrandRoute(request, context.params, "tasks.manage");
     if (scope instanceof Response) return scope;
+    await limitTaskWrites("create", scope.userId);
     const body = TaskInput.safeParse(await request.json().catch(() => null));
     if (!body.success) return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid task", status: 400, detail: body.error.issues[0]?.message });
     return Response.json({ task: await createTask(scope, taskViewer(scope), body.data) }, { status: 201 });

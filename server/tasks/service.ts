@@ -2,6 +2,7 @@ import "server-only";
 import type { Prisma, Task } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
+import { hitRateLimit } from "@/server/auth/rate-limit";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { TEAM_MEMBER } from "@/server/content/person-name";
 import { notifyTx } from "@/server/notifications/tasks";
@@ -150,6 +151,11 @@ export async function toTaskDtos(scope: TaskScope, rows: TaskWithLinks[], people
 }
 
 const notFound = () => new TaskError("Task not found", 404);
+
+/** 60 a minute per person for each kind of task write (create, batch, comment), so a stuck client can't flood a brand. */
+export async function limitTaskWrites(kind: "create" | "batch" | "comment", userId: string) {
+  if (!(await hitRateLimit(`tasks.${kind}:${userId}`, 60, 60_000)).allowed) throw new TaskError("Too many changes at once. Wait a minute.", 429);
+}
 
 /** One task with its checklist lines (position, id) and photos (signed URLs); list rows carry only checklist counts. */
 export async function getTask(scope: TaskScope, v: TaskViewer, taskId: string): Promise<TaskDetailDto> {

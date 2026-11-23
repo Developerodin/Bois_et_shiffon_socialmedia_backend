@@ -27,6 +27,7 @@ vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), signedMediaUrl: m.signed }));
 vi.mock("@/server/services/project-members", () => ({ listProjectPeople: m.people }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: m.authorize }));
+vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>()), hitRateLimit: vi.fn(async () => ({ allowed: true, count: 1 })) }));
 
 import { AccessDeniedError } from "@/server/auth/errors";
 import { brandOwners } from "@/server/services/publishing";

@@ -16,6 +16,7 @@ const db = vi.hoisted(() => {
 const m = vi.hoisted(() => ({ authorize: vi.fn(), owners: vi.fn() }));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: m.authorize }));
+vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>()), hitRateLimit: vi.fn(async () => ({ allowed: true, count: 1 })) }));
 vi.mock("@/server/services/publishing", async (orig) => ({ ...(await orig<object>()), brandOwners: m.owners }));
 
 import { AccessDeniedError } from "@/server/auth/errors";
