@@ -1,7 +1,7 @@
 import type { ContentChannel } from "@prisma/client";
 import { z } from "zod";
 import { NothingToDoError, startAgentRun } from "@/server/agents/engine";
-import { CONTENT_PROMPT_VERSION, plannerSystem } from "@/server/agents/prompts/content";
+import { HAND_CHANNELS, plannerPromptVersion, plannerSystem } from "@/server/agents/prompts/content";
 import type { AgentDefinition } from "@/server/agents/types";
 import { campaignsForPlanning } from "@/server/catalog/campaigns";
 import { linkedProducts } from "@/server/catalog/linked";
@@ -13,9 +13,8 @@ import { prisma } from "@/server/db/prisma";
 // No INSTAGRAM_REEL: a planned reel would have a script but no video to post. Reels are made in the app's Studio.
 // Stories are planned: the Creator writes their frames from the brand's photos (paid by the Planner's own charge).
 const CHANNELS = ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "FACEBOOK_POST", "PINTEREST_PIN", "THREADS_POST", "INSTAGRAM_STORY"] as const;
-// LinkedIn and X are posted by hand; the Planner offers them only with PLANNER_HAND_CHANNELS=on, turned on once the
-// phone build that names them is released. Posts on them (made by hand, publishing, limits) work either way.
-const HAND_CHANNELS = ["LINKEDIN_POST", "X_POST"] as const;
+// HAND_CHANNELS (LinkedIn and X) are posted by hand; the Planner offers them only with PLANNER_HAND_CHANNELS=on, turned on
+// once the phone build that names them is released. Posts on them (made by hand, publishing, limits) work either way.
 const handChannelsOn = () => process.env.PLANNER_HAND_CHANNELS === "on";
 const planSchema = (hand: boolean) =>
   z.object({
@@ -89,7 +88,7 @@ export const plannerAgent: AgentDefinition = {
     await ctx.log("INFO", `Planning ${opps.length} idea(s)${wanted.length ? ` and ${wanted.length} campaign(s) or priorities` : ""}`);
     const out = await ctx.ai.generateObject({
       workflowId: "planner.plan",
-      promptVersion: CONTENT_PROMPT_VERSION,
+      promptVersion: plannerPromptVersion(hand),
       schema: planSchema(hand),
       schemaName: "content_plan",
       system: plannerSystem(hand),

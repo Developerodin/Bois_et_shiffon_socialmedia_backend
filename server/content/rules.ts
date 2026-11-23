@@ -1,5 +1,5 @@
 import type { ContentChannel } from "@prisma/client";
-import { CAPTION_LIMITS } from "@/shared";
+import { CAPTION_LIMITS, CHANNEL_TEXT_MAX } from "@/shared";
 
 /**
  * Deterministic content checks (no AI): same draft in → same result out.
@@ -57,7 +57,10 @@ export function checkDraft(channel: ContentChannel, body: DraftBody): CheckResul
     if (firstLine.length > LIMITS.previewChars) add("First line", "warn", `${firstLine.length} characters; only the first ${LIMITS.previewChars} show before "more".`);
   }
   if (body.hashtags.length > LIMITS.hashtagsMax) {
-    add("Hashtags", channel.startsWith("INSTAGRAM") ? "blocker" : "warn", `${body.hashtags.length} hashtags; Instagram allows ${LIMITS.hashtagsMax} since Dec 2025, and they are labels, not reach.`);
+    const instagram = channel.startsWith("INSTAGRAM");
+    add("Hashtags", instagram ? "blocker" : "warn", instagram
+      ? `${body.hashtags.length} hashtags; Instagram allows ${LIMITS.hashtagsMax} since Dec 2025, and they are labels, not reach.`
+      : `${body.hashtags.length} hashtags; keep to ${LIMITS.hashtagsMax} at most: they are labels, not reach.`);
   }
 
   const asks = new Set((caption.match(CTA) ?? []).map((m) => m.toLowerCase())).size;
@@ -71,11 +74,11 @@ export function checkDraft(channel: ContentChannel, body: DraftBody): CheckResul
     if (!body.pinTitle?.trim()) add("Pin title", "blocker", "Pins need a title.");
     else if (body.pinTitle.length > LIMITS.pinTitleMax) add("Pin title", "warn", `${body.pinTitle.length} characters; keep it under ${LIMITS.pinTitleMax}.`);
   }
-  if (channel === "THREADS_POST" && caption.length > LIMITS.threadsMax) add("Threads length", "blocker", `${caption.length} characters; Threads allows ${LIMITS.threadsMax}.`);
+  if (channel === "THREADS_POST" && caption.length > CHANNEL_TEXT_MAX.THREADS_POST) add("Threads length", "blocker", `${caption.length} characters; Threads allows ${CHANNEL_TEXT_MAX.THREADS_POST}.`);
   // LinkedIn and X count the whole post, hashtags included (as posted: caption, blank line, hashtags).
   const posted = caption.length + (body.hashtags.length ? 2 + body.hashtags.join(" ").length : 0);
-  if (channel === "LINKEDIN_POST" && posted > LIMITS.linkedinMax) add("LinkedIn length", "blocker", `${posted} characters with the hashtags; LinkedIn allows ${LIMITS.linkedinMax}.`);
-  if (channel === "X_POST" && posted > LIMITS.xMax) add("X length", "blocker", `${posted} characters with the hashtags; X allows ${LIMITS.xMax}.`);
+  if (channel === "LINKEDIN_POST" && posted > CHANNEL_TEXT_MAX.LINKEDIN_POST) add("LinkedIn length", "blocker", `${posted} characters with the hashtags; LinkedIn allows ${CHANNEL_TEXT_MAX.LINKEDIN_POST}.`);
+  if (channel === "X_POST" && posted > CHANNEL_TEXT_MAX.X_POST) add("X length", "blocker", `${posted} characters with the hashtags; X allows ${CHANNEL_TEXT_MAX.X_POST}.`);
   if (channel === "INSTAGRAM_CAROUSEL" && (body.slides?.length ?? 0) < 3) add("Carousel", "blocker", "A carousel needs at least 3 slides.");
   if (channel === "INSTAGRAM_REEL" && (body.script?.length ?? 0) < 2) add("Reel script", "blocker", "A Reel needs a beat-by-beat script.");
   // No AI looks at the video itself, so this stays open for the person sending it (the brief: unresolved checks stay visible).

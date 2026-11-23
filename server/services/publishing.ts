@@ -5,7 +5,7 @@ import { prisma } from "@/server/db/prisma";
 import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefused } from "@/server/integrations/publishers";
 import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
-import { CAPTION_LIMITS, safeHttpUrl } from "@/shared";
+import { CAPTION_LIMITS, CHANNEL_TEXT_MAX, safeHttpUrl } from "@/shared";
 import { brandMemberPerms, hasOtherApprover, isClientMember, requirePermission } from "@/server/auth/permissions";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { linkedProducts } from "@/server/catalog/linked";
@@ -67,10 +67,7 @@ const IMAGES: Record<ContentChannel, [number, number]> = {
   LINKEDIN_POST: [0, 1],
   X_POST: [0, 1],
 };
-const TEXT_LIMIT: Partial<Record<ContentChannel, number>> = {
-  THREADS_POST: CAPTION_LIMITS.threadsMax, INSTAGRAM_POST: 2200, INSTAGRAM_CAROUSEL: 2200, INSTAGRAM_REEL: 2200,
-  LINKEDIN_POST: CAPTION_LIMITS.linkedinMax, X_POST: CAPTION_LIMITS.xMax,
-};
+const TEXT_LIMIT: Partial<Record<ContentChannel, number>> = CHANNEL_TEXT_MAX;
 const LIVE: Prisma.EnumPublicationStatusFilter = { in: ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PENDING_VERIFY", "PARTIAL"] };
 
 export function publishRequirements(channel: ContentChannel) {

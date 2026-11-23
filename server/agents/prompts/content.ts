@@ -23,10 +23,22 @@ When live or upcoming offers are given, they are the only offers that exist, bes
 score 0-100 = fit × timing × evidence. Suggest channels from: INSTAGRAM_POST, INSTAGRAM_CAROUSEL, INSTAGRAM_REEL, FACEBOOK_POST, PINTEREST_PIN, THREADS_POST.
 When INSTAGRAM_REEL is among the channels, start the angle with the reel's hook type and content pillar in brackets, then the angle: "[question · care] Votre table survivra-t-elle aux fêtes ?". Hook types: question, surprising fact, result, story. Pillars: product, care, styling, craft, behind the scenes, seasonal.`;
 
-/** handChannels: offer LinkedIn and X (posted by hand), only when PLANNER_HAND_CHANNELS=on (see the Planner). */
+/**
+ * Channels posted by hand; the Planner offers them only with PLANNER_HAND_CHANNELS=on (see the Planner, which builds its
+ * channel list from this too). Each one's line in the Planner's prompt.
+ */
+export const HAND_CHANNELS = ["LINKEDIN_POST", "X_POST"] as const;
+const HAND_CHANNEL_USE: Record<(typeof HAND_CHANNELS)[number], string> = {
+  LINKEDIN_POST: "LinkedIn (LINKEDIN_POST) for the craft and the business behind it",
+  X_POST: "X (X_POST) for short news",
+};
+/** The version logged with the Planner's calls: the prompt differs with the hand channels on. */
+export const plannerPromptVersion = (handChannels: boolean) => `${CONTENT_PROMPT_VERSION}${handChannels ? "+hand" : ""}`;
+
+/** handChannels: offer HAND_CHANNELS, only when PLANNER_HAND_CHANNELS=on (see the Planner). */
 export const plannerSystem = (handChannels: boolean) => `${SHARED}
 
-You are the Planner. Turn each opportunity into 1 to 3 posts across channels so the month has variety: mix formats (photos for the feed, carousels for saves, Pins for search, Facebook for community, Threads for conversation, ${handChannels ? "LinkedIn (LINKEDIN_POST) for the craft and the business behind it, X (X_POST) for short news, " : ""}now and then an Instagram story (INSTAGRAM_STORY: 3 to 5 full-screen frames that show one product and lead to its page); no Reels, those are made in the Studio) and content pillars from the content strategy.
+You are the Planner. Turn each opportunity into 1 to 3 posts across channels so the month has variety: mix formats (photos for the feed, carousels for saves, Pins for search, Facebook for community, Threads for conversation, ${handChannels ? HAND_CHANNELS.map((c) => `${HAND_CHANNEL_USE[c]}, `).join("") : ""}now and then an Instagram story (INSTAGRAM_STORY: 3 to 5 full-screen frames that show one product and lead to its page); no Reels, those are made in the Studio) and content pillars from the content strategy.
 Each post: a working title (internal, not a caption), the channel, the pillar, and a one-line angle. Do not pick dates; the system schedules them.
 When campaigns and priorities are given, plan the number of posts each asks for ("posts") with its id in campaignId and opportunityId "". Tie an idea's post to a campaign (its opportunityId and the campaign's id) only when the idea is about it; otherwise campaignId is "".`;
 

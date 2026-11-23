@@ -18,6 +18,9 @@ describe("content rules", () => {
 
   it("blocks over-limit hashtags, empty captions, thin carousels and missing pin titles", () => {
     expect(overallOf(checkDraft("INSTAGRAM_POST", { ...good, hashtags: Array.from({ length: 8 }, (_, i) => `#t${i}`) }))).toBe("BLOCKER");
+    const linkedinTags = checkDraft("LINKEDIN_POST", { ...good, hashtags: Array.from({ length: 8 }, (_, i) => `#t${i}`) }).find((x) => x.check === "Hashtags");
+    expect(linkedinTags?.status).toBe("warn");
+    expect(linkedinTags?.note).not.toContain("Instagram");
     expect(overallOf(checkDraft("FACEBOOK_POST", { ...good, caption: "" }))).toBe("BLOCKER");
     expect(overallOf(checkDraft("INSTAGRAM_CAROUSEL", { ...good, slides: ["a"] }))).toBe("BLOCKER");
     expect(checkDraft("PINTEREST_PIN", good).map((x) => x.check)).toContain("Pin title");

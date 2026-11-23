@@ -130,7 +130,7 @@ describe("Planner and campaigns", () => {
   });
 
   it("offers LinkedIn and X only when PLANNER_HAND_CHANNELS=on", async () => {
-    type Call = { system: string; schema: { safeParse: (v: unknown) => { success: boolean } } };
+    type Call = { system: string; promptVersion: string; schema: { safeParse: (v: unknown) => { success: boolean } } };
     const offered = (call: Call, channel: string) => call.schema.safeParse({ posts: [post({ channel })] }).success;
     try {
       vi.stubEnv("PLANNER_HAND_CHANNELS", "");
@@ -141,6 +141,7 @@ describe("Planner and campaigns", () => {
       expect(offered(off, "INSTAGRAM_POST")).toBe(true);
       expect(off.system).not.toContain("LINKEDIN_POST");
       expect(off.system).not.toContain("X_POST");
+      expect(off.promptVersion).not.toContain("+hand");
 
       vi.stubEnv("PLANNER_HAND_CHANNELS", "on");
       await plannerAgent.run(ctx(), {});
@@ -149,6 +150,7 @@ describe("Planner and campaigns", () => {
       expect(offered(on, "X_POST")).toBe(true);
       expect(on.system).toContain("LINKEDIN_POST");
       expect(on.system).toContain("X_POST");
+      expect(on.promptVersion).toMatch(/\+hand$/);
     } finally {
       vi.unstubAllEnvs();
     }
