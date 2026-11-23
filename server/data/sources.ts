@@ -6,7 +6,7 @@ import { prisma } from "@/server/db/prisma";
 import { problemResponse } from "@/server/api/http-error";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { enqueueJob, type Lease } from "@/server/jobs/queue";
-import { ReconnectNeeded } from "@/server/services/connections";
+import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
 
 /**

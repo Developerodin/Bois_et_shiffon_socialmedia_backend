@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { shopifyQuery } from "@/server/catalog/shopify";
-import { ReconnectNeeded } from "@/server/services/connections";
+import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import type { SyncStop } from "@/server/data/sync-stop";
 
 /**

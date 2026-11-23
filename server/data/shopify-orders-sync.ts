@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { IntegrationConnection } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
-import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
+import { accessToken, markReconnect } from "@/server/services/connections";
+import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import { fetchOrders, type ShopOrderRow } from "./shopify-orders";
 import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from "./sources";
 

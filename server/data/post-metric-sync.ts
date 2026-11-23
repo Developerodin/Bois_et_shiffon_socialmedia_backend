@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
-import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
+import { accessToken, markReconnect } from "@/server/services/connections";
+import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import { readPostMetrics, type ConnectionToRead, type MetricsProvider, type PostMetrics } from "./post-metrics";
 import { brandTimeZone, registerSync, stopReason, zoneToday, type SyncContext, type SyncOutcome } from "./sources";
 import type { SyncStop } from "./sync-stop";

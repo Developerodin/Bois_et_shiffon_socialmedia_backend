@@ -11,7 +11,8 @@ const STATE_TTL_MS = 10 * 60_000; // DEC-017: ≤10 min
 
 export class ConnectionError extends Error {}
 /** The account's access is gone (expired, revoked on the platform): a person must reconnect it. */
-export class ReconnectNeeded extends Error {}
+export { ReconnectNeeded } from "@/server/services/reconnect-needed";
+import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 
 const REFRESH_AHEAD_MS = 3 * 86_400_000;
 

@@ -5,7 +5,8 @@ import { prisma } from "@/server/db/prisma";
 import { fetchSearchWindow, listSites, SearchConsoleError, type SearchDayResult } from "@/server/data/search-console";
 import { backfillPlan, dailyWindow, enqueueBackfill, registerSync, stopReason, zoneToday } from "@/server/data/sources";
 import type { SyncStop } from "@/server/data/sync-stop";
-import { accessToken, ReconnectNeeded } from "@/server/services/connections";
+import { accessToken } from "@/server/services/connections";
+import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 
 /**
  * Search Console's side of the data sync (docs/superpowers/plans/2026-11-23-phase-2-data.md, Task 2): the SEARCH_CONSOLE
