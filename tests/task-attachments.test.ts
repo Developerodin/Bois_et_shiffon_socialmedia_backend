@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "@prisma/client";
 
 const db = vi.hoisted(() => {
   const d = {
@@ -15,6 +16,7 @@ const db = vi.hoisted(() => {
 });
 const m = vi.hoisted(() => ({ authorize: vi.fn() }));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
+vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), signedMediaUrl: async (key: string) => `https://signed/${key}` }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: m.authorize }));
 
 import { AccessDeniedError } from "@/server/auth/errors";
@@ -41,7 +43,7 @@ beforeEach(() => {
   routeScope = scopeOf(MANAGER);
   db.$queryRaw.mockResolvedValue([{ id: "t1" }]);
   db.task.findUnique.mockResolvedValue({ title: "Fix menu", ownerId: "u2" });
-  db.mediaUpload.findFirst.mockResolvedValue({ id: "up1" });
+  db.mediaUpload.findFirst.mockResolvedValue({ id: "up1", key: "w1/b1/uploads/a.jpg" });
   db.taskAttachment.findFirst.mockResolvedValue(attachment());
   db.taskAttachment.create.mockImplementation(async ({ data }: { data: object }) => attachment(data as Record<string, unknown>));
   db.taskAttachment.delete.mockResolvedValue(attachment());
@@ -57,9 +59,15 @@ describe("attachments", () => {
     const dto = await addAttachment(manager, taskViewer(manager), "t1", { mediaUploadId: "up1", role: "AFTER" });
     expect(db.mediaUpload.findFirst.mock.calls[0]![0].where).toEqual({ id: "up1", workspaceId: "w1", brandId: "b1", status: "VERIFIED", kind: "photo", productId: null });
     expect(db.taskAttachment.create.mock.calls[0]![0].data).toEqual({ taskId: "t1", mediaUploadId: "up1", role: "AFTER", createdById: "u1" });
-    expect(dto).toEqual({ id: "at1", mediaUploadId: "up1", role: "AFTER", createdById: "u1", createdAt: "2026-11-23T10:00:00.000Z" });
+    expect(dto).toEqual({ id: "at1", mediaUploadId: "up1", role: "AFTER", createdById: "u1", createdAt: "2026-11-23T10:00:00.000Z", url: "https://signed/w1/b1/uploads/a.jpg" });
     expect(db.$executeRaw).toHaveBeenCalled();
     expect(audits()[0]).toMatchObject({ action: "task.attachment.add", entityType: "Task", entityId: "t1", metadata: { title: "Fix menu", attachmentId: "at1", role: "AFTER" } });
+  });
+
+  it("an upload purged between the re-read and the insert (P2003) → 400, not 500", async () => {
+    db.taskAttachment.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError("FK", { code: "P2003", clientVersion: "x" }));
+    await expect(addAttachment(manager, taskViewer(manager), "t1", { mediaUploadId: "up1", role: "BEFORE" })).rejects.toMatchObject({ status: 400, message: "Invalid mediaUploadId" });
+    expect(db.auditEvent.create).not.toHaveBeenCalled();
   });
 
   it("attach refuses a product photo", async () => {

@@ -7,7 +7,8 @@ const db = vi.hoisted(() => {
     workProject: { findFirst: vi.fn() },
     contentItem: { findFirst: vi.fn() },
     auditReport: { findFirst: vi.fn() },
-    taskChecklistItem: { groupBy: vi.fn() },
+    taskChecklistItem: { groupBy: vi.fn(), findMany: vi.fn() },
+    taskAttachment: { findMany: vi.fn() },
     taskComment: { create: vi.fn() },
     auditEvent: { create: vi.fn() },
     notification: { createMany: vi.fn() },
@@ -61,6 +62,8 @@ beforeEach(() => {
   db.task.findUnique.mockResolvedValue(row());
   db.task.update.mockResolvedValue({});
   db.taskChecklistItem.groupBy.mockResolvedValue([]);
+  db.taskChecklistItem.findMany.mockResolvedValue([]);
+  db.taskAttachment.findMany.mockResolvedValue([]);
   db.taskComment.create.mockResolvedValue({ id: "c1" });
   db.auditEvent.create.mockResolvedValue({ id: "a1" });
   db.workspaceMember.findFirst.mockImplementation(async ({ where }: Where) => (staff.has(where.userId as string) ? { id: "m" } : null));

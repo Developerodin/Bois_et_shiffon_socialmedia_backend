@@ -7,7 +7,8 @@ const db = vi.hoisted(() => {
     workProject: { findFirst: vi.fn() },
     contentItem: { findFirst: vi.fn() },
     auditReport: { findFirst: vi.fn() },
-    taskChecklistItem: { groupBy: vi.fn() },
+    taskChecklistItem: { groupBy: vi.fn(), findMany: vi.fn() },
+    taskAttachment: { findMany: vi.fn() },
     auditEvent: { create: vi.fn() },
     notification: { createMany: vi.fn() },
     workspaceMember: { findFirst: vi.fn(), findMany: vi.fn() },
@@ -20,14 +21,15 @@ const db = vi.hoisted(() => {
   d.$transaction.mockImplementation(async (fn: (tx: typeof d) => unknown) => fn(d));
   return d;
 });
-const m = vi.hoisted(() => ({ people: vi.fn(), authorize: vi.fn() }));
+const m = vi.hoisted(() => ({ people: vi.fn(), authorize: vi.fn(), signed: vi.fn(async (key: string) => `https://signed/${key}`) }));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
+vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), signedMediaUrl: m.signed }));
 vi.mock("@/server/services/project-members", () => ({ listProjectPeople: m.people }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: m.authorize }));
 
 import { AccessDeniedError } from "@/server/auth/errors";
 import { brandOwners } from "@/server/services/publishing";
-import { createTask, getTask, patchTask } from "@/server/tasks/service";
+import { createTask, getTask, patchTask, toTaskDtos } from "@/server/tasks/service";
 import { TaskError } from "@/server/tasks/errors";
 import { notifyTx } from "@/server/notifications/tasks";
 import { taskViewer } from "@/server/tasks/access";
@@ -81,6 +83,8 @@ beforeEach(() => {
   db.contentItem.findFirst.mockResolvedValue(null);
   db.auditReport.findFirst.mockResolvedValue(null);
   db.taskChecklistItem.groupBy.mockResolvedValue([]);
+  db.taskChecklistItem.findMany.mockResolvedValue([]);
+  db.taskAttachment.findMany.mockResolvedValue([]);
   db.auditEvent.create.mockResolvedValue({ id: "a1" });
   db.workspaceMember.findFirst.mockImplementation(async ({ where }: Where) => (staff.has(where.userId as string) ? { id: "m" } : null));
   db.workspaceMember.findMany.mockImplementation(async () => [...staff].filter((u) => u !== "u3").map((userId) => ({ userId, role: "ADMIN", roleRef: { permissions: ["brand.read", "tasks.read"] } })));
@@ -151,6 +155,29 @@ describe("getTask", () => {
     expect(dto.checklist).toEqual({ done: 1, total: 3 });
     expect(dto.dueOn).toBe("2026-11-30");
     expect(dto.actions).toContain("cancel");
+  });
+
+  it("the single-task read returns checklist lines in (position, id) order and attachments with a signed URL", async () => {
+    db.taskChecklistItem.findMany.mockResolvedValue([{ id: "i1", taskId: "t1", text: "Check menu", position: 0, doneAt: new Date("2026-11-23T11:00:00Z"), doneById: "u1" }]);
+    db.taskAttachment.findMany.mockResolvedValue([
+      { id: "at1", taskId: "t1", mediaUploadId: "up1", role: "BEFORE", createdById: "u1", createdAt: new Date("2026-11-23T10:00:00Z"), mediaUpload: { key: "w1/b1/uploads/a.jpg" } },
+    ]);
+    const dto = await getTask(scope, v, "t1");
+    expect(db.taskChecklistItem.findMany.mock.calls[0]![0]).toMatchObject({ where: { taskId: "t1" }, orderBy: [{ position: "asc" }, { id: "asc" }] });
+    expect(db.taskAttachment.findMany.mock.calls[0]![0].where).toEqual({ taskId: "t1" });
+    expect(dto.checklistItems).toEqual([{ id: "i1", text: "Check menu", position: 0, doneAt: "2026-11-23T11:00:00.000Z", doneById: "u1" }]);
+    expect(dto.attachments).toEqual([
+      { id: "at1", mediaUploadId: "up1", role: "BEFORE", createdById: "u1", createdAt: "2026-11-23T10:00:00.000Z", url: "https://signed/w1/b1/uploads/a.jpg" },
+    ]);
+    expect(m.signed).toHaveBeenCalledWith("w1/b1/uploads/a.jpg");
+  });
+
+  it("list rows stay light: counts only, no lines or attachments read", async () => {
+    const [dto] = await toTaskDtos(scope, [row() as never]);
+    expect(dto).not.toHaveProperty("checklistItems");
+    expect(dto).not.toHaveProperty("attachments");
+    expect(db.taskChecklistItem.findMany).not.toHaveBeenCalled();
+    expect(db.taskAttachment.findMany).not.toHaveBeenCalled();
   });
 
   it("a task the viewer can't see is 404", async () => {

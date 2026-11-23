@@ -9,7 +9,7 @@ import { taskAudit } from "@/server/tasks/audit";
 import { TaskError } from "@/server/tasks/errors";
 import { checkTaskLinks } from "@/server/tasks/links";
 import { getTask, rowOf, type TaskScope } from "@/server/tasks/service";
-import { applyAction, TASK_ACTIONS, type TaskDto } from "@/shared";
+import { applyAction, TASK_ACTIONS, type TaskDetailDto } from "@/shared";
 
 const id = z.string().min(1).max(100);
 /** POST tasks/:id. `note` goes with approve, `reason` with requestChanges and block. */
@@ -33,7 +33,7 @@ const isUniqueViolation = (e: unknown) =>
  * locked transaction: the change, the reviewer's APPROVED / CHANGES_REQUESTED comment, the audit event and the
  * reviewer's notice on submitForReview. The reviewer must still be able to see the task to approve or ask for changes.
  */
-export async function runTaskAction(scope: TaskScope, v: TaskViewer, taskId: string, body: TaskActionInput): Promise<TaskDto> {
+export async function runTaskAction(scope: TaskScope, v: TaskViewer, taskId: string, body: TaskActionInput): Promise<TaskDetailDto> {
   const { action } = body;
   await prisma.$transaction(async (tx) => {
     if (!(await findVisibleTask(tx, v, taskId))) throw new TaskError("Task not found", 404);

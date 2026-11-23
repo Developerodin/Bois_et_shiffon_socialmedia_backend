@@ -21,7 +21,7 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   return r.data;
 }
 
-const toDto = (i: TaskChecklistItem): TaskChecklistItemDto => ({ id: i.id, text: i.text, position: i.position, doneAt: i.doneAt?.toISOString() ?? null, doneById: i.doneById });
+export const toChecklistDto = (i: TaskChecklistItem): TaskChecklistItemDto => ({ id: i.id, text: i.text, position: i.position, doneAt: i.doneAt?.toISOString() ?? null, doneById: i.doneById });
 
 /** The item, only if it belongs to this task (404 otherwise, so another task's id reads as missing). */
 async function itemOf(tx: Parameters<typeof lockTaskForEdit>[0], taskId: string, itemId: string) {
@@ -41,7 +41,7 @@ export async function addChecklistItem(scope: TaskScope, v: TaskViewer, taskId: 
     const { _max } = await tx.taskChecklistItem.aggregate({ where: { taskId }, _max: { position: true } });
     const item = await tx.taskChecklistItem.create({ data: { taskId, text: input.text, position: (_max.position ?? -1) + 1 } });
     await taskAudit(tx, scope, "task.checklist.add", { type: "Task", id: taskId, title: task.title }, { itemId: item.id });
-    return toDto(item);
+    return toChecklistDto(item);
   }, TX);
 }
 
@@ -60,7 +60,7 @@ export async function patchChecklistItem(scope: TaskScope, v: TaskViewer, taskId
     }
     const item = await tx.taskChecklistItem.update({ where: { id: itemId }, data });
     await taskAudit(tx, scope, "task.checklist.update", { type: "Task", id: taskId, title: task.title }, { itemId, fields: Object.keys(input) });
-    return toDto(item);
+    return toChecklistDto(item);
   }, TX);
 }
 

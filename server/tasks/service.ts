@@ -9,8 +9,10 @@ import { brandOwners, lockRow, TX } from "@/server/services/publishing";
 import { canBeAssigned, findVisibleTask, isSoleStaff, type TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { TaskError } from "@/server/tasks/errors";
+import { toAttachmentDto } from "@/server/tasks/attachments";
+import { toChecklistDto } from "@/server/tasks/checklist";
 import { checkTaskLinks } from "@/server/tasks/links";
-import { allowedActions, MANAGE_PATCH_FIELDS, pickPatch, safeHttpUrl, TASK_AREAS, TASK_PRIORITIES, WEBSITE_CHANGE_KINDS, type TaskDto, type TaskPersonDto, type TaskRow } from "@/shared";
+import { allowedActions, MANAGE_PATCH_FIELDS, pickPatch, safeHttpUrl, TASK_AREAS, TASK_PRIORITIES, WEBSITE_CHANGE_KINDS, type TaskDetailDto, type TaskDto, type TaskPersonDto, type TaskRow } from "@/shared";
 
 /** The route scope the task services take (authorizeBrandRoute's result). */
 export type TaskScope = { userId: string; workspaceId: string; brandId: string; perms: Set<PermissionKey> };
@@ -141,15 +143,21 @@ export async function toTaskDtos(scope: TaskScope, rows: TaskWithLinks[], people
 
 const notFound = () => new TaskError("Task not found", 404);
 
-export async function getTask(scope: TaskScope, v: TaskViewer, taskId: string): Promise<TaskDto> {
+/** One task with its checklist lines (position, id) and photos (signed URLs); list rows carry only checklist counts. */
+export async function getTask(scope: TaskScope, v: TaskViewer, taskId: string): Promise<TaskDetailDto> {
   if (!(await findVisibleTask(prisma, v, taskId))) throw notFound();
   const row = await prisma.task.findUnique({ where: { id: taskId }, include: TASK_DTO_INCLUDE });
   if (!row) throw notFound();
-  return (await toTaskDtos(scope, [row]))[0]!;
+  const [[dto], items, attachments] = await Promise.all([
+    toTaskDtos(scope, [row]),
+    prisma.taskChecklistItem.findMany({ where: { taskId }, orderBy: [{ position: "asc" }, { id: "asc" }] }),
+    prisma.taskAttachment.findMany({ where: { taskId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], include: { mediaUpload: { select: { key: true } } } }),
+  ]);
+  return { ...dto!, checklistItems: items.map(toChecklistDto), attachments: await Promise.all(attachments.map((a) => toAttachmentDto(a, a.mediaUpload.key))) };
 }
 
 /** A new task (tasks.manage). With a requestId, a repeat returns the task the first request made. */
-export async function createTask(scope: TaskScope, v: TaskViewer, input: TaskInput): Promise<TaskDto> {
+export async function createTask(scope: TaskScope, v: TaskViewer, input: TaskInput): Promise<TaskDetailDto> {
   const id = await prisma.$transaction(async (tx) => {
     if (input.requestId) {
       await lockRow(tx, "task", `request:${scope.brandId}:${input.requestId}`);
@@ -176,7 +184,7 @@ export async function createTask(scope: TaskScope, v: TaskViewer, input: TaskInp
  * - A new url clears "checked live".
  * ponytail: last write wins per field (the apps send only changed fields); add an updatedAt precondition if people clash.
  */
-export async function patchTask(scope: TaskScope, v: TaskViewer, taskId: string, body: Record<string, unknown>): Promise<TaskDto> {
+export async function patchTask(scope: TaskScope, v: TaskViewer, taskId: string, body: Record<string, unknown>): Promise<TaskDetailDto> {
   const parsed = TaskPatch.safeParse(pickPatch(body));
   if (!parsed.success) throw new TaskError(parsed.error.issues[0]?.message ?? "Invalid task", 400);
   await prisma.$transaction(async (tx) => {
