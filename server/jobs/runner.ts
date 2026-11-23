@@ -23,6 +23,7 @@ import { advanceRender, failRender, REEL_RENDER_JOB } from "@/server/reels/rende
 import { onAssetFailure, REEL_ASSET_JOB, runAsset } from "@/server/reels/assets";
 import "@/server/reels/templates"; // registers its asset kind
 import "@/server/reels/presenters"; // registers its asset kind
+import "@/server/data/search-sync"; // registers the SEARCH_CONSOLE sync
 import { purgeOldRecordings } from "@/server/reels/recordings";
 import { clearFindings, FINDING_CLEAR_JOB, FINDING_TASKS_JOB, tasksFromReport } from "@/server/seo/finding-tasks";
 import { purgeStaleUploads } from "@/server/stories/uploads";

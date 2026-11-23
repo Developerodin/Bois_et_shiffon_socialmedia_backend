@@ -214,6 +214,7 @@ model Brand {
   dataSources   DataSource[]
   postMetrics   PostMetric[]
   shopOrders    ShopOrder[]
+  searchDays    SearchDay[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1677,4 +1678,36 @@ model ShopOrder {
 
   @@unique([brandId, shopifyId])
   @@index([brandId, processedAt])
+}
+
+enum SearchDimension {
+  SITE
+  PAGE
+}
+
+/// Search Console numbers per Google day (Pacific time), as Google reports them. SITE: the site's totals (page "");
+/// PAGE: the day's top pages (server/data/search-console.ts PAGES_PER_DAY), so page sums sit below the site total.
+/// Written by the SEARCH_CONSOLE sync (server/data/search-sync.ts): per complete day, delete then insert.
+/// ponytail: ~500 rows/brand/day (~180k/brand/year), never pruned. Ceiling ~20M rows across brands; then roll PAGE rows
+/// older than 16 months into monthly rows.
+model SearchDay {
+  id          String          @id @default(cuid())
+  workspaceId String
+  brandId     String
+  siteUrl     String
+  dimension   SearchDimension
+  /// Google's day (Pacific time)
+  day         DateTime        @db.Date
+  /// "" for SITE; the page URL (at most MAX_PAGE_KEY chars) for PAGE
+  page        String
+  clicks      Int
+  impressions Int
+  /// position × impressions, so a range's average position is impression-weighted: positionSum / impressions
+  positionSum Float
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  /// The migration adds INCLUDE (clicks, impressions, positionSum) so reads are index-only; migrate diff shows it as a
+  /// re-create, don't let a generated migration drop it. No other index: any would be a prefix of this one.
+  @@unique([brandId, siteUrl, dimension, day, page])
 }

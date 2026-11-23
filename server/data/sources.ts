@@ -6,6 +6,7 @@ import { prisma } from "@/server/db/prisma";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { enqueueJob, type Lease } from "@/server/jobs/queue";
 import { ReconnectNeeded } from "@/server/services/connections";
+import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
 
 /**
  * Data sources (docs/superpowers/plans/2026-11-23-phase-2-data.md, "Sync rules"). One job type, `data.sync`, fills a
@@ -320,4 +321,10 @@ export async function listDataSources(scope: { workspaceId: string; brandId: str
       reportsInZone: typeof zone === "string" ? zone : null,
     };
   });
+}
+
+/** The brand's own zone (BrandProfile.timeZone, else the default), for days we bucket ourselves. */
+export async function brandTimeZone(scope: { workspaceId: string; brandId: string }) {
+  const profile = await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { timeZone: true } });
+  return profile?.timeZone ?? DEFAULT_TIME_ZONE;
 }
