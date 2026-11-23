@@ -1,5 +1,6 @@
 import type { IntegrationConnection } from "@prisma/client";
 import { hitRateLimit } from "@/server/auth/rate-limit";
+import { enqueueAdsBackfill } from "@/server/data/meta-ads-sync";
 import { prisma } from "@/server/db/prisma";
 import { metaAdAccounts, ProviderError, type MetaAdAccount } from "@/server/integrations/providers";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
@@ -61,19 +62,27 @@ export async function listMetaAdAccounts(scope: Scope, connectionId: string) {
 
 /**
  * Choose the connection's ad account as the brand's ad data source. The account must still be in the live list
- * (active and readable by this login). Returns what the source keeps: the account as label, its currency and zone.
- * ponytail: nothing is stored here yet; the DataSource row (kind META_ADS, externalId = account id) and its first
- * backfill are written from this result once the DataSource model lands.
+ * (active and readable by this login). Saves the DataSource (kind META_ADS, externalId = account id, its name as
+ * label, its currency and zone) and queues its first backfill window. Choosing it again (a new login, a changed
+ * currency or zone) switches it back on and re-reads the whole backfill: syncedThrough starts over and the backfill
+ * key carries the new updatedAt. A double press queues two chains; their delete-then-insert writes give the same rows.
  */
 export async function chooseMetaAdAccount(scope: Scope, connectionId: string) {
   const conn = await adsConnection(scope, connectionId);
   await limit(scope);
   const account = (await liveAccounts(conn)).find((a) => a.id === conn.externalAccountId);
   if (!account) throw new MetaAdsError("This ad account isn't active or readable by the connected Meta login any more. Reconnect Meta Ads.", 409);
-  return {
+  const chosen = {
     connectionId: conn.id,
     externalId: account.id,
     label: account.name.slice(0, 200),
     settings: { currency: account.currency, timeZone: account.timezone_name },
   };
+  const source = await prisma.dataSource.upsert({
+    where: { brandId_kind_externalId: { brandId: scope.brandId, kind: "META_ADS", externalId: chosen.externalId } },
+    create: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "META_ADS", ...chosen },
+    update: { connectionId: chosen.connectionId, label: chosen.label, settings: chosen.settings, status: "ACTIVE", syncedThrough: null },
+  });
+  await enqueueAdsBackfill(source);
+  return chosen;
 }

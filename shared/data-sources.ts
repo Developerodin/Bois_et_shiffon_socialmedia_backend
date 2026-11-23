@@ -144,3 +144,35 @@ export type SearchPagesDto = { pages: SearchPageRow[]; nextCursor: string | null
 
 /** GET data-sources. `timeZone`: the brand's zone (dates we bucket ourselves); a provider's own is `reportsInZone`. */
 export type DataSourcesDto = { sources: DataSourceDto[]; timeZone: string };
+
+/** Inclusive days, "YYYY-MM-DD". */
+export type DateRange = { from: string; to: string };
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+const isDay = (s: string) => ISO_DAY.test(s) && new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s;
+
+/** `?from&to` as real YYYY-MM-DD days, from ≤ to, at most `maxDays` long (both ends counted); else null. */
+export function parseRange(from: string | null | undefined, to: string | null | undefined, maxDays = 90): DateRange | null {
+  if (!from || !to || !isDay(from) || !isDay(to) || from > to) return null;
+  const days = (Date.parse(to) - Date.parse(from)) / 86_400_000 + 1;
+  return days <= maxDays ? { from, to } : null;
+}
+
+/** Ads totals in one currency (never summed across currencies). Money as decimal strings, 2 places. */
+export type AdsTotals = {
+  currency: string;
+  spend: string;
+  purchases: number;
+  purchaseValue: string;
+  /** purchase value ÷ spend, 2 places; null when nothing was spent */
+  roas: number | null;
+  /** spend ÷ purchases, 2 places; null with no purchases */
+  costPerPurchase: string | null;
+};
+
+/** GET ads/summary. `budget` stays null until budgets are built (held on the owner's answers). */
+export type AdsSummaryDto = { totals: AdsTotals[]; previous: AdsTotals[]; previousRange: DateRange; budget: null };
+
+export type AdsCampaignDto = AdsTotals & { accountId: string; campaignId: string; campaignName: string; impressions: number; clicks: number };
+/** GET ads/campaigns, highest spend first. */
+export type AdsCampaignsDto = { campaigns: AdsCampaignDto[] };
