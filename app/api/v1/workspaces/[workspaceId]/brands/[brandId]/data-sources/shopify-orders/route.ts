@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
+import { hitRateLimit } from "@/server/auth/rate-limit";
 import { listDataSources } from "@/server/data/sources";
 import { turnOnShopifyOrders, type TurnOn } from "@/server/data/shopify-orders-sync";
 import { kickRunner } from "@/server/jobs/runner";
@@ -21,12 +22,16 @@ const PROBLEMS: Record<Extract<TurnOn, { ok: false }>["problem"], { status: numb
 /**
  * Turn on the orders sync (Sales tab) for one of the brand's Shopify connections, `{ connectionId }`. Needs
  * integrations.manage. The token is the stored connection's, never one sent here. A connection of another brand or
- * provider is 404; 422 without read_orders (detail shown as-is); else queues the first run.
+ * provider is 404; 422 without read_orders (detail shown as-is); else queues the first run. Each press asks Shopify for
+ * the token's scopes, so 10 a minute per brand and person (429).
  */
 export async function PUT(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "integrations.manage");
     if (scope instanceof Response) return scope;
+    if (!(await hitRateLimit(`shopify-orders:turn-on:${scope.brandId}:${scope.userId}`, 10, 60_000)).allowed) {
+      return problemResponse({ type: "https://api.brandpilot/errors/rate-limited", title: "Slow down", status: 429, detail: "Shopify was asked too often. Wait a minute and try again." });
+    }
     const body = Body.safeParse(await request.json().catch(() => null));
     if (!body.success) return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Pick a Shopify connection", status: 422, detail: "Pick the Shopify store to read orders from." });
     const result = await turnOnShopifyOrders(scope, body.data.connectionId);
@@ -36,7 +41,7 @@ export async function PUT(request: Request, context: { params: Promise<BrandRout
     }
     kickRunner();
     const source = (await listDataSources(scope, scope.perms)).find((s) => s.id === result.sourceId) ?? null;
-    return Response.json({ source }, { status: 202 });
+    return Response.json({ source }, { status: 200 });
   } catch (error) {
     return fromAccessError(error);
   }

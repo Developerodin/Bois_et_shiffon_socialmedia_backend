@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { GRAPH } from "@/server/integrations/providers";
+import type { SyncStop } from "@/server/data/sync-stop";
 
 /**
  * Meta Marketing API insights client. Pure: it takes an access token and an ad account id and returns buffered
@@ -51,7 +52,7 @@ const RETRIES = 2;
 const MAX_MS = 4 * 60_000;
 const FIELDS = "campaign_id,campaign_name,spend,impressions,clicks,actions,action_values,account_currency";
 
-export type StopReason = "reconnect" | "permission" | "rate_limited" | "failed" | "capped";
+export type StopReason = Exclude<SyncStop, "missing_scope">;
 
 /** Shown instead of the permission message when the account itself is switched off (`disabled: true` on the window). */
 export const DISABLED_MESSAGE = "This ad account is disabled in Meta";

@@ -50,26 +50,31 @@ async function chosenSite(scope: Scope) {
   });
   return source?.externalId ?? null;
 }
+// No workspaceId filter: the brand is already the route's (scoped with its workspace by chosenSite), and the
+// (brandId, siteUrl, dimension, day) INCLUDE index then answers index-only.
 const rowsOf = (scope: Scope, siteUrl: string, r: DayRange, dimension: "SITE" | "PAGE") =>
-  ({ workspaceId: scope.workspaceId, brandId: scope.brandId, siteUrl, dimension, day: { gte: asDate(r.from), lte: asDate(r.to) } });
+  ({ brandId: scope.brandId, siteUrl, dimension, day: { gte: asDate(r.from), lte: asDate(r.to) } });
 
-export async function searchSummary(scope: Scope, range: DayRange): Promise<SearchSummaryDto> {
+/** `manage` (integrations.manage): only they see the site's URL; everyone else gets `hasSite`. */
+export async function searchSummary(scope: Scope, range: DayRange, opts: { manage: boolean }): Promise<SearchSummaryDto> {
   const prev = previousRange(range);
-  const base = { siteUrl: null, daysIn: SEARCH_CONSOLE_ZONE, range, previousRange: prev } as const;
+  const base = { daysIn: SEARCH_CONSOLE_ZONE, range, previousRange: prev } as const;
   const siteUrl = await chosenSite(scope);
   if (!siteUrl) {
     const zero = metrics({ clicks: 0, impressions: 0, positionSum: 0 });
-    return { ...base, totals: zero, previous: zero, days: [] };
+    return { hasSite: false, ...(opts.manage ? { siteUrl: null } : {}), ...base, totals: zero, previous: zero, days: [] };
   }
-  const [totals, previous, days] = await Promise.all([
-    prisma.searchDay.aggregate({ where: rowsOf(scope, siteUrl, range, "SITE"), _sum: SUM }),
+  const [previous, days] = await Promise.all([
     prisma.searchDay.aggregate({ where: rowsOf(scope, siteUrl, prev, "SITE"), _sum: SUM }),
     prisma.searchDay.findMany({ where: rowsOf(scope, siteUrl, range, "SITE"), orderBy: { day: "asc" }, select: { day: true, clicks: true, impressions: true, positionSum: true } }),
   ]);
+  // The range's totals are the sum of its days (at most 90 rows), so they never disagree with the chart.
+  const sum = days.reduce((t, d) => ({ clicks: t.clicks + d.clicks, impressions: t.impressions + d.impressions, positionSum: t.positionSum + d.positionSum }), { clicks: 0, impressions: 0, positionSum: 0 });
   return {
+    hasSite: true,
+    ...(opts.manage ? { siteUrl } : {}),
     ...base,
-    siteUrl,
-    totals: metrics(totals._sum),
+    totals: metrics(sum),
     previous: metrics(previous._sum),
     days: days.map((d) => ({ day: d.day.toISOString().slice(0, 10), ...metrics(d) })),
   };

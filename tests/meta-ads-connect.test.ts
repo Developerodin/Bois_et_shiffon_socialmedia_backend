@@ -5,10 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const db = vi.hoisted(() => ({
   oAuthStateTransaction: { create: vi.fn(async () => ({})) },
   integrationConnection: { findFirst: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
-  dataSource: { upsert: vi.fn(async () => ({ id: "ds1" })) },
+  dataSource: { upsert: vi.fn(async () => ({ id: "ds1" })), updateMany: vi.fn(async () => ({ count: 0 })), findFirst: vi.fn(async (): Promise<unknown> => null) },
+  job: { deleteMany: vi.fn(async () => ({ count: 0 })) },
+  $transaction: vi.fn(async (fn: (tx: unknown) => unknown): Promise<unknown> => fn(db)),
 }));
 const backfill = vi.hoisted(() => vi.fn(async () => ({})));
-vi.mock("@/server/data/meta-ads-sync", () => ({ enqueueAdsBackfill: backfill }));
+vi.mock("@/server/data/meta-ads-sync", () => ({ enqueueAdsBackfill: backfill, adsBackfillPlan: () => ({ start: "2026-05-27", end: "2026-11-22", days: 7 }) }));
 const rate = vi.hoisted(() => vi.fn(async () => ({ allowed: true })));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/auth/rate-limit", () => ({ hitRateLimit: rate }));
@@ -137,14 +139,32 @@ describe("ad account picker", () => {
       { id: "act_1", name: "Account act_1", currency: "EUR", timeZone: "Europe/Paris" },
       { id: "act_3", name: "Account act_3", currency: "EUR", timeZone: "Europe/Paris" },
     ]);
-    expect(await chooseMetaAdAccount(scope, "c1")).toEqual({ connectionId: "c1", externalId: "act_1", label: "Account act_1", settings: { currency: "EUR", timeZone: "Europe/Paris" } });
+    expect(await chooseMetaAdAccount(scope, "c1")).toBe("ds1");
     expect(db.dataSource.upsert).toHaveBeenCalledWith(expect.objectContaining({
       where: { brandId_kind_externalId: { brandId: "b1", kind: "META_ADS", externalId: "act_1" } },
-      create: expect.objectContaining({ workspaceId: "w1", brandId: "b1", kind: "META_ADS", connectionId: "c1" }),
+      create: expect.objectContaining({ workspaceId: "w1", brandId: "b1", kind: "META_ADS", connectionId: "c1", label: "Account act_1", settings: expect.objectContaining({ currency: "EUR", reportsIn: "Europe/Paris" }) }),
     }));
+    // One ad account per brand: the others go OFF in the same transaction.
+    expect(db.dataSource.updateMany).toHaveBeenCalledWith({ where: expect.objectContaining({ brandId: "b1", kind: "META_ADS", externalId: { not: "act_1" } }), data: { status: "OFF" } });
     expect(backfill).toHaveBeenCalledTimes(1);
     expect(backfill).toHaveBeenCalledWith({ id: "ds1" });
     expect(rate).toHaveBeenCalledWith("meta-ads:accounts:b1:u1", expect.any(Number), 60_000);
+  });
+
+  it("choosing the same account again unchanged queues nothing; a changed one drops the old chain's queued windows", async () => {
+    db.integrationConnection.findFirst.mockResolvedValue(conn);
+    const same = { id: "ds1", status: "ACTIVE", connectionId: "c1", settings: { currency: "EUR", reportsIn: "Europe/Paris" } };
+    db.dataSource.findFirst.mockResolvedValueOnce(same);
+    graph({ "/me/adaccounts": [{ data: [account("act_1")] }, { data: [account("act_1")] }] });
+    expect(await chooseMetaAdAccount(scope, "c1")).toBe("ds1");
+    expect(db.dataSource.upsert).not.toHaveBeenCalled();
+    expect(backfill).not.toHaveBeenCalled();
+
+    db.dataSource.findFirst.mockResolvedValueOnce({ ...same, settings: { currency: "USD", reportsIn: "Europe/Paris" } });
+    await chooseMetaAdAccount(scope, "c1");
+    expect(db.job.deleteMany).toHaveBeenCalledWith({ where: expect.objectContaining({ status: "PENDING", idempotencyKey: { startsWith: "data:ds1:backfill:" } }) });
+    expect(db.dataSource.upsert).toHaveBeenCalledTimes(1);
+    expect(backfill).toHaveBeenCalledTimes(1);
   });
 
   it("an account no longer in the live list can't be chosen", async () => {

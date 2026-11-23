@@ -121,12 +121,14 @@ export type SearchPageSort = (typeof SEARCH_PAGE_SORTS)[number];
 export const SEARCH_PAGES_LIMIT = 50;
 
 /**
- * GET search/summary?from&to (inclusive "YYYY-MM-DD", Google's days). `siteUrl` null: no site chosen yet (all zero).
+ * GET search/summary?from&to (inclusive "YYYY-MM-DD", Google's days). `hasSite` false: no site chosen yet (all zero).
+ * `siteUrl` only for people with integrations.manage (else absent).
  * `previous`: the equal-length range just before. `days`: the SITE rows held in the range (a day not synced yet is
  * missing).
  */
 export type SearchSummaryDto = {
-  siteUrl: string | null;
+  hasSite: boolean;
+  siteUrl?: string | null;
   daysIn: typeof SEARCH_CONSOLE_ZONE;
   range: { from: string; to: string };
   previousRange: { from: string; to: string };

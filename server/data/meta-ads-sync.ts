@@ -2,7 +2,7 @@ import type { DataSource, Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { accessToken, markReconnect } from "@/server/services/connections";
 import { CHUNK_DAYS, fetchAdWindow, type AdDayResult } from "./meta-ads";
-import { addDays, dailyWindow, enqueueSourceSync, nextBackfillWindow, registerSync, stopReason, zoneToday } from "./sources";
+import { addDays, backfillPlan, dailyWindow, enqueueBackfill, registerSync, stopReason, zoneToday, type BackfillPlan } from "./sources";
 
 /**
  * META_ADS sync: reads an ad account's campaign days with fetchAdWindow and replaces them in AdDay.
@@ -19,9 +19,11 @@ import { addDays, dailyWindow, enqueueSourceSync, nextBackfillWindow, registerSy
  *   (retried, then failed): rows of one account must stay in one currency and one zone. Choosing the account again picks up the new ones.
  */
 export const ATTRIBUTION_DAYS = 7;
-export const BACKFILL_DAYS = 90;
+/** Twice the longest view (90 days), so it has a previous period from day one. */
+export const BACKFILL_DAYS = 180;
 
-type AdSettings = { currency?: string; timeZone?: string };
+/** `reportsIn`: the account's zone (the same key Search Console writes). */
+export type AdSettings = { currency?: string; reportsIn?: string; backfill?: BackfillPlan };
 const settingsOf = (s: DataSource) => (s.settings ?? {}) as AdSettings;
 
 /** "act_123" → "123": the client adds the prefix itself. */
@@ -63,7 +65,8 @@ export async function replaceAdDays(source: Pick<DataSource, "workspaceId" | "br
     prisma.adDay.deleteMany({
       where: { workspaceId: source.workspaceId, brandId: source.brandId, platform: "META", accountId: source.externalId, day: { gte: from, lte: to } },
     }),
-    prisma.adDay.createMany({ data: rows }),
+    // Two chains writing one window insert the same rows; the later one skips them rather than hitting the unique key.
+    prisma.adDay.createMany({ data: rows, skipDuplicates: true }),
   ]);
   return rows.length;
 }
@@ -72,7 +75,7 @@ registerSync("META_ADS", async (ctx) => {
   const { source, connection } = ctx;
   if (!connection) throw new Error("META_ADS source without a connection");
   const settings = settingsOf(source);
-  const zone = settings.timeZone ?? "UTC";
+  const zone = settings.reportsIn ?? "UTC";
   const window = ctx.window ?? dailyWindow(zoneToday(zone), ATTRIBUTION_DAYS);
 
   const token = await accessToken(connection); // ReconnectNeeded when expired: not retried
@@ -80,7 +83,7 @@ registerSync("META_ADS", async (ctx) => {
 
   if (read.stoppedReason === "reconnect") await markReconnect(connection.id, `Access expired. Reconnect ${connection.displayName}.`);
   if (read.disabled) console.warn("[meta-ads] ad account disabled", source.brandId, source.id);
-  if ((read.currency && settings.currency && read.currency !== settings.currency) || (read.timeZone && settings.timeZone && read.timeZone !== settings.timeZone)) {
+  if ((read.currency && settings.currency && read.currency !== settings.currency) || (read.timeZone && settings.reportsIn && read.timeZone !== settings.reportsIn)) {
     throw new Error("ad account currency or time zone changed at Meta");
   }
   const reason = stopReason(read.stoppedReason); // throws for reconnect and failed: nothing written
@@ -88,15 +91,17 @@ registerSync("META_ADS", async (ctx) => {
   let count = 0;
   // A permission stop (disabled account, ads_read gone) writes nothing; rate limits and the time cap keep what was read.
   if (read.currency && read.stoppedReason !== "permission") for (const chunk of chunks(read.days)) count += await replaceAdDays(source, read.currency, chunk);
-  return { count, complete: !read.stoppedReason, reason };
+  return { count, complete: !read.stoppedReason, reason, ...(ctx.window ? {} : { window }) };
 });
 
+/** The account's backfill: BACKFILL_DAYS up to yesterday in its zone, CHUNK_DAYS a window (saved as settings.backfill). */
+export const adsBackfillPlan = (zone: string, now = new Date()) => backfillPlan(zoneToday(zone, now), BACKFILL_DAYS, CHUNK_DAYS);
+
 /**
- * The account's first backfill: BACKFILL_DAYS up to yesterday in the account's zone, first window queued now; the
- * job chains the rest. Keyed by the source's updatedAt, so choosing the account again re-runs it.
+ * Queues the account's first backfill window from its saved plan; the job chains the rest. Keyed by the source's
+ * updatedAt, so choosing the account again re-runs it.
  */
-export function enqueueAdsBackfill(source: Pick<DataSource, "id" | "workspaceId" | "brandId" | "kind" | "updatedAt" | "settings">, now = new Date()) {
-  const end = addDays(zoneToday(settingsOf(source as DataSource).timeZone ?? "UTC", now), -1);
-  const first = nextBackfillWindow(null, addDays(end, -(BACKFILL_DAYS - 1)), end, CHUNK_DAYS)!;
-  return enqueueSourceSync(source, "backfill", { window: { ...first, end } });
+export function enqueueAdsBackfill(source: Pick<DataSource, "id" | "workspaceId" | "brandId" | "kind" | "updatedAt" | "settings" | "syncedThrough">) {
+  const plan = settingsOf(source as DataSource).backfill;
+  return plan ? enqueueBackfill(source, plan) : null;
 }

@@ -3,6 +3,7 @@ import { invalidBody } from "@/server/api/ai-model-route";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { toSearchProblem } from "@/server/data/search-problem";
 import { chooseSearchSite } from "@/server/data/search-sync";
+import { listDataSources } from "@/server/data/sources";
 import { kickRunner } from "@/server/jobs/runner";
 
 // The first backfill window runs after the response (kickRunner); give it room to finish.
@@ -22,7 +23,8 @@ export async function PUT(request: Request, context: { params: Promise<BrandRout
     if (!body.success) return invalidBody(body.error);
     const source = await chooseSearchSite(scope, body.data);
     kickRunner();
-    return Response.json({ id: source.id, siteUrl: source.externalId }, { status: 200 });
+    const dto = (await listDataSources(scope, scope.perms)).find((s) => s.id === source.id) ?? null;
+    return Response.json({ source: dto }, { status: 200 });
   } catch (error) {
     return toSearchProblem(error);
   }

@@ -7,13 +7,17 @@ import { listConnections, listProviders, toConnectionDto } from "@/server/servic
 /**
  * Which channels can be connected (keys present) and what this brand has connected. For the people who answer
  * customers (inbox.read), publish (they pick the account) or manage the accounts; not a client reviewer.
+ * Meta Ads and Shopify rows (ad account names, shop domains) only for integrations.manage: nobody else acts on them.
  */
+const MANAGE_ONLY = new Set<string>(["META_ADS", "SHOPIFY"]);
+
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");
     if (scope instanceof Response) return scope;
     if (!CONNECTIONS_READ.some((k) => scope.perms.has(k))) throw new AccessDeniedError(`Missing one of ${CONNECTIONS_READ.join(", ")}`);
-    const rows = await listConnections(scope.workspaceId, scope.brandId);
+    const manage = scope.perms.has("integrations.manage");
+    const rows = (await listConnections(scope.workspaceId, scope.brandId)).filter((r) => manage || !MANAGE_ONLY.has(r.provider));
     return Response.json({ providers: listProviders(), connections: rows.map(toConnectionDto) });
   } catch (error) {
     return fromAccessError(error);

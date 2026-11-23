@@ -340,8 +340,7 @@ export async function listDataSources(scope: { workspaceId: string; brandId: str
   const manage = perms.has("integrations.manage");
   return rows.map((r) => {
     const last = r.lastResult as DataSyncResult | null;
-    const settings = (r.settings ?? {}) as { reportsIn?: unknown; timeZone?: unknown };
-    const zone = settings.reportsIn ?? settings.timeZone;
+    const zone = ((r.settings ?? {}) as { reportsIn?: unknown }).reportsIn;
     return {
       id: r.id,
       kind: r.kind,
