@@ -51,6 +51,9 @@ const CHANNEL_PROVIDER: Record<ContentChannel, IntegrationProvider | null> = {
   INSTAGRAM_CAROUSEL: "INSTAGRAM",
   INSTAGRAM_REEL: "INSTAGRAM",
   INSTAGRAM_STORY: "INSTAGRAM",
+  // No publishing API yet: planned, then posted by hand (registerManualPost).
+  LINKEDIN_POST: null,
+  X_POST: null,
 };
 // How many images each channel takes [min, max]; Reels take a video instead.
 const IMAGES: Record<ContentChannel, [number, number]> = {
@@ -61,8 +64,13 @@ const IMAGES: Record<ContentChannel, [number, number]> = {
   THREADS_POST: [0, 1],
   INSTAGRAM_REEL: [0, 0],
   INSTAGRAM_STORY: [0, 0], // frames, not images: see publishRequirements
+  LINKEDIN_POST: [0, 1],
+  X_POST: [0, 1],
 };
-const TEXT_LIMIT: Partial<Record<ContentChannel, number>> = { THREADS_POST: 500, INSTAGRAM_POST: 2200, INSTAGRAM_CAROUSEL: 2200, INSTAGRAM_REEL: 2200 };
+const TEXT_LIMIT: Partial<Record<ContentChannel, number>> = {
+  THREADS_POST: CAPTION_LIMITS.threadsMax, INSTAGRAM_POST: 2200, INSTAGRAM_CAROUSEL: 2200, INSTAGRAM_REEL: 2200,
+  LINKEDIN_POST: CAPTION_LIMITS.linkedinMax, X_POST: CAPTION_LIMITS.xMax,
+};
 const LIVE: Prisma.EnumPublicationStatusFilter = { in: ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PENDING_VERIFY", "PARTIAL"] };
 
 export function publishRequirements(channel: ContentChannel) {

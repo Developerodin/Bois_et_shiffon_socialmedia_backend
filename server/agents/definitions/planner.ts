@@ -12,7 +12,7 @@ import { prisma } from "@/server/db/prisma";
 
 // No INSTAGRAM_REEL: a planned reel would have a script but no video to post. Reels are made in the app's Studio.
 // Stories are planned: the Creator writes their frames from the brand's photos (paid by the Planner's own charge).
-const CHANNELS = ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "FACEBOOK_POST", "PINTEREST_PIN", "THREADS_POST", "INSTAGRAM_STORY"] as const;
+const CHANNELS = ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "FACEBOOK_POST", "PINTEREST_PIN", "THREADS_POST", "INSTAGRAM_STORY", "LINKEDIN_POST", "X_POST"] as const;
 const Plan = z.object({
   // campaignId "" = none; opportunityId "" = a campaign-only post.
   posts: z.array(z.object({ opportunityId: z.string(), campaignId: z.string(), title: z.string(), channel: z.enum(CHANNELS), pillar: z.string(), angle: z.string() })),

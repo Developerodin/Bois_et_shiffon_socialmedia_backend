@@ -23,6 +23,15 @@ describe("content rules", () => {
     expect(checkDraft("PINTEREST_PIN", good).map((x) => x.check)).toContain("Pin title");
   });
 
+  it("X caption over 280 flagged", () => {
+    const caption = `${"Un chêne massif, huilé à la main. ".repeat(9)}Enregistrez ce post.`;
+    expect(caption.length).toBeGreaterThan(280);
+    expect(checkDraft("X_POST", { ...good, caption }).find((x) => x.check === "X length")?.status).toBe("blocker");
+    expect(checkDraft("X_POST", good).find((x) => x.check === "X length")).toBeUndefined();
+    expect(checkDraft("LINKEDIN_POST", { ...good, caption: `${"a".repeat(3001)} save` }).find((x) => x.check === "LinkedIn length")?.status).toBe("blocker");
+    expect(checkDraft("LINKEDIN_POST", { ...good, caption: `${"a".repeat(2500)} save` }).map((x) => x.check)).not.toContain("Caption length");
+  });
+
   it("flags French AI filler and missing asks", () => {
     const r = checkDraft("INSTAGRAM_POST", { ...good, caption: "Dans un monde où tout va vite, laissez-vous séduire par une élégance intemporelle." });
     expect(r.find((x) => x.check === "Sounds AI-written")?.status).toBe("blocker");

@@ -169,6 +169,24 @@ describe("postLinkFor", () => {
     ["THREADS_POST", "https://www.threads.net/@shop/post/C8abc", "https://www.threads.net/@shop/post/C8abc"],
     ["THREADS_POST", "https://threads.com/t/C8abc?x=1", "https://threads.com/t/C8abc"],
   ] as const)("accepts %s %s", (channel, url, out) => expect(postLinkFor(channel, url)).toBe(out));
+  it("accepts a LinkedIn post link", () => {
+    expect(postLinkFor("LINKEDIN_POST", "https://www.linkedin.com/posts/shop_chene-activity-7123456789-AbCd?utm_source=share")).toBe("https://www.linkedin.com/posts/shop_chene-activity-7123456789-AbCd");
+    expect(postLinkFor("LINKEDIN_POST", "https://www.linkedin.com/feed/update/urn:li:activity:7123456789/")).toBe("https://www.linkedin.com/feed/update/urn:li:activity:7123456789/");
+    // The slug is the post's first words: accents arrive percent-encoded.
+    expect(postLinkFor("LINKEDIN_POST", "https://fr.linkedin.com/posts/bois-chiffons_d%C3%A9couvrez-activity-7123456789-xY_z")).toBe("https://fr.linkedin.com/posts/bois-chiffons_d%C3%A9couvrez-activity-7123456789-xY_z");
+  });
+  it("accepts an x.com status link", () => {
+    expect(postLinkFor("X_POST", "https://x.com/shop/status/1790000000000000000?s=20")).toBe("https://x.com/shop/status/1790000000000000000");
+    expect(postLinkFor("X_POST", "https://twitter.com/shop/status/1790000000000000000")).toBe("https://twitter.com/shop/status/1790000000000000000");
+  });
+  it.each([
+    ["LINKEDIN_POST", "https://www.linkedin.com/in/someone/"],
+    ["LINKEDIN_POST", "https://www.linkedin.com/company/shop/"],
+    ["LINKEDIN_POST", "https://linkedin.com.evil.io/posts/a"],
+    ["X_POST", "https://x.com/shop"],
+    ["X_POST", "https://x.com/shop/status/abc"],
+    ["X_POST", "https://x.com.evil.io/shop/status/1"],
+  ] as const)("refuses a LinkedIn profile link and other non-post links: %s %s", (channel, url) => expect(postLinkFor(channel, url)).toBeNull());
   it.each([
     ["PINTEREST_PIN", "https://pinterest.com.evil.io/pin/1/"],
     ["PINTEREST_PIN", "https://www.pinterest.com/shop/"],

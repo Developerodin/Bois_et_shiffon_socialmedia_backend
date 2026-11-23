@@ -14,6 +14,8 @@ export const WEEKDAYS_BY_CHANNEL: Record<ContentChannel, number[]> = {
   PINTEREST_PIN: [1, 3, 5],
   THREADS_POST: [2, 4],
   INSTAGRAM_STORY: [3, 6], // twice a week at most: the Planner proposes one now and then
+  LINKEDIN_POST: [2, 4], // weekdays: LinkedIn is read at work
+  X_POST: [1, 3, 5],
 };
 
 const dayKey = (d: Date) => d.toISOString().slice(0, 10);

@@ -24,6 +24,10 @@ const LINKS: Partial<Record<ContentChannel, { host: RegExp; path: RegExp; hint: 
   },
   PINTEREST_PIN: { host: /^((www|[a-z]{2})\.)?pinterest\.com$|^pin\.it$/, path: /^(\/pin\/[A-Za-z0-9_-]{1,100}\/?|\/[A-Za-z0-9]{3,20})$/, hint: "pinterest.com/pin/…" },
   THREADS_POST: { host: /^(www\.)?threads\.(net|com)$/, path: new RegExp(`^/(@${NAME}/post/${ID}|t/${ID})/?$`), hint: "threads.net/@…/post/…" },
+  // A post's share link (/posts/<slug>, the post's first words, accents percent-encoded) or its feed address
+  // (/feed/update/urn:li:activity:<id>); not a profile or page.
+  LINKEDIN_POST: { host: /^(www\.|[a-z]{2}\.)?linkedin\.com$/, path: new RegExp(`^/(posts/[A-Za-z0-9_%-]{1,250}|feed/update/urn:li:[a-zA-Z]{1,30}:[0-9]{5,30})/?$`), hint: "linkedin.com/posts/…" },
+  X_POST: { host: /^(www\.|mobile\.)?(x|twitter)\.com$/, path: new RegExp(`^/${NAME}/status/[0-9]{1,25}/?$`), hint: "x.com/<account>/status/…" },
 };
 
 /** The normalised link (`origin + pathname`, nothing after) for a post's channel, or null when it isn't a post link there. */

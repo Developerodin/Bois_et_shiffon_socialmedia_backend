@@ -827,6 +827,8 @@ enum ContentChannel {
   FACEBOOK_POST
   PINTEREST_PIN
   THREADS_POST
+  LINKEDIN_POST // planned and posted by hand: no publishing API (Phase 1)
+  X_POST // planned and posted by hand: no publishing API (Phase 1)
 }
 
 /**
