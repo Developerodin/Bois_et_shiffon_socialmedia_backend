@@ -33,6 +33,24 @@ import { ReconnectNeeded } from "@/server/services/connections";
  */
 export const DATA_SYNC_JOB = "data.sync";
 
+/**
+ * Why a provider client stopped short. Every client returns `{ ...data, stoppedReason?: SyncStop }`; only bugs throw.
+ * - capped, rate_limited: what was read is still written and advances (Shopify's prefix is contiguous).
+ * - reconnect, failed: nothing is written.
+ * - permission: the source lacks access to this data.
+ * ponytail: SyncOutcome.reason and DATA_SYNC_ERRORS predate this; the existing clients are aligned to it at merge.
+ */
+export type SyncStop = "reconnect" | "permission" | "rate_limited" | "failed" | "capped";
+
+/** The only text a stop ever shows (`lastError`); provider text never reaches it. */
+export const SYNC_STOP_ERRORS: Record<SyncStop, string> = {
+  reconnect: "The connection needs to be reconnected.",
+  permission: "The connected account can't see this data.",
+  rate_limited: "The provider asked us to slow down. The rest syncs on the next run.",
+  failed: "The sync failed. It will try again.",
+  capped: "Only part of the history was read. The rest syncs on the next run.",
+};
+
 export type SyncMode = "daily" | "manual" | "backfill";
 /** Inclusive provider days, "YYYY-MM-DD". */
 export type DayWindow = { from: string; to: string };
