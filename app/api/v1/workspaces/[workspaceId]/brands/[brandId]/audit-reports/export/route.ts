@@ -1,18 +1,26 @@
 import { fromAccessError } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
-import { badExport, csvResponse, exportAllowed, tooManyExports } from "@/server/api/csv-export";
+import { badExport, exportAllowed, tooManyExports } from "@/server/api/csv-export";
+import { toXlsx, xlsxResponse, type XlsxColumn } from "@/server/api/xlsx";
 import { prisma } from "@/server/db/prisma";
 import type { Finding } from "@/server/seo/checks";
-import { toCsv } from "@/shared";
 
-// One flat row per finding, in report order (most important first), so a spreadsheet row stays one line high: Fix next to
-// Detail, the URLs last and on one line. ponytail: CSV can't set column widths; an .xlsx export if people want those.
-const COLUMNS = ["#", "Severity", "Category", "Title", "Detail", "Fix", "Pages", "URLs"].map((label) => ({ key: label, label }));
+// One row per finding, in report order (most important first). Widths are in Excel characters; long text wraps.
+const COLUMNS: XlsxColumn[] = [
+  { key: "n", label: "#", width: 5 },
+  { key: "severity", label: "Severity", width: 10 },
+  { key: "category", label: "Category", width: 18 },
+  { key: "title", label: "Title", width: 40 },
+  { key: "detail", label: "Detail", width: 60 },
+  { key: "fix", label: "Fix", width: 60 },
+  { key: "pages", label: "Pages", width: 8 },
+  { key: "urls", label: "URLs", width: 70 },
+];
 const SEVERITY: Record<string, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
-/** Report text is markdown-ish: drop the backticks and fold line breaks, so each cell reads as one line. */
-const flatCell = (s: string | undefined) => (s ?? "").replace(/`/g, "").replace(/\s*\n+\s*/g, " ").trim();
+/** Report text is markdown-ish: drop the backticks. */
+const plain = (s: string | undefined) => (s ?? "").replace(/`/g, "").trim();
 
-/** The findings of the latest SEO or GEO report (?kind=SEO|GEO, default SEO) as CSV. */
+/** The findings of the latest SEO or GEO report (?kind=SEO|GEO, default SEO) as an Excel sheet. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "analytics.read");
@@ -22,23 +30,24 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     if (!(await exportAllowed(scope.userId))) return tooManyExports();
     const report = await prisma.auditReport.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind }, orderBy: { createdAt: "desc" }, select: { findings: true } });
     const findings = (Array.isArray(report?.findings) ? report.findings : []) as Finding[];
-    const csv = toCsv(
+    const xlsx = toXlsx(
+      `${kind} findings`,
       COLUMNS,
       findings.map((f, i) => ({
-        "#": i + 1,
-        Severity: SEVERITY[f.severity] ?? f.severity,
-        Category: f.category,
-        Title: flatCell(f.title),
-        Detail: flatCell(f.detail),
-        Fix: flatCell(f.fix),
-        Pages: f.urls?.length ?? 0,
-        URLs: (f.urls ?? []).join(" ; "),
+        n: i + 1,
+        severity: SEVERITY[f.severity] ?? f.severity,
+        category: f.category,
+        title: plain(f.title),
+        detail: plain(f.detail),
+        fix: plain(f.fix),
+        pages: f.urls?.length ?? 0,
+        urls: (f.urls ?? []).join("\n"),
       })),
     );
     await prisma.auditEvent.create({
       data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "report.export", entityType: "Brand", entityId: scope.brandId, metadata: { kind, rows: findings.length } },
     });
-    return csvResponse(csv, `${kind.toLowerCase()}-findings-${new Date().toISOString().slice(0, 10)}.csv`);
+    return xlsxResponse(xlsx, `${kind.toLowerCase()}-findings-${new Date().toISOString().slice(0, 10)}.xlsx`);
   } catch (error) {
     return fromAccessError(error);
   }

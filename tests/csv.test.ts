@@ -93,7 +93,7 @@ describe("CSV owner names", () => {
   });
 });
 
-describe("both CSV exports", () => {
+describe("both exports (calendar CSV, findings Excel)", () => {
   const findings = (qs = "?kind=GEO") => findingsGet(new Request(`http://x/audit-reports/export${qs}`), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) });
 
   it("share one allowance per person and answer 429 the same way", async () => {
@@ -111,8 +111,8 @@ describe("both CSV exports", () => {
   it("send the same download headers", async () => {
     const res = await findings();
     expect(res.status).toBe(200);
-    expect(res.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
-    expect(res.headers.get("Content-Disposition")).toMatch(/^attachment; filename="geo-findings-\d{4}-\d{2}-\d{2}\.csv"$/);
+    expect(res.headers.get("Content-Type")).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    expect(res.headers.get("Content-Disposition")).toMatch(/^attachment; filename="geo-findings-\d{4}-\d{2}-\d{2}\.xlsx"$/);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect((await call()).headers.get("Content-Disposition")).toMatch(/^attachment; filename="calendar-/);
