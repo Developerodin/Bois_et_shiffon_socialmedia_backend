@@ -21,7 +21,7 @@ const PRUNE_BATCH = 1000;
 const PRUNE_ROUNDS = 10;
 
 // ---- adapter over post-metrics.ts (another branch renames `stopped` → `stoppedReason: SyncStop`; change it here) --
-const stopOf = (r: ConnectionRead): SyncStop | undefined => (r.stopped === null ? undefined : r.stopped === "error" ? "failed" : r.stopped);
+const stopOf = (r: ConnectionRead): SyncStop | undefined => r.stoppedReason;
 const read = (connections: ConnectionToRead[]) => readPostMetrics(connections);
 
 /** `now` as the naive UTC timestamp Prisma's timestamp(3) columns hold. */

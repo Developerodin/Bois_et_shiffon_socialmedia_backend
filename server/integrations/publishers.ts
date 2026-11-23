@@ -1,5 +1,5 @@
 import type { IntegrationProvider } from "@prisma/client";
-import { ProviderError } from "@/server/integrations/providers";
+import { GRAPH, IG_GRAPH as IG, ProviderError, THREADS_GRAPH as THREADS } from "@/server/integrations/providers";
 
 /**
  * One call per platform that turns an approved post into a live one. Graph v23 / Threads v1.0 /
@@ -38,9 +38,6 @@ export type Published = { externalId: string; externalUrl: string | null };
 
 export class PublishRefused extends Error {}
 
-const GRAPH = "https://graph.facebook.com/v23.0";
-const IG = "https://graph.instagram.com/v23.0";
-const THREADS = "https://graph.threads.net/v1.0";
 const PINTEREST = "https://api.pinterest.com/v5";
 
 async function call<T>(url: string, init?: RequestInit): Promise<T> {
@@ -77,7 +74,8 @@ export const PUBLISHERS: Partial<
   async META(p, { id, token }) {
     await p.beforePublish?.();
     // A photo post answers with the photo id and the post id; keep the post id, which insights need (the link
-    // still opens the photo). Posts published before this kept the photo id and get no insights.
+    // still opens the photo). Posts published before this kept the photo id and get no insights: post-metrics'
+    // hasFacebookPostId (no "_" in the id) skips them.
     const res = p.imageUrl
       ? await post(`${GRAPH}/${id}/photos`, { url: p.imageUrl, caption: p.text, access_token: token })
       : await post(`${GRAPH}/${id}/feed`, { message: p.text, access_token: token });

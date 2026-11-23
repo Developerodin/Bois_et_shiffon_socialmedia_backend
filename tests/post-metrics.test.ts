@@ -1,6 +1,6 @@
 // recorded 2026-11-23, Graph API v23.0 / Threads API v1.0 (shape from docs)
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readPostMetrics, refreshDue, type ConnectionToRead } from "@/server/data/post-metrics";
+import { hasFacebookPostId, readPostMetrics, refreshDue, type ConnectionToRead } from "@/server/data/post-metrics";
 
 const TOKEN = "EAAB-secret-token-123";
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -14,44 +14,90 @@ const conn = (o: Partial<ConnectionToRead> = {}): ConnectionToRead => ({ connect
 afterEach(() => vi.restoreAllMocks());
 
 describe("readPostMetrics", () => {
-  it("reads a batch of 3 Instagram posts in one call, one refused for permission", async () => {
-    const f = vi.fn(async () =>
-      json(200, [
-        item(200, igInsights(10)),
-        item(403, { error: { message: "(#10) Application does not have permission for this action", code: 10 } }),
-        item(200, igInsights(20)),
-      ]),
-    );
+  it("reads 3 Instagram posts with one GET each, token in the header, one refused for permission", async () => {
+    const replies = [
+      json(200, igInsights(10)),
+      json(403, { error: { message: "(#10) Application does not have permission for this action", code: 10 } }),
+      json(200, igInsights(20)),
+    ];
+    const f = vi.fn(async () => replies.shift()!);
     const [r] = await readPostMetrics([conn()], { fetch: f as unknown as typeof fetch });
-    expect(f).toHaveBeenCalledTimes(1);
+    expect(f).toHaveBeenCalledTimes(3);
     const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe("https://graph.instagram.com/v23.0");
-    expect(init.method).toBe("POST");
-    const batch = JSON.parse(new URLSearchParams(String(init.body)).get("batch")!);
-    expect(batch).toHaveLength(3);
-    expect(batch[0].relative_url).toBe("m0/insights?metric=views,reach,likes,comments,shares,saved,total_interactions");
-    expect(r.stopped).toBeNull();
+    expect(url).toBe("https://graph.instagram.com/v23.0/m0/insights?metric=views,reach,likes,comments,shares,saved,total_interactions");
+    expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${TOKEN}`);
+    expect(r.stoppedReason).toBeUndefined();
     expect(r.unread).toEqual([]);
     expect(r.posts[0]).toEqual({ attemptId: "a0", ok: true, metrics: { views: 10, reach: 11, likes: 12, comments: 13, shares: 14, saves: 15, interactions: 16 } });
     expect(r.posts[1]).toEqual({ attemptId: "a1", ok: false, reason: "permission", code: 10 });
     expect(r.posts[2].ok).toBe(true);
   });
 
-  it("splits 120 posts into batches of 50", async () => {
+  it("splits 120 Facebook posts into batches of 50", async () => {
     const f = vi.fn(async (_u: string, init?: RequestInit) => {
       const n = JSON.parse(new URLSearchParams(String(init!.body)).get("batch")!).length;
-      return json(200, Array.from({ length: n }, () => item(200, igInsights(1))));
+      return json(200, Array.from({ length: n }, () => item(200, { id: "p" })));
     });
-    const [r] = await readPostMetrics([conn({ posts: posts(120) })], { fetch: f as unknown as typeof fetch });
+    const [r] = await readPostMetrics([conn({ provider: "META", posts: posts(120) })], { fetch: f as unknown as typeof fetch });
     expect(f).toHaveBeenCalledTimes(3);
     expect(r.posts.filter((p) => p.ok)).toHaveLength(120);
   });
 
-  it("an unknown metric (error 100) fails the post visibly, no retry", async () => {
-    const f = vi.fn(async () => json(200, [item(400, { error: { message: "(#100) metric[0] must be one of …", code: 100 } })]));
+  it("an error 100 that names no metric fails the post visibly, no retry", async () => {
+    const f = vi.fn(async () => json(400, { error: { message: "(#100) Invalid parameter", code: 100 } }));
     const [r] = await readPostMetrics([conn({ posts: posts(1) })], { fetch: f as unknown as typeof fetch });
     expect(f).toHaveBeenCalledTimes(1);
-    expect(r.posts).toEqual([{ attemptId: "a0", ok: false, reason: "error", code: 100 }]);
+    expect(r.posts).toEqual([{ attemptId: "a0", ok: false, reason: "failed", code: 100 }]);
+  });
+
+  it("a metric refused with error 100 is dropped once, the posts retried without it, the rest saved", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const refused = { error: { message: "(#100) metric[1] must be one of the following values: views, likes", code: 100 } };
+    const noReach = (n: number) => ({ data: igInsights(n).data.filter((d) => d.name !== "reach") });
+    const replies = [json(400, refused), json(400, refused), json(200, noReach(10)), json(200, noReach(20))];
+    const f = vi.fn(async () => replies.shift()!);
+    const [r] = await readPostMetrics([conn({ posts: posts(2) })], { fetch: f as unknown as typeof fetch });
+    expect(f).toHaveBeenCalledTimes(4);
+    const urls = (f.mock.calls as unknown as [string][]).map(([u]) => u);
+    expect(urls[0]).toContain("metric=views,reach,likes");
+    expect(urls[2]).toBe("https://graph.instagram.com/v23.0/m0/insights?metric=views,likes,comments,shares,saved,total_interactions");
+    expect(warn.mock.calls.filter(([l]) => String(l).includes("dropped metric reach"))).toHaveLength(1);
+    expect(r.stoppedReason).toBeUndefined();
+    expect(r.posts.map((p) => p.ok)).toEqual([true, true]);
+    expect(r.posts[0]).toMatchObject({ ok: true, metrics: { views: 10, reach: null } });
+  });
+
+  it("maps Facebook: missing shares → 0, interactions summed, missing numbers → null", async () => {
+    const f = vi.fn(async () =>
+      json(200, [
+        item(200, { id: "1_2", insights: { data: [{ name: "post_media_view", values: [{ value: 40 }] }, { name: "post_total_media_view_unique", values: [{ value: 30 }] }] }, reactions: { summary: { total_count: 5 } }, comments: { summary: { total_count: 2 } }, shares: { count: 3 } }),
+        item(200, { id: "1_3", reactions: { summary: { total_count: 1 } }, comments: { summary: { total_count: 0 } } }),
+        item(200, { id: "1_4", insights: { data: [] }, comments: { summary: { total_count: 4 } } }),
+      ]),
+    );
+    const [r] = await readPostMetrics([conn({ provider: "META" })], { fetch: f as unknown as typeof fetch });
+    expect(r.posts.map((p) => (p.ok ? p.metrics : null))).toEqual([
+      { views: 40, reach: 30, likes: 5, comments: 2, shares: 3, saves: null, interactions: 10 },
+      { views: null, reach: null, likes: 1, comments: 0, shares: 0, saves: null, interactions: 1 },
+      { views: null, reach: null, likes: null, comments: 4, shares: 0, saves: null, interactions: null },
+    ]);
+  });
+
+  it("reads a Threads post with one GET, the token in the header, reposts + quotes + shares as shares", async () => {
+    const f = vi.fn(async () =>
+      json(200, { data: [["views", 100], ["likes", 7], ["replies", 3], ["reposts", 2], ["quotes", 1], ["shares", 4]].map(([name, value]) => ({ name, values: [{ value }] })) }),
+    );
+    const [r] = await readPostMetrics([conn({ provider: "THREADS", posts: posts(1) })], { fetch: f as unknown as typeof fetch });
+    const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://graph.threads.net/v1.0/m0/insights?metric=views,likes,replies,reposts,quotes,shares");
+    expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${TOKEN}`);
+    expect(r.posts).toEqual([{ attemptId: "a0", ok: true, metrics: { views: 100, reach: null, likes: 7, comments: 3, shares: 7, saves: null, interactions: 17 } }]);
+    expect(r.stoppedReason).toBeUndefined();
+  });
+
+  it("only page-scoped Facebook ids can have insights", () => {
+    expect(hasFacebookPostId("123_456")).toBe(true);
+    expect(hasFacebookPostId("789")).toBe(false);
   });
 
   it("190 stops that connection with reconnect and still reads the next one", async () => {
@@ -64,10 +110,10 @@ describe("readPostMetrics", () => {
       [conn({ posts: posts(60) }), conn({ connectionId: "c2", provider: "META", posts: [{ attemptId: "f1", postId: "123_456" }] })],
       { fetch: f as unknown as typeof fetch },
     );
-    expect(out[0].stopped).toBe("reconnect");
+    expect(out[0].stoppedReason).toBe("reconnect");
     expect(out[0].unread).toHaveLength(60);
-    expect(f).toHaveBeenCalledTimes(2); // the second IG batch was never sent
-    expect(out[1].stopped).toBeNull();
+    expect(f).toHaveBeenCalledTimes(2); // no IG post after the refused one was read
+    expect(out[1].stoppedReason).toBeUndefined();
     // No `shares` field means no shares on Facebook.
     expect(out[1].posts[0]).toEqual({ attemptId: "f1", ok: true, metrics: { views: 40, reach: 30, likes: 5, comments: 2, shares: 0, saves: null, interactions: 7 } });
   });
@@ -82,7 +128,7 @@ describe("readPostMetrics", () => {
     });
     const [r] = await readPostMetrics([conn({ provider: "THREADS" })], { fetch: f as unknown as typeof fetch });
     expect(f).toHaveBeenCalledTimes(2);
-    expect(r.stopped).toBe("rate_limited");
+    expect(r.stoppedReason).toBe("rate_limited");
     expect(r.posts).toEqual([{ attemptId: "a0", ok: true, metrics: { views: 9, reach: null, likes: 1, comments: 1, shares: 2, saves: null, interactions: 4 } }]);
     expect(r.unread).toEqual(["a1", "a2"]);
   });
@@ -90,11 +136,13 @@ describe("readPostMetrics", () => {
   it("a network failure never throws", async () => {
     const f = vi.fn(async () => { throw new TypeError("fetch failed"); });
     const [r] = await readPostMetrics([conn()], { fetch: f as unknown as typeof fetch });
-    expect(r.stopped).toBe("error");
-    expect(r.unread).toHaveLength(3);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(r.stoppedReason).toBe("failed");
+    expect(r.posts).toEqual([{ attemptId: "a0", ok: false, reason: "failed", code: null }]);
+    expect(r.unread).toEqual(["a1", "a2"]);
   });
 
-  it("the token is never in a batch URL, a result or a log line", async () => {
+  it("the token is never in a URL, a result or a log line", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const error = vi.spyOn(console, "error").mockImplementation(() => {});

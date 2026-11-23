@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ORDERS_QUERY, addDecimals, fetchOrders } from "@/server/data/shopify-orders";
+import { THROTTLE_RETRIES } from "@/server/catalog/shopify";
+import { ORDERS_QUERY, fetchOrders } from "@/server/data/shopify-orders";
 
 // recorded 2026-11-23, Shopify Admin GraphQL (shape from docs)
 const money = (amount: string, currencyCode = "EUR") => ({ shopMoney: { amount, currencyCode } });
@@ -18,6 +19,15 @@ const DISCOUNTED = {
   currentSubtotalPriceSet: money("72.0"), currentTotalDiscountsSet: money("18.0"), currentShippingPriceSet: money("4.9"),
   currentTotalPriceSet: money("91.3"), totalRefundedSet: money("0.0"),
   currentTaxLines: [{ priceSet: money("12.0") }, { priceSet: money("2.4") }],
+};
+// Free shipping: 50.00 subtotal, shipping 5.00 waived by a free-shipping code → 0.00 shipping, 50.00 total. Shopify
+// documents currentTotalDiscountsSet as order and line level discounts, so the waived shipping is not in it here.
+const FREE_SHIPPING = {
+  id: "gid://shopify/Order/1003", name: "#1003", processedAt: "2026-11-22T12:00:00Z", cancelledAt: null, test: false,
+  updatedAt: "2026-11-22T12:00:00Z", taxesIncluded: true, sourceName: "web",
+  currentSubtotalPriceSet: money("50.0"), currentTotalDiscountsSet: money("0.0"), currentShippingPriceSet: money("0.0"),
+  currentTotalPriceSet: money("50.0"), totalRefundedSet: money("0.0"),
+  currentTaxLines: [{ priceSet: money("8.33") }],
 };
 const COST = { requestedQueryCost: 10, actualQueryCost: 10, throttleStatus: { currentlyAvailable: 1000, restoreRate: 50 } };
 const page = (nodes: unknown[], endCursor: string | null) => ({
@@ -38,7 +48,10 @@ function stubFetch(...responses: { status?: number; body: unknown }[]) {
 }
 const sentVariables = (call: unknown[]) => JSON.parse((call[1] as { body: string }).body).variables;
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
 describe("fetchOrders", () => {
   it("query asks for none of the personal fields", () => {
@@ -62,6 +75,12 @@ describe("fetchOrders", () => {
     });
   });
 
+  it("a free-shipping order: gross is merchandise only, shipping 0.00", async () => {
+    stubFetch({ body: page([FREE_SHIPPING], null) });
+    const { orders } = await fetchOrders(CONN, SINCE);
+    expect(orders[0]).toMatchObject({ netSales: "50.00", discounts: "0.00", gross: "50.00", shipping: "0.00", taxes: "8.33", total: "50.00" });
+  });
+
   it("filters from one hour before the cursor and follows endCursor across pages", async () => {
     const fetchMock = stubFetch({ body: page([REFUNDED], "c1") }, { body: page([DISCOUNTED], null) });
     const { orders, stoppedReason } = await fetchOrders(CONN, SINCE);
@@ -72,9 +91,9 @@ describe("fetchOrders", () => {
   });
 
   it("stops as partial when Shopify keeps throttling, keeping only finished pages", async () => {
-    stubFetch({ body: page([REFUNDED], "c1") }, ...Array.from({ length: 6 }, () => ({ body: throttled })));
+    stubFetch({ body: page([REFUNDED], "c1") }, ...Array.from({ length: THROTTLE_RETRIES + 1 }, () => ({ body: throttled })));
     const { orders, cursorEnd, stoppedReason } = await fetchOrders(CONN, SINCE);
-    expect(stoppedReason).toBe("throttled");
+    expect(stoppedReason).toBe("rate_limited");
     expect(orders.map((o) => o.name)).toEqual(["#1001"]);
     expect(cursorEnd).toEqual(new Date("2026-11-21T09:00:00Z"));
   });
@@ -84,18 +103,40 @@ describe("fetchOrders", () => {
     expect(await fetchOrders(CONN, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: "reconnect" });
   });
 
-  it("never puts the token in an error", async () => {
-    stubFetch({ status: 500, body: { errors: [{ message: "Internal error", extensions: { code: "INTERNAL_SERVER_ERROR" } }] } });
-    const err = await fetchOrders(CONN, SINCE).catch((e: Error) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect(`${(err as Error).message} ${(err as Error).stack}`).not.toContain(TOKEN);
+  it("ACCESS_DENIED (no read_orders) is a missing scope, not a reconnect", async () => {
+    stubFetch({ body: { errors: [{ message: "Access denied for orders field.", extensions: { code: "ACCESS_DENIED" } }] } });
+    expect(await fetchOrders(CONN, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: "missing_scope" });
   });
-});
 
-describe("addDecimals", () => {
-  it("adds exactly without floats", () => {
-    expect(addDecimals("0.1", "0.2")).toBe("0.30");
-    expect(addDecimals("10", "-12.5")).toBe("-2.50");
-    expect(addDecimals("1.005", "0")).toBe("1.005");
+  it("stops as capped after 50 pages, keeping them all", async () => {
+    stubFetch(...Array.from({ length: 50 }, (_, i) => ({ body: page([{ ...REFUNDED, id: `gid://shopify/Order/${i}` }], `c${i}`) })));
+    const { orders, stoppedReason } = await fetchOrders(CONN, SINCE);
+    expect(stoppedReason).toBe("capped");
+    expect(orders).toHaveLength(50);
+  });
+
+  it("stops as capped after 4 minutes, keeping the pages read", async () => {
+    vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(4 * 60_000 + 1);
+    const fetchMock = stubFetch({ body: page([REFUNDED], "c1") }, { body: page([DISCOUNTED], null) });
+    const { orders, cursorEnd, stoppedReason } = await fetchOrders(CONN, SINCE);
+    expect(stoppedReason).toBe("capped");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(orders.map((o) => o.name)).toEqual(["#1001"]);
+    expect(cursorEnd).toEqual(new Date("2026-11-21T09:00:00Z"));
+  });
+
+  it("never puts the token in a result or log, even when Shopify echoes it in errors[].message", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch({ body: { errors: [{ message: `Invalid API key or access token (unrecognized login or wrong password): ${TOKEN}` }] } });
+    const r = await fetchOrders(CONN, SINCE);
+    expect(r.stoppedReason).toBe("failed");
+    expect(error).toHaveBeenCalled();
+    expect(JSON.stringify([r, error.mock.calls])).not.toContain(TOKEN);
+  });
+
+  it("a 5xx returns failed and no orders, without throwing", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch({ body: page([REFUNDED], "c1") }, { status: 500, body: { errors: [{ message: "Internal error", extensions: { code: "INTERNAL_SERVER_ERROR" } }] } });
+    expect(await fetchOrders(CONN, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: "failed" });
   });
 });

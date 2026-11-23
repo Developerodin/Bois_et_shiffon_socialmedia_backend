@@ -29,7 +29,12 @@ type Adapter = {
   noRefresh?: true;
 };
 
-export class ProviderError extends Error {}
+export class ProviderError extends Error {
+  /** The HTTP status when the provider answered (set by `call`); undefined for errors raised before a request. */
+  constructor(message: string, readonly status?: number) {
+    super(message);
+  }
+}
 
 /** Shopify is connected with a pasted Admin API token (server/catalog/shopify.ts), so it has no OAuth adapter. */
 export type OAuthProvider = Exclude<IntegrationProvider, "SHOPIFY">;
@@ -52,7 +57,7 @@ export async function call<T>(url: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     const e = body.error;
     const msg = typeof e === "object" ? e?.message : body.error_description ?? body.error_message ?? e;
-    throw new ProviderError(`${res.status} ${msg ?? "provider error"}`.slice(0, 300));
+    throw new ProviderError(`${res.status} ${msg ?? "provider error"}`.slice(0, 300), res.status);
   }
   return body;
 }

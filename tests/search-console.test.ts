@@ -1,6 +1,6 @@
 // recorded 2026-11-23, Search Console API v1 (shape from docs)
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchSearchWindow, listSites, MAX_PAGE_KEY, SEARCH_CONSOLE_SCOPE, SearchConsoleError } from "@/server/data/search-console";
+import { fetchSearchWindow, listSites, MAX_PAGE_KEY, PAGES_PER_DAY, SEARCH_CONSOLE_SCOPE, SearchConsoleError } from "@/server/data/search-console";
 
 const TOKEN = "ya29.secret-token-value";
 const SITE = "sc-domain:example.com";
@@ -30,7 +30,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
-  logs.mockRestore();
+  vi.restoreAllMocks();
 });
 
 describe("listSites", () => {
@@ -64,34 +64,65 @@ describe("fetchSearchWindow", () => {
     ]);
   });
 
-  it("pages each day with startRow up to 500 rows, skipping over-long page keys", async () => {
+  it("reads each day's top 500 pages in one request, skipping over-long page keys", async () => {
     const long = { keys: [`https://example.com/${"x".repeat(MAX_PAGE_KEY)}`], clicks: 1, impressions: 1, position: 1 };
     stub([
       [200, { rows: [] }],
-      [200, { rows: [...pageRows(249), long] }],
-      [200, { rows: pageRows(250, "https://example.com/q") }],
+      [200, { rows: [...pageRows(499), long] }],
     ]);
     const w = await fetchSearchWindow(TOKEN, SITE, "2026-11-01", "2026-11-01");
-    expect(requests.slice(1).map((r) => [r.body?.dimensions, r.body?.startRow, r.body?.rowLimit])).toEqual([
-      [["page"], 0, 250],
-      [["page"], 250, 250],
-    ]);
+    expect(requests.slice(1).map((r) => [r.body?.dimensions, r.body?.startRow, r.body?.rowLimit])).toEqual([[["page"], undefined, PAGES_PER_DAY]]);
     expect(w.days[0]).toMatchObject({ complete: true, skippedPages: 1 });
     expect(w.days[0].pages).toHaveLength(499);
   });
 
-  it("stops as partial on 429: earlier days complete, the day being paged and later days not", async () => {
+  it("stops as partial on 429: earlier days complete, the failing day and later days not", async () => {
     stub([
       [200, { rows: [] }],
       [200, { rows: pageRows(1) }], // day 1 done
-      [200, { rows: pageRows(250) }], // day 2, first page
-      [429, { error: { code: 429, message: "Quota exceeded" } }], // day 2, second page
+      [429, { error: { code: 429, message: "Quota exceeded" } }], // day 2
     ]);
     const w = await fetchSearchWindow(TOKEN, SITE, "2026-11-01", "2026-11-03");
-    expect(w.stoppedReason).toBe("rate_limit");
+    expect(w.stoppedReason).toBe("rate_limited");
     expect(w.days.map((d) => d.complete)).toEqual([true, false, false]);
-    expect(w.days[1].pages).toEqual([]); // the half-read day is not handed back
-    expect(requests).toHaveLength(4);
+    expect(w.days[1].pages).toEqual([]);
+    expect(requests).toHaveLength(3);
+  });
+
+  it("a 5xx part way returns failed, keeping the days already read", async () => {
+    stub([
+      [200, { rows: [] }],
+      [200, { rows: pageRows(1) }], // day 1 done
+      [503, { error: { code: 503, message: "Backend Error" } }], // day 2
+    ]);
+    const w = await fetchSearchWindow(TOKEN, SITE, "2026-11-01", "2026-11-03");
+    expect(w.stoppedReason).toBe("failed");
+    expect(w.days.map((d) => d.complete)).toEqual([true, false, false]);
+    expect(w.days[0].pages).toHaveLength(1);
+  });
+
+  it("a timeout part way returns failed, keeping the days already read, and logs no URL", async () => {
+    stub([[200, { rows: [] }], [200, { rows: pageRows(1) }]]);
+    const replies = vi.mocked(fetch);
+    const real = replies.getMockImplementation()!;
+    let n = 0;
+    replies.mockImplementation(async (url, init) => {
+      if (++n === 3) throw new DOMException(`The operation was aborted due to timeout: ${String(url)}`, "TimeoutError");
+      return real(url, init);
+    });
+    const w = await fetchSearchWindow(TOKEN, SITE, "2026-11-01", "2026-11-02");
+    expect(w.stoppedReason).toBe("failed");
+    expect(w.days.map((d) => d.complete)).toEqual([true, false]);
+    expect(JSON.stringify(logs.mock.calls)).not.toContain("googleapis.com");
+  });
+
+  it("stops as capped once the run passes the time cap, keeping completed days", async () => {
+    vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(4 * 60_000 + 1);
+    stub([[200, { rows: [] }], [200, { rows: pageRows(1) }]]);
+    const w = await fetchSearchWindow(TOKEN, SITE, "2026-11-01", "2026-11-03");
+    expect(w.stoppedReason).toBe("capped");
+    expect(w.days.map((d) => d.complete)).toEqual([true, false, false]);
+    expect(requests).toHaveLength(2);
   });
 
   it("401 → reconnect, nothing complete, no further calls", async () => {
