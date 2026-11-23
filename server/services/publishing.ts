@@ -7,6 +7,7 @@ import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { CAPTION_LIMITS, safeHttpUrl } from "@/shared";
 import { brandMemberPerms, hasOtherApprover, requirePermission } from "@/server/auth/permissions";
+import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { linkedProducts } from "@/server/catalog/linked";
 import { gateIssues, linkedIds, ProductOverride, snapshotOf } from "@/server/content/product-checks";
 import { campaignsById } from "@/server/catalog/campaigns";
@@ -151,8 +152,10 @@ async function gateWithLinks(db: Prisma.TransactionClient, scope: { workspaceId:
 
 // Callers queue on the per-post lock; allow for a slow database link before giving up.
 export const TX = { maxWait: 10_000, timeout: 20_000 };
+/** Per-row lock for the transaction: posts (people and agents alike) and tasks. */
+export const lockRow = (tx: Prisma.TransactionClient, kind: "content" | "task", id: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${kind}:${id}`}))`;
 /** Per-post lock shared by people (edit, approve, publish) and agents (Creator, Quality). */
-export const lock = (tx: Prisma.TransactionClient, itemId: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`content:${itemId}`}))`;
+export const lock = (tx: Prisma.TransactionClient, itemId: string) => lockRow(tx, "content", itemId);
 
 export type DraftInput = { hook: string; caption: string; hashtags: string[]; slides: string[]; script: string[]; pinTitle: string; altText: string; photoKeys?: string[]; pinLink?: string };
 
@@ -220,13 +223,26 @@ export async function createPost(input: { workspaceId: string; brandId: string; 
  * Names only, never emails: the list is open to anyone who can create posts. `reveal` (the caller holds
  * project.members.manage): nameless people by their email's local part; else "A team member", "A team member (2)", …
  * so the picker can tell them apart. Client reviewers review the work, they don't own it: their grants are left out.
+ * `key` (default brand.read): the permission a person must hold on the brand, e.g. tasks.read for task names (one more
+ * read of the workspace roles holding it). `includeClients`: keep client-reviewer grants that hold `key`.
  * ponytail: reads every member of the workspace; fine for small teams.
  */
-export async function brandOwners(scope: { workspaceId: string; brandId: string }, { reveal }: { reveal: boolean }) {
-  const { viaWorkspace, people } = await listProjectPeople(scope.workspaceId, scope.brandId);
+export async function brandOwners(
+  scope: { workspaceId: string; brandId: string },
+  { reveal = false, key = "brand.read", includeClients = false }: { reveal?: boolean; key?: PermissionKey; includeClients?: boolean } = {},
+) {
+  const [{ viaWorkspace, people }, holders] = await Promise.all([
+    listProjectPeople(scope.workspaceId, scope.brandId),
+    // listProjectPeople's workspace list is already the brand.read holders.
+    key === "brand.read" ? null : prisma.workspaceMember.findMany({ where: { workspaceId: scope.workspaceId, roleRef: { permissions: { has: key } } }, select: { userId: true } }),
+  ]);
+  const viaRole = holders ? new Set(holders.map((h) => h.userId)) : null;
   const byId = new Map<string, { id: string; name: string; named: boolean }>();
-  // Project roles are free-form: a grant counts only when its role holds brand.read. Disabled and deleted people never do.
-  const reach = [...viaWorkspace, ...people.filter((g) => g.role.permissions.includes("brand.read") && !g.client)].filter((p) => p.active);
+  // Project roles are free-form: a grant counts only when its role holds `key`. Disabled and deleted people never do.
+  const reach = [
+    ...viaWorkspace.filter((p) => !viaRole || viaRole.has(p.userId)),
+    ...people.filter((g) => g.role.permissions.includes(key) && (includeClients || !g.client)),
+  ].filter((p) => p.active);
   for (const p of reach) {
     const named = !!p.name?.trim();
     const seen = byId.get(p.userId);
