@@ -33,6 +33,17 @@ describe("permission catalog + system roles", () => {
     expect(role("project-admin").has("commercial.manage")).toBe(true);
   });
 
+  it("crm.read and ads.read are held by Owner, Admin, Project admin and Manager only", () => {
+    for (const key of ["crm.read", "ads.read"] as const) {
+      expect(permissionScope(key)).toBe("PROJECT");
+      expect(SYSTEM_ROLES.filter((r) => r.permissions.includes(key)).map((r) => r.slug).sort()).toEqual(["admin", "manager", "owner", "project-admin"]);
+    }
+    for (const slug of ["client-reviewer", "viewer", "approver", "creator"]) {
+      expect(role(slug).has("crm.read")).toBe(false);
+      expect(role(slug).has("ads.read")).toBe(false);
+    }
+  });
+
   it("project roles hold only project permissions; Member reaches no project by itself", () => {
     for (const r of SYSTEM_ROLES.filter((r) => r.scope === "PROJECT")) {
       for (const p of r.permissions) expect(permissionScope(p)).toBe("PROJECT");
@@ -54,13 +65,19 @@ describe("rolePermissions", () => {
     expect(rolePermissions({ isSystem: false, slug: "admin", permissions: ["brand.read"] })).toEqual(["brand.read"]);
   });
 
-  it("the role-reset migration writes exactly the catalog for every built-in role, and moves Commercial owner to Manager", () => {
+  it("the role-reset migration, with later key additions, writes exactly the catalog for every built-in role, and moves Commercial owner to Manager", () => {
     const dir = join(__dirname, "../prisma/migrations");
     const sql = readFileSync(join(dir, readdirSync(dir).find((d) => d.endsWith("_task_owner_role"))!, "migration.sql"), "utf8");
     const rows = [...sql.matchAll(/^\s+\('([a-z-]+)', '([^']*)', '([^']*)', '(WORKSPACE|PROJECT)', ARRAY\[([^\]]*)\]::TEXT\[\]\)/gm)].map((m) => ({
       slug: m[1], name: m[2], description: m[3], scope: m[4], permissions: [...m[5]!.matchAll(/'([^']+)'/g)].map((k) => k[1]),
     }));
-    expect(rows).toEqual(SYSTEM_ROLES.map((r) => ({ slug: r.slug, name: r.name, description: r.description, scope: r.scope, permissions: [...r.permissions] })));
+    // Later migrations add keys to built-in rows; with those applied, the snapshot is the catalog (as sets: appended keys
+    // land at the end of a stored row).
+    const added = readFileSync(join(dir, readdirSync(dir).find((d) => d.endsWith("_crm_ads_read"))!, "migration.sql"), "utf8");
+    const addedKeys = [...added.match(/unnest\(ARRAY\[([^\]]*)\]/)![1]!.matchAll(/'([^']+)'/g)].map((k) => k[1]!);
+    const addedTo = [...added.match(/"slug" IN \(([^)]*)\)/)![1]!.matchAll(/'([^']+)'/g)].map((k) => k[1]);
+    const migrated = rows.map((r) => ({ ...r, permissions: (addedTo.includes(r.slug) ? [...r.permissions, ...addedKeys] : r.permissions).sort() }));
+    expect(migrated).toEqual(SYSTEM_ROLES.map((r) => ({ slug: r.slug, name: r.name, description: r.description, scope: r.scope, permissions: [...r.permissions].sort() })));
     for (const table of ["BrandMember", "WorkspaceMember", "Invitation"]) expect(sql).toContain(`UPDATE "${table}"`);
     expect(sql).toMatch(/DELETE FROM "Role" co\s+WHERE co."isSystem" AND co.slug = 'commercial-owner'/);
   });

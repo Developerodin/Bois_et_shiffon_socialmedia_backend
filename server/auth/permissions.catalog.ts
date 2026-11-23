@@ -48,7 +48,7 @@ export const SYSTEM_ROLES: ReadonlyArray<{
     name: "Manager",
     scope: "PROJECT",
     description: "Runs agents, strategy, the calendar, publishing, product priorities, campaigns and offers",
-    permissions: [...READ, "agents.run", "context.edit", "context.confirm", "content.create", "content.download", "publish.execute", "integrations.manage", "inbox.read", "commercial.manage", "tasks.read", "tasks.manage"],
+    permissions: [...READ, "agents.run", "context.edit", "context.confirm", "content.create", "content.download", "publish.execute", "integrations.manage", "inbox.read", "commercial.manage", "crm.read", "ads.read", "tasks.read", "tasks.manage"],
   },
   { slug: "creator", name: "Creator", scope: "PROJECT", description: "Writes and edits drafts", permissions: [...READ, "content.create", "tasks.read", "tasks.manage"] },
   {
