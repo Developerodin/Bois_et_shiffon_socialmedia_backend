@@ -3,7 +3,7 @@ import { ContentChannel } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
-  oAuthStateTransaction: { create: vi.fn(async () => ({})) },
+  oAuthStateTransaction: { create: vi.fn(async () => ({})), findUnique: vi.fn(async () => null) },
   integrationConnection: { findFirst: vi.fn(), updateMany: vi.fn(async () => ({ count: 1 })) },
   dataSource: { upsert: vi.fn(async () => ({ id: "ds1" })), updateMany: vi.fn(async () => ({ count: 0 })), findFirst: vi.fn(async (): Promise<unknown> => null) },
   job: { deleteMany: vi.fn(async () => ({ count: 0 })) },
@@ -14,8 +14,12 @@ vi.mock("@/server/data/meta-ads-sync", () => ({ enqueueAdsBackfill: backfill, ad
 const rate = vi.hoisted(() => vi.fn(async () => ({ allowed: true })));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/auth/rate-limit", () => ({ hitRateLimit: rate }));
+const complete = vi.hoisted(() => vi.fn());
+vi.mock("@/auth", () => ({ auth: async () => ({ user: { id: "u1" } }) }));
+vi.mock("@/server/services/connections", async () => ({ ...(await vi.importActual<object>("@/server/services/connections")), completeConnect: complete }));
 vi.mock("@/server/crypto/credentials", () => ({ currentKeyVersion: () => 1, encryptCredentials: () => "sealed", decryptCredentials: () => ({ accessToken: "EAAB-long-lived-secret" }) }));
 
+import { GET as callback } from "@/app/api/v1/integrations/[provider]/callback/route";
 import { chooseMetaAdAccount, listMetaAdAccounts } from "@/server/integrations/meta-ads";
 import { PROVIDER_SLUGS, PROVIDERS } from "@/server/integrations/providers";
 import { PUBLISHERS } from "@/server/integrations/publishers";
@@ -109,6 +113,16 @@ describe("Meta Ads login", () => {
       "/me/adaccounts": [{ data: [account("act_9", 101)] }],
     });
     await expect(exchange()).rejects.toThrow("no active ad accounts");
+  });
+});
+
+describe("callback redirect", () => {
+  it("names the account count, never the ad account names, in the URL", async () => {
+    complete.mockResolvedValue({ connections: ["Secret Client A", "Secret Client B", "Secret Client C"].map((displayName) => ({ displayName })) });
+    const res = await callback(new Request("https://x/api/v1/integrations/meta_ads/callback?state=s&code=c"), { params: Promise.resolve({ provider: "meta_ads" }) });
+    const to = new URL(res.headers.get("location")!);
+    expect(to.searchParams.get("connected")).toBe("Meta Ads (3 accounts)");
+    expect(to.href).not.toContain("Secret");
   });
 });
 

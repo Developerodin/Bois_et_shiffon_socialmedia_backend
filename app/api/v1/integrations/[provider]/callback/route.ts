@@ -40,6 +40,12 @@ export async function GET(request: Request, context: { params: Promise<{ provide
 
   try {
     const { connections } = await completeConnect({ provider, state, code, userId: session.user.id });
+    // One Meta Ads login saves a connection per ad account: listing every name would put them all in the URL
+    // (history, logs) and can overflow it, so say how many instead.
+    if (provider === "META_ADS") {
+      const n = connections.length;
+      return back({ connected: `${PROVIDERS.META_ADS.label} (${n} account${n === 1 ? "" : "s"})` });
+    }
     return back({ connected: connections.map((c) => c.displayName).join(", ") });
   } catch (error) {
     if (error instanceof ConnectionError) return back({ connectError: error.message });
