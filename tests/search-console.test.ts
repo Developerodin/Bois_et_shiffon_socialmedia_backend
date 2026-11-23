@@ -30,7 +30,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
-  logs.mockRestore();
+  vi.restoreAllMocks();
 });
 
 describe("listSites", () => {
@@ -87,6 +87,42 @@ describe("fetchSearchWindow", () => {
     expect(w.days.map((d) => d.complete)).toEqual([true, false, false]);
     expect(w.days[1].pages).toEqual([]);
     expect(requests).toHaveLength(3);
+  });
+
+  it("a 5xx part way returns failed, keeping the days already read", async () => {
+    stub([
+      [200, { rows: [] }],
+      [200, { rows: pageRows(1) }], // day 1 done
+      [503, { error: { code: 503, message: "Backend Error" } }], // day 2
+    ]);
+    const w = await fetchSearchWindow(TOKEN, SITE, "2026-11-01", "2026-11-03");
+    expect(w.stoppedReason).toBe("failed");
+    expect(w.days.map((d) => d.complete)).toEqual([true, false, false]);
+    expect(w.days[0].pages).toHaveLength(1);
+  });
+
+  it("a timeout part way returns failed, keeping the days already read, and logs no URL", async () => {
+    stub([[200, { rows: [] }], [200, { rows: pageRows(1) }]]);
+    const replies = vi.mocked(fetch);
+    const real = replies.getMockImplementation()!;
+    let n = 0;
+    replies.mockImplementation(async (url, init) => {
+      if (++n === 3) throw new DOMException(`The operation was aborted due to timeout: ${String(url)}`, "TimeoutError");
+      return real(url, init);
+    });
+    const w = await fetchSearchWindow(TOKEN, SITE, "2026-11-01", "2026-11-02");
+    expect(w.stoppedReason).toBe("failed");
+    expect(w.days.map((d) => d.complete)).toEqual([true, false]);
+    expect(JSON.stringify(logs.mock.calls)).not.toContain("googleapis.com");
+  });
+
+  it("stops as capped once the run passes the time cap, keeping completed days", async () => {
+    vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(4 * 60_000 + 1);
+    stub([[200, { rows: [] }], [200, { rows: pageRows(1) }]]);
+    const w = await fetchSearchWindow(TOKEN, SITE, "2026-11-01", "2026-11-03");
+    expect(w.stoppedReason).toBe("capped");
+    expect(w.days.map((d) => d.complete)).toEqual([true, false, false]);
+    expect(requests).toHaveLength(2);
   });
 
   it("401 → reconnect, nothing complete, no further calls", async () => {

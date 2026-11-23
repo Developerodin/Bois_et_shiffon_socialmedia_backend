@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { THROTTLE_RETRIES } from "@/server/catalog/shopify";
 import { ORDERS_QUERY, fetchOrders } from "@/server/data/shopify-orders";
 
 // recorded 2026-11-23, Shopify Admin GraphQL (shape from docs)
@@ -90,7 +91,7 @@ describe("fetchOrders", () => {
   });
 
   it("stops as partial when Shopify keeps throttling, keeping only finished pages", async () => {
-    stubFetch({ body: page([REFUNDED], "c1") }, ...Array.from({ length: 6 }, () => ({ body: throttled })));
+    stubFetch({ body: page([REFUNDED], "c1") }, ...Array.from({ length: THROTTLE_RETRIES + 1 }, () => ({ body: throttled })));
     const { orders, cursorEnd, stoppedReason } = await fetchOrders(CONN, SINCE);
     expect(stoppedReason).toBe("rate_limited");
     expect(orders.map((o) => o.name)).toEqual(["#1001"]);
@@ -100,6 +101,37 @@ describe("fetchOrders", () => {
   it("a refused token returns reconnect and no orders", async () => {
     stubFetch({ body: page([REFUNDED], "c1") }, { status: 401, body: {} });
     expect(await fetchOrders(CONN, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: "reconnect" });
+  });
+
+  it("ACCESS_DENIED (no read_orders) is a missing scope, not a reconnect", async () => {
+    stubFetch({ body: { errors: [{ message: "Access denied for orders field.", extensions: { code: "ACCESS_DENIED" } }] } });
+    expect(await fetchOrders(CONN, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: "missing_scope" });
+  });
+
+  it("stops as capped after 50 pages, keeping them all", async () => {
+    stubFetch(...Array.from({ length: 50 }, (_, i) => ({ body: page([{ ...REFUNDED, id: `gid://shopify/Order/${i}` }], `c${i}`) })));
+    const { orders, stoppedReason } = await fetchOrders(CONN, SINCE);
+    expect(stoppedReason).toBe("capped");
+    expect(orders).toHaveLength(50);
+  });
+
+  it("stops as capped after 4 minutes, keeping the pages read", async () => {
+    vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(4 * 60_000 + 1);
+    const fetchMock = stubFetch({ body: page([REFUNDED], "c1") }, { body: page([DISCOUNTED], null) });
+    const { orders, cursorEnd, stoppedReason } = await fetchOrders(CONN, SINCE);
+    expect(stoppedReason).toBe("capped");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(orders.map((o) => o.name)).toEqual(["#1001"]);
+    expect(cursorEnd).toEqual(new Date("2026-11-21T09:00:00Z"));
+  });
+
+  it("never puts the token in a result or log, even when Shopify echoes it in errors[].message", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch({ body: { errors: [{ message: `Invalid API key or access token (unrecognized login or wrong password): ${TOKEN}` }] } });
+    const r = await fetchOrders(CONN, SINCE);
+    expect(r.stoppedReason).toBe("failed");
+    expect(error).toHaveBeenCalled();
+    expect(JSON.stringify([r, error.mock.calls])).not.toContain(TOKEN);
   });
 
   it("a 5xx returns failed and no orders, without throwing", async () => {

@@ -1,6 +1,6 @@
 // recorded 2026-11-23, Graph API v23.0 / Threads API v1.0 (shape from docs)
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readPostMetrics, refreshDue, type ConnectionToRead } from "@/server/data/post-metrics";
+import { hasFacebookPostId, readPostMetrics, refreshDue, type ConnectionToRead } from "@/server/data/post-metrics";
 
 const TOKEN = "EAAB-secret-token-123";
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -48,6 +48,56 @@ describe("readPostMetrics", () => {
     const [r] = await readPostMetrics([conn({ posts: posts(1) })], { fetch: f as unknown as typeof fetch });
     expect(f).toHaveBeenCalledTimes(1);
     expect(r.posts).toEqual([{ attemptId: "a0", ok: false, reason: "failed", code: 100 }]);
+  });
+
+  it("a metric refused with error 100 is dropped once, the posts retried without it, the rest saved", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const refused = { error: { message: "(#100) metric[1] must be one of the following values: views, likes", code: 100 } };
+    const noReach = (n: number) => ({ data: igInsights(n).data.filter((d) => d.name !== "reach") });
+    const replies = [json(400, refused), json(400, refused), json(200, noReach(10)), json(200, noReach(20))];
+    const f = vi.fn(async () => replies.shift()!);
+    const [r] = await readPostMetrics([conn({ posts: posts(2) })], { fetch: f as unknown as typeof fetch });
+    expect(f).toHaveBeenCalledTimes(4);
+    const urls = (f.mock.calls as unknown as [string][]).map(([u]) => u);
+    expect(urls[0]).toContain("metric=views,reach,likes");
+    expect(urls[2]).toBe("https://graph.instagram.com/v23.0/m0/insights?metric=views,likes,comments,shares,saved,total_interactions");
+    expect(warn.mock.calls.filter(([l]) => String(l).includes("dropped metric reach"))).toHaveLength(1);
+    expect(r.stoppedReason).toBeUndefined();
+    expect(r.posts.map((p) => p.ok)).toEqual([true, true]);
+    expect(r.posts[0]).toMatchObject({ ok: true, metrics: { views: 10, reach: null } });
+  });
+
+  it("maps Facebook: missing shares → 0, interactions summed, missing numbers → null", async () => {
+    const f = vi.fn(async () =>
+      json(200, [
+        item(200, { id: "1_2", insights: { data: [{ name: "post_media_view", values: [{ value: 40 }] }, { name: "post_total_media_view_unique", values: [{ value: 30 }] }] }, reactions: { summary: { total_count: 5 } }, comments: { summary: { total_count: 2 } }, shares: { count: 3 } }),
+        item(200, { id: "1_3", reactions: { summary: { total_count: 1 } }, comments: { summary: { total_count: 0 } } }),
+        item(200, { id: "1_4", insights: { data: [] }, comments: { summary: { total_count: 4 } } }),
+      ]),
+    );
+    const [r] = await readPostMetrics([conn({ provider: "META" })], { fetch: f as unknown as typeof fetch });
+    expect(r.posts.map((p) => (p.ok ? p.metrics : null))).toEqual([
+      { views: 40, reach: 30, likes: 5, comments: 2, shares: 3, saves: null, interactions: 10 },
+      { views: null, reach: null, likes: 1, comments: 0, shares: 0, saves: null, interactions: 1 },
+      { views: null, reach: null, likes: null, comments: 4, shares: 0, saves: null, interactions: null },
+    ]);
+  });
+
+  it("reads a Threads post with one GET, the token in the header, reposts + quotes + shares as shares", async () => {
+    const f = vi.fn(async () =>
+      json(200, { data: [["views", 100], ["likes", 7], ["replies", 3], ["reposts", 2], ["quotes", 1], ["shares", 4]].map(([name, value]) => ({ name, values: [{ value }] })) }),
+    );
+    const [r] = await readPostMetrics([conn({ provider: "THREADS", posts: posts(1) })], { fetch: f as unknown as typeof fetch });
+    const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://graph.threads.net/v1.0/m0/insights?metric=views,likes,replies,reposts,quotes,shares");
+    expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${TOKEN}`);
+    expect(r.posts).toEqual([{ attemptId: "a0", ok: true, metrics: { views: 100, reach: null, likes: 7, comments: 3, shares: 7, saves: null, interactions: 17 } }]);
+    expect(r.stoppedReason).toBeUndefined();
+  });
+
+  it("only page-scoped Facebook ids can have insights", () => {
+    expect(hasFacebookPostId("123_456")).toBe(true);
+    expect(hasFacebookPostId("789")).toBe(false);
   });
 
   it("190 stops that connection with reconnect and still reads the next one", async () => {
