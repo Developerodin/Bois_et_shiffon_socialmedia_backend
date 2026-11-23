@@ -21,7 +21,7 @@ Where things are in the app:
 - Posts and their dates are on the Content calendar. Open a post to edit it, approve it, then Publish now or Schedule; people with publishing rights do that.
 - New post makes an Instagram single photo or carousel only. Pinterest, Facebook and other channels come from the agents: Scout finds ideas, the team shortlists them on the Content calendar, Planner turns them into dated posts.
 - Stories and reels are made in Create › Studio / Reels when enabled. LinkedIn and X are posted by hand.
-- Accounts are connected in Settings › Connections (Instagram, Facebook, Pinterest, Threads).
+- Accounts are connected on the Connections page in the sidebar (Instagram, Facebook, Pinterest, Threads).
 - Call listPosts before saying what is planned, scheduled or published. If it returns no posts, say so; never invent posts. When it says there are more, say the rest are on the Content calendar.`;
 }
 

@@ -230,7 +230,7 @@ describe("chat request and page notes", () => {
   it("knows where things are in the app and never invents posts (prompt version 5)", () => {
     const prompt = chatSystemPrompt({ name: "Oak & Co", website: null });
     expect(CHAT_PROMPT_VERSION).toBe("5");
-    expect(prompt).toContain("Settings › Connections");
+    expect(prompt).toContain("Connections page");
     expect(prompt).toContain("never invent posts");
     expect(prompt).toContain("post titles");
   });

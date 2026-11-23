@@ -21,7 +21,11 @@ const POST_FILTERS = {
   published: [...STATUS_GROUPS.published],
 } as const;
 // Titles are data written by agents and people: one line, no control characters, short.
-const cleanTitle = (t: string) => t.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim().slice(0, 100);
+// Zero-width and bidi characters go too, so a title can't hide or reorder text.
+const cleanTitle = (t: string) =>
+  t.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+/g, " ").trim().slice(0, 100) || "(untitled)";
+// A post whose time passed this recently may still be publishing: not overdue yet.
+const OVERDUE_GRACE_MS = 15 * 60_000;
 
 const RUNNABLE = AGENTS.filter((a) => a.key !== "systems-check" && !a.internal).map((a) => a.key) as [string, ...string[]];
 
@@ -192,7 +196,7 @@ export function chatTools(scope: ChatScope) {
       },
     }),
 
-    // ponytail: reads by [workspaceId, brandId, status]; add an index on (brandId, status, scheduledFor) if a brand
+    // ponytail: filters by [workspaceId, brandId, status] and sorts the brand's matching posts in memory; add an index on (brandId, status, scheduledFor) if a brand
     // reaches ~100k posts.
     listPosts: tool({
       description:
@@ -226,7 +230,7 @@ export function chatTools(scope: ChatScope) {
         const timeZone = profile?.timeZone && isTimeZone(profile.timeZone) ? profile.timeZone : DEFAULT_TIME_ZONE;
         const now = new Date();
         // REVIEWED is a published post the team has looked back on: shown as Published.
-        const shown = (s: string) => (s === "REVIEWED" ? "PUBLISHED" : s);
+        const shown = (s: string) => ((STATUS_GROUPS.published as readonly string[]).includes(s) ? "PUBLISHED" : s);
         const byStatus: Record<string, number> = {};
         for (const c of counts) byStatus[shown(c.status)] = (byStatus[shown(c.status)] ?? 0) + c._count._all;
         return {
@@ -237,7 +241,7 @@ export function chatTools(scope: ChatScope) {
             channel: p.channel,
             status: shown(p.status),
             when: p.scheduledFor ? wallTime(p.scheduledFor, timeZone) : null,
-            ...(status !== "published" && p.scheduledFor && p.scheduledFor < now ? { overdue: true } : {}),
+            ...(status !== "published" && p.scheduledFor && p.scheduledFor.getTime() < now.getTime() - OVERDUE_GRACE_MS ? { overdue: true } : {}),
           })),
           byStatus,
           more: rows.length > limit,
