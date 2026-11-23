@@ -10,7 +10,7 @@ const db = vi.hoisted(() => {
     taskChecklistItem: { groupBy: vi.fn(), findMany: vi.fn() },
     taskAttachment: { findMany: vi.fn() },
     taskComment: { create: vi.fn() },
-    auditEvent: { create: vi.fn() },
+    auditEvent: { create: vi.fn(), findFirst: vi.fn() },
     notification: { createMany: vi.fn() },
     workspaceMember: { findFirst: vi.fn(), findMany: vi.fn() },
     brandMember: { findFirst: vi.fn(), findMany: vi.fn(async () => []) },

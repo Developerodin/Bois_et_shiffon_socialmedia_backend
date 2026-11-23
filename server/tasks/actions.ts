@@ -48,6 +48,18 @@ export async function runTaskAction(scope: TaskScope, v: TaskViewer, taskId: str
     if ((action === "approve" || action === "requestChanges") && !(await canBeAssigned(tx, scope, scope.userId, current))) {
       throw new TaskError("You can no longer review this task.", 403);
     }
+    // Four eyes: whoever sent it for review doesn't approve it. Closes owner → hand the task to someone else, name
+    // yourself reviewer, submit, approve. Cost: a manager who submits naming themselves can't approve. Sole staff can.
+    if (action === "approve") {
+      const sent = await tx.auditEvent.findFirst({
+        where: { entityType: "Task", entityId: taskId, action: "task.submitForReview" },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: { actorUserId: true },
+      });
+      if (sent?.actorUserId === scope.userId && !(await isSoleStaff(scope.workspaceId, scope.brandId, scope.userId))) {
+        throw new TaskError("You sent this task for review, so someone else approves it.", 409, "task.selfApproval");
+      }
+    }
     const data = Object.fromEntries(Object.entries(patch).map(([k, val]) => [k, DATE_FIELDS.has(k) && typeof val === "string" ? new Date(val) : val]));
     try {
       await tx.task.update({ where: { id: taskId }, data: data as Prisma.TaskUncheckedUpdateInput });
