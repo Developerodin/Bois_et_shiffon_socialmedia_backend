@@ -1,5 +1,5 @@
 import type { IntegrationProvider } from "@prisma/client";
-import { ProviderError } from "@/server/integrations/providers";
+import { GRAPH, IG_GRAPH as IG, ProviderError, THREADS_GRAPH as THREADS } from "@/server/integrations/providers";
 
 /**
  * One call per platform that turns an approved post into a live one. Graph v23 / Threads v1.0 /
@@ -38,9 +38,6 @@ export type Published = { externalId: string; externalUrl: string | null };
 
 export class PublishRefused extends Error {}
 
-const GRAPH = "https://graph.facebook.com/v23.0";
-const IG = "https://graph.instagram.com/v23.0";
-const THREADS = "https://graph.threads.net/v1.0";
 const PINTEREST = "https://api.pinterest.com/v5";
 
 async function call<T>(url: string, init?: RequestInit): Promise<T> {

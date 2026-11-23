@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { shopifyQuery } from "@/server/catalog/shopify";
 import { ReconnectNeeded } from "@/server/services/connections";
 import type { SyncStop } from "@/server/data/sync-stop";
@@ -81,26 +82,14 @@ const OVERLAP_MS = 3_600_000; // re-reads the last hour: covers clock skew and s
 const MAX_PAGES = 50;
 const MAX_MS = 4 * 60_000;
 
-/** Adds decimal strings exactly (scaled BigInt). "10.5" + "0.25" → "10.75"; at least two decimals out. */
-export function addDecimals(...values: string[]): string {
-  const scale = Math.max(2, ...values.map((v) => (v.split(".")[1] ?? "").length));
-  let sum = BigInt(0);
-  for (const v of values) {
-    const m = /^(-?)(\d+)(?:\.(\d+))?$/.exec(v.trim());
-    if (!m) throw new Error("Shopify returned an amount that is not a decimal");
-    const units = BigInt(m[2] + (m[3] ?? "").padEnd(scale, "0"));
-    sum += m[1] ? -units : units;
-  }
-  const neg = sum < BigInt(0);
-  const digits = (neg ? -sum : sum).toString().padStart(scale + 1, "0");
-  return `${neg ? "-" : ""}${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
-}
+/** Adds decimal amounts exactly (Prisma.Decimal, never floats) → a fixed-2 string: "0.1" + "0.2" → "0.30". */
+const add = (...values: string[]) => values.reduce((sum, v) => sum.plus(v), new Prisma.Decimal(0)).toFixed(2);
 
 const amount = (m: Money | null | undefined) => m?.shopMoney.amount ?? "0";
 
 export function mapOrder(o: OrderNode): ShopOrderRow {
-  const netSales = addDecimals(amount(o.currentSubtotalPriceSet));
-  const discounts = addDecimals(amount(o.currentTotalDiscountsSet));
+  const netSales = add(amount(o.currentSubtotalPriceSet));
+  const discounts = add(amount(o.currentTotalDiscountsSet));
   return {
     shopifyId: o.id,
     name: o.name,
@@ -110,12 +99,12 @@ export function mapOrder(o: OrderNode): ShopOrderRow {
     currency: o.currentSubtotalPriceSet.shopMoney.currencyCode ?? "",
     netSales,
     discounts,
-    gross: addDecimals(netSales, discounts),
-    shipping: addDecimals(amount(o.currentShippingPriceSet)),
-    taxes: addDecimals("0", ...o.currentTaxLines.map((t) => amount(t.priceSet))),
+    gross: add(netSales, discounts),
+    shipping: add(amount(o.currentShippingPriceSet)),
+    taxes: add("0", ...o.currentTaxLines.map((t) => amount(t.priceSet))),
     taxesIncluded: o.taxesIncluded,
-    total: addDecimals(amount(o.currentTotalPriceSet)),
-    refunded: addDecimals(amount(o.totalRefundedSet)),
+    total: add(amount(o.currentTotalPriceSet)),
+    refunded: add(amount(o.totalRefundedSet)),
     sourceName: o.sourceName,
     shopifyUpdatedAt: new Date(o.updatedAt),
   };

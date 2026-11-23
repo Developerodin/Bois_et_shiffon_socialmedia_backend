@@ -52,7 +52,7 @@ export type SearchWindow = { days: SearchDayResult[]; stoppedReason?: StopReason
 type Row = { keys?: string[]; clicks?: number; impressions?: number; position?: number };
 
 function reasonOf(e: ProviderError): StopReason {
-  const status = Number(e.message.slice(0, 3));
+  const status = e.status;
   if (status === 401 || /invalid_grant/.test(e.message)) return "reconnect";
   if (status === 429 || (status === 403 && /quota|rate/i.test(e.message))) return "rate_limited";
   if (status === 403) return "permission";

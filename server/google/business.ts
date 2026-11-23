@@ -48,7 +48,7 @@ async function google<T>(conn: IntegrationConnection, url: string, init?: { meth
   } catch (e) {
     if (!(e instanceof ProviderError)) throw e;
     console.error("[google-business]", url.replace(/\?.*/, ""), e.message);
-    const status = Number(e.message.slice(0, 3));
+    const status = e.status;
     if (status === 401) {
       await markReconnect(conn.id, `Google access was removed. Reconnect ${conn.displayName}.`);
       throw new PublishingError(`Google access to ${conn.displayName} was removed. Reconnect it in Business → Connections.`, 409);

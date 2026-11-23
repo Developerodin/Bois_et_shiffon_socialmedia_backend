@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ORDERS_QUERY, addDecimals, fetchOrders } from "@/server/data/shopify-orders";
+import { ORDERS_QUERY, fetchOrders } from "@/server/data/shopify-orders";
 
 // recorded 2026-11-23, Shopify Admin GraphQL (shape from docs)
 const money = (amount: string, currencyCode = "EUR") => ({ shopMoney: { amount, currencyCode } });
@@ -91,13 +91,5 @@ describe("fetchOrders", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     stubFetch({ body: page([REFUNDED], "c1") }, { status: 500, body: { errors: [{ message: "Internal error", extensions: { code: "INTERNAL_SERVER_ERROR" } }] } });
     expect(await fetchOrders(CONN, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: "failed" });
-  });
-});
-
-describe("addDecimals", () => {
-  it("adds exactly without floats", () => {
-    expect(addDecimals("0.1", "0.2")).toBe("0.30");
-    expect(addDecimals("10", "-12.5")).toBe("-2.50");
-    expect(addDecimals("1.005", "0")).toBe("1.005");
   });
 });
