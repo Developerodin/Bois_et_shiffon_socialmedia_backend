@@ -4,6 +4,96 @@ Branch `ai-reels` (not pushed, not merged). Today moved the app's Figma screens 
 one module at a time. Each module was given a review for correctness, security, performance and maintainability,
 tested on the emulator, fixed, and committed.
 
+## Phase 1: tasks, projects, notifications, search (2026-11-23)
+
+Branch `phase-1` in server, web and mobile (from main: server 73cb793, web 07cfa07, mobile f94e058). Spec:
+`docs/superpowers/specs/2026-11-23-phase-1-tasks-design.md`; plan: `docs/superpowers/plans/2026-11-23-phase-1-tasks.md`.
+Ledger and task reports: `.superpowers/sdd/2026-11-23-phase-1-tasks/`.
+**Not checked in a browser, and the DB-backed suite has never run** (see "Before go-live").
+
+### What changed for people
+- Tasks: a list and a board per brand, with filters and a Needs-action rule shared with Today. A task opens in a panel
+  (side peek on the Overview, full page under Tasks): status actions, owner and reviewer, due day, checklist, comments,
+  attachments (before/after screenshots), links to a post, report or project. Review cannot be skipped; the reviewer is
+  frozen while a task is in review; a blocked task records who it waits on.
+- Projects: work projects with milestones and a progress count; a name-only "New project" form (the only way to create
+  one from the web).
+- Website and SEO queues: tasks with an area; SEO tasks carry the findings' page URLs and can be closed by hand ("checked
+  live") or cleared automatically when a later audit no longer shows the finding.
+- Make a task on findings: a button on each audit finding (one task per finding, or one per page list). A second task on
+  the same finding is refused with "close the older task first".
+- Today groups, a bell (notifications, 90-day prune), search (Ctrl/Cmd+K, five kinds) and quick create ("+"), notes to
+  tasks (paste notes, the AI proposes tasks, you confirm; free, capped). These five are Tasks 19 and 20, finished in
+  parallel: see commits, no ids here.
+- LinkedIn and X posts are planned and written with their own limits (3,000 and 280 characters) and recorded as posted
+  by hand (link optional). Publishing to them is refused; there is no connection.
+
+### Flag
+`WEB_FEATURES=tasks`, or per workspace `WEB_FEATURE_WORKSPACES=tasks:<id>` (`web/lib/features.ts`). The server API ships
+unflagged but permission-checked, so it is harmless with the web flag off.
+
+### Migrations and deploy order
+- `20261123052135_phase1_tasks`: `pg_trgm`, Task, work project, checklist, attachment, comment, notification tables,
+  partial and trigram indexes, role keys.
+- `20261123180000_phase1_channels`: LinkedIn and X channels.
+- Order: server `prisma migrate deploy` first, then web. The phone labels for the new channels already shipped.
+
+### Permissions
+- New keys `tasks.read` and `tasks.manage` (project scope, group "tasks"; `shared/permissions.ts`).
+- Defaults: `tasks.read` for owner, admin, project-admin, manager, creator, commercial-owner, approver, viewer and
+  client-reviewer. `tasks.manage` for owner, admin, project-admin, manager, creator and commercial-owner. `member` has
+  neither. Custom PROJECT roles holding `content.create` get `tasks.read`.
+- Notes to tasks needs `tasks.manage`. Search filters each kind by that kind's own list permission.
+
+### Rulings that change behaviour
+- Custom workspace-scope roles with `content.create` do not get `tasks.read`; give the key by hand.
+- A due day is a calendar day in the brand's time zone; a brand without one counts in UTC.
+- The person a task is blocked on may unblock it, as well as owner and managers.
+- Editing a task's project re-checks owner and reviewer visibility; changing areas does not.
+- `view=mine` returns posts only when no area filter, or the Content area, is set. Today groups sort by due day, then id.
+- GET task detail includes checklist and attachments; comments have their own route. Staff comments are internal unless
+  shared; the detail carries `clientVisible` and `viewerIsClient`.
+- A positional finding that already has an open task returns 409 (`task.findingTaken`) rather than reusing an old task.
+- The pagespeed clearing job does nothing when PageSpeed did not run in the audit.
+- Screenshots upload through the existing stories upload flow (slot, PUT, verify).
+- A new "tasks" nav entry sits in an unrendered "page" group, not "more".
+
+### Ceilings
+- Daily checks run in the 05:00 UTC `system.daily-sweep`: brands west of UTC get daily notifications a day late. Fix:
+  run hourly and fire each brand once its local day has started.
+- Search is `ILIKE` on trigram indexes across the workspace's visible brand data, not scoped to one brand;
+  5 results per kind; 30 requests/min per user.
+- Notes to tasks: 10/hour per user, 100/day per workspace. Batch create: 20 tasks.
+- Task list is keyset-paged; Today uses one count query.
+
+### Before go-live
+- Run `npm run test:db` against a throwaway Postgres with `TEST_DATABASE_URL`. It has never run (no Docker or Postgres
+  here); the SQL visibility, index, keyset and clearing rules are tested only there.
+- Storage bucket CORS must allow browser PUT for screenshot uploads.
+- Open the pages in a browser: no DOM tests exist for the task list, board, panel, Today, bell, search or quick create.
+- Tell the owner about the extra name-only "New project" form.
+
+### Deferred minors
+- Tasks: checkedLive refused on IN_REVIEW; refusal text says "in progress" though TODO is allowed; NOT_YOURS reason is a
+  guess; checklist and milestone reorder send parallel PATCHes without rollback; double reloads per write.
+- Server: `isSoleStaff` reads outside the transaction; a missing reason returns 409; moving a project fails if the stored
+  blocked-on person left; any P2002 on project create reads as campaignTaken; purge removes the row before the file, so
+  a crash can orphan a file; the same upload can be attached twice; OPEN predicate duplicated in daily-tasks.ts and
+  list.ts; overdue rows for archived brands or departed owners; the per-user hourly note count is spent when the
+  workspace cap refuses.
+- Web: finding buttons reset to "Make a task" after a reload; Make a task also shows on GEO findings; no upload control
+  for OTHER-role attachments; stale comment in `draft-editor.tsx`.
+- Phone and channels: LinkedIn/X labels not translated on the phone; no hashtag-count check for X and LinkedIn; refusal
+  wording is the existing "can't be published automatically".
+
+### Commits (base..head)
+- Task 1: mobile f94e058..a4b7ded. Task 2: server 73cb793..6df7625, web 07cfa07..5416705, mobile ..80860cb.
+- Tasks 3 to 14: server 6df7625..d14357e (task 3 ends 59af7d7, 4 cb2b00b, 5 cc2f53f, 6+7 18105f7, 8+9 d81d0aa,
+  10+11 68549c5, 12 2271fb5, 13+14 d14357e).
+- Task 22 (channels): server d14357e..a4de10d, web e54ea6e, mobile cce70ac. Client flags: server a4de10d..8c1b9cb,
+  web a872053, mobile d39674e.
+- Web: Task 15 fe16afd..7923ca2; 16+17 7923ca2..da7df89; 18+21 da7df89..b216a3e. Tasks 19+20: see commits.
+
 ## Overview side peek (2026-11-20)
 
 Branch `overview-peek` in web (server and mobile carry only the shared `ContextDocKind` list). Plan:
