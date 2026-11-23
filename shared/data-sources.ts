@@ -49,3 +49,36 @@ export type DataSourceDto = {
   /** The zone the provider's days are in (Google: Pacific; Meta Ads: the account's), when it says */
   reportsInZone: string | null;
 };
+
+/** ContentItem.channel (prisma ContentChannel). */
+export type PostChannel =
+  | "INSTAGRAM_POST" | "INSTAGRAM_CAROUSEL" | "INSTAGRAM_REEL" | "INSTAGRAM_STORY" | "FACEBOOK_POST" | "PINTEREST_PIN"
+  | "THREADS_POST" | "LINKEDIN_POST" | "X_POST";
+
+/** A post's numbers from its latest read; null where the platform gives none (show "—", not 0). */
+export type PostMetricsDto = {
+  views: number | null;
+  reach: number | null;
+  likes: number | null;
+  comments: number | null;
+  shares: number | null;
+  saves: number | null;
+  interactions: number | null;
+};
+
+/** GET insights/posts?from&to (analytics.read): one per Instagram, Facebook or Threads post published in the range. */
+export type PostInsightDto = {
+  attemptId: string;
+  contentItemId: string;
+  title: string | null;
+  channel: PostChannel;
+  /** ISO instant */
+  publishedAt: string;
+  /** null until the first read */
+  metrics: PostMetricsDto | null;
+  /** ISO instant of the latest read ("Updated 3 h ago"), or null */
+  readAt: string | null;
+  /** Past day 30: these numbers are the last read and won't change */
+  final: boolean;
+};
+export type PostInsightsDto = { posts: PostInsightDto[] };
