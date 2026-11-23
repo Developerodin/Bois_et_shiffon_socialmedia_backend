@@ -5,9 +5,9 @@ const task = (o: Partial<TaskRow> = {}): TaskRow => ({
   status: "IN_PROGRESS", reviewerId: null, ownerId: "o", url: null, blockedReason: null, blockedOnId: null,
   completedAt: null, checkedLiveAt: null, checkedLiveById: null, findingClearedAt: null, recheckOn: null, ...o,
 });
-const owner: ActorRole = { userId: "o", isOwner: true, isReviewer: false, canManage: false, soleStaff: false };
-const reviewer: ActorRole = { userId: "r", isOwner: false, isReviewer: true, canManage: false, soleStaff: false };
-const manager: ActorRole = { userId: "m", isOwner: false, isReviewer: false, canManage: true, soleStaff: false };
+const owner: ActorRole = { userId: "o", isOwner: true, isReviewer: false, canManage: false, soleStaff: false, isBlockedOn: false };
+const reviewer: ActorRole = { userId: "r", isOwner: false, isReviewer: true, canManage: false, soleStaff: false, isBlockedOn: false };
+const manager: ActorRole = { userId: "m", isOwner: false, isReviewer: false, canManage: true, soleStaff: false, isBlockedOn: false };
 const now = "2026-11-23T10:00:00.000Z";
 
 describe("task rules", () => {
@@ -41,6 +41,16 @@ describe("task rules", () => {
     expect(applyAction(task(), "submitForReview", owner, { now })).toMatchObject({ ok: false });
     expect(applyAction(task(), "submitForReview", { ...owner, soleStaff: true }, { now, reviewerId: "o" })).toMatchObject({ ok: true, patch: { status: "IN_REVIEW", reviewerId: "o" } });
     expect(applyAction(task(), "submitForReview", owner, { now, reviewerId: "r" })).toMatchObject({ ok: true, patch: { status: "IN_REVIEW", reviewerId: "r" } });
+  });
+  it("block records who it waits on", () => {
+    expect(applyAction(task(), "block", owner, { now, reason: "waiting", blockedOnId: "x" })).toMatchObject({ ok: true, patch: { blockedReason: "waiting", blockedOnId: "x" } });
+  });
+  it("blocked-on person may unblock", () => {
+    const t = task({ blockedReason: "wait", blockedOnId: "x" });
+    const other: ActorRole = { userId: "x", isOwner: false, isReviewer: false, canManage: false, soleStaff: false, isBlockedOn: true };
+    expect(applyAction(t, "unblock", other, { now })).toMatchObject({ ok: true });
+    expect(allowedActions(t, other)).toEqual(["unblock"]);
+    expect(applyAction(t, "unblock", { ...other, isBlockedOn: false }, { now })).toMatchObject({ ok: false });
   });
   it("close clears blocked", () => {
     const t = task({ blockedReason: "wait", blockedOnId: "x" });
