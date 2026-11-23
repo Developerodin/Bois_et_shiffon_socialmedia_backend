@@ -104,11 +104,13 @@ unflagged but permission-checked, so it is harmless with the web flag off.
   the group read up to its newest); a staff reviewer's note is staff-only unless "Share with client"; both New project
   forms stay. Fixes: clearFindings locks each task and re-reads under the lock; post picker searches posts only under
   its own limit; Notification indexes (userId, workspaceId, createdAt desc, id desc), (taskId), (brandId, workspaceId);
-  Approve hidden from the submitter in the panel (list rows still carry it); Send for review uses the unsaved reviewer;
+  Approve hidden from the submitter; Send for review uses the unsaved reviewer;
   task list re-reads loaded pages on poll; caption limits in one shared map; editor blocks >5 hashtags only on
   Instagram (was every channel). Migration 20261124090000_phase1_review_fixes. Not browser-checked.
-  Known: mobile doesn't send shareWithClient, so phone approvals by staff are always staff-only notes; the web editor's
-  Pinterest 500 limit isn't enforced at publish; Task user-FK indexes (ownerId etc.) skipped, no user hard-delete.
+  Follow-up (62873f5): Approve is hidden from the submitter on list rows too (one audit read per page, in
+  toTaskDtos); pin descriptions over 500 are a content-rule blocker (Pinterest itself takes 800; not checked at publish);
+  Task ownerId/reviewerId/blockedOnId/createdById indexed. Migration applied to the Neon dev DB 2026-11-23. The phone
+  app has no task approve screen, so shareWithClient needs nothing there.
 - Storage bucket CORS must allow browser PUT for screenshot uploads.
 - Set `PLANNER_HAND_CHANNELS=on` only after the phone build with the LinkedIn and X labels is released.
 
