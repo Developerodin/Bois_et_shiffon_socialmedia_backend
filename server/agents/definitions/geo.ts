@@ -13,6 +13,7 @@ import { aiCrawlerAccess, applyPriorities, geoTechnicalChecks, scoreFindings, ty
 import { collectSiteFacts } from "@/server/seo/site-facts";
 import { saveAuditReport } from "@/server/services/audit-reports";
 import { latestContext } from "@/server/services/context-docs";
+import { slugify } from "@/server/services/slug";
 
 const QUESTION_COUNT = 5; // ponytail: 5 web-search answers per run caps cost; raise for a wider panel
 
@@ -68,6 +69,23 @@ export function mentionsBrand(a: z.infer<typeof Answer>, brandName: string, doma
   );
 }
 
+/**
+ * Ids for the AI content review's findings, from their titles ("content-missing-faq"), so the same finding keeps its
+ * id from one report to the next and a later run can tell it already has a task. A repeated title gets "-2", "-3".
+ * Never all digits: "content-12" is the old positional id (see isPositionalFindingId).
+ */
+export function contentFindingIds(titles: string[]): string[] {
+  const used = new Set<string>();
+  return titles.map((title) => {
+    const slug = slugify(title, { max: 60, fallback: "untitled" }).replace(/-$/, "");
+    const base = `content-${/^\d+$/.test(slug) ? "untitled" : slug}`;
+    let id = base;
+    for (let n = 2; used.has(id); n++) id = `${base}-${n}`;
+    used.add(id);
+    return id;
+  });
+}
+
 /** A question that already names the brand can't show whether AI would recommend it unprompted. */
 export const isBrandedQuestion = (q: string, brandName: string, domain = "") =>
   namesBrand(q, brandName, domain || "-");
@@ -82,6 +100,7 @@ export const geoAgent: AgentDefinition = {
   name: "GEO",
   description: "Checks whether AI assistants like ChatGPT recommend the brand, and what to change so they do.",
   inputSchema: z.object({}).strict(),
+  schedule: "weekly",
   async run(ctx) {
     const { brand } = ctx;
     if (!brand.websiteUrl) throw new Error("Brand has no website URL — add one in Context settings");
@@ -138,7 +157,10 @@ export const geoAgent: AgentDefinition = {
       }),
     );
     const cit = await citP;
-    const contentFindings: Finding[] = cit.findings.map((f, i) => ({ id: `content-${i + 1}`, category: "Content (AI review)", ...f }));
+    // Only pages we read: a link the AI made up (or a page's text talked it into) never reaches a task.
+    const crawled = new Set(facts.pages.map((p) => p.url));
+    const ids = contentFindingIds(cit.findings.map((f) => f.title));
+    const contentFindings: Finding[] = cit.findings.map((f, i) => ({ id: ids[i]!, category: "Content (AI review)", ...f, urls: f.urls.filter((u) => crawled.has(u)) }));
 
     const competitorCounts = new Map<string, number>();
     for (const r of results)
@@ -155,7 +177,8 @@ export const geoAgent: AgentDefinition = {
     const score = clamp(0.4 * visibility + 0.3 * citability + 0.3 * technicalScore);
     const findings = [...technical, ...contentFindings];
     // Skip in mock mode: no real AI answered, so "not recommended" would be a false alarm.
-    if (visibility === 0 && unbranded.length && aiProviderName() === "openai") {
+    const visibilityMeasured = aiProviderName() === "openai" && unbranded.length > 0;
+    if (visibility === 0 && visibilityMeasured) {
       findings.unshift({ id: "not-recommended", category: "Visibility", severity: "high", title: "AI assistants don't mention the brand yet", detail: `None of the ${unbranded.length} unbranded shopper questions returned ${brand.displayName}. Brands named instead: ${competitors.slice(0, 5).map((c) => c.name).join(", ") || "none"}.`, fix: "Build brand mentions where AI assistants look: press and blog features, Reddit and YouTube discussions, comparison and 'best of' lists, and a Wikipedia/Wikidata entry if notable." });
     }
 
@@ -185,6 +208,9 @@ export const geoAgent: AgentDefinition = {
         crawlers,
         hasLlmsTxt: facts.hasLlmsTxt,
         pages: cit.pages,
+        // What the clear job needs: which pages were re-read, and whether "not-recommended" was tested at all.
+        pagesChecked: [...crawled],
+        visibilityMeasured,
       },
       agentRunId: ctx.runId,
     });

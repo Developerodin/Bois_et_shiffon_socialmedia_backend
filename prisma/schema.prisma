@@ -1439,6 +1439,8 @@ model Task {
   @@index([reviewerId])
   @@index([blockedOnId])
   @@index([createdById])
+  /// A finding's earlier tasks, newest first (tasksFromReport).
+  @@index([brandId, findingKind, findingId, createdAt])
 }
 
 model TaskChecklistItem {
