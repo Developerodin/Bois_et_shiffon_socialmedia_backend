@@ -20,6 +20,7 @@ import { onAssetFailure, REEL_ASSET_JOB, runAsset } from "@/server/reels/assets"
 import "@/server/reels/templates"; // registers its asset kind
 import "@/server/reels/presenters"; // registers its asset kind
 import { purgeOldRecordings } from "@/server/reels/recordings";
+import { clearFindings, FINDING_CLEAR_JOB } from "@/server/seo/finding-tasks";
 import { purgeStaleUploads } from "@/server/stories/uploads";
 import { onStoryRenderFailure, runStoryRender, STORY_RENDER_JOB } from "@/server/stories/service";
 import { onVoiceDeleteFailure, reclaimAbandonedClones, runVoiceDelete, VOICE_DELETE_JOB } from "@/server/reels/clones";
@@ -40,6 +41,7 @@ const HANDLERS: Record<string, Handler> = {
   [CATALOG_SYNC_JOB]: { run: runCatalogSync },
   [DAILY_SWEEP_JOB]: { run: dailySweep },
   [EMAIL_SEND_JOB]: { run: sendOutboxEmail },
+  [FINDING_CLEAR_JOB]: { run: clearFindings },
   [PHOTOSHOOT_JOB]: { run: runShoot, onFailure: onShootFailure },
   [PUBLISH_JOB]: { run: executePublication, onFailure: onPublishJobLost },
   [REEL_ASSET_JOB]: { run: runAsset, onFailure: onAssetFailure },
