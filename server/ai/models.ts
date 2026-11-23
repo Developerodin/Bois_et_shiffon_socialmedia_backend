@@ -28,7 +28,7 @@ const TIERS: Record<Exclude<Tier, "medium">, string[]> = {
     "quality.",
     "reels.script",
   ],
-  light: ["systems-check.", "geo.questions", "reels.seam", "translate"],
+  light: ["systems-check.", "geo.questions", "reels.seam", "translate", "tasks.from-note"],
 };
 
 const RANK: Record<Tier, number> = { light: 0, medium: 1, heavy: 2 };

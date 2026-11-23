@@ -56,7 +56,7 @@ export const dayOf = (d: Date | null) => d?.toISOString().slice(0, 10) ?? null;
 const isoOf = (d: Date | null) => d?.toISOString() ?? null;
 
 /** The manage-editable fields present in `input`, as column values. */
-function columns(input: Partial<TaskInput>): Record<string, unknown> {
+export function columns(input: Partial<TaskInput>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const k of MANAGE_PATCH_FIELDS) {
     const val = input[k];

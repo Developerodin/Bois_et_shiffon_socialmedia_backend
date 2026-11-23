@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import type { Db } from "@/server/auth/permissions";
 
-type Entity = { type: "Task" | "WorkProject" | "TaskComment"; id: string; title?: string };
+type Entity = { type: "Task" | "WorkProject" | "TaskComment" | "Brand"; id: string; title?: string };
 
 /** One AuditEvent for a task-feature write, in the caller's transaction. The title is kept so deletes and cancels still read. */
 export function taskAudit(tx: Db, scope: { workspaceId: string; brandId: string; userId: string }, action: string, entity: Entity, metadata?: Record<string, unknown>) {
