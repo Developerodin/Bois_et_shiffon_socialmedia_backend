@@ -61,8 +61,9 @@ unflagged but permission-checked, so it is harmless with the web flag off.
 ### Ceilings
 - Daily checks run in the 05:00 UTC `system.daily-sweep`: brands west of UTC get daily notifications a day late. Fix:
   run hourly and fire each brand once its local day has started.
-- Search is `ILIKE` on trigram indexes across the workspace's visible brand data, not scoped to one brand;
-  5 results per kind; 30 requests/min per user.
+- Search is `ILIKE` ranked by trigram similarity, always limited to the open business; 5 results per kind; 30
+  requests/min per user. Ceiling: the trigram indexes span every brand, so common short queries scan other brands'
+  matches before filtering; add `btree_gin` (brandId, title gin_trgm_ops) if search slows on large catalogues.
 - Notes to tasks: 10/hour per user, 100/day per workspace. Batch create: 20 tasks.
 - Task list is keyset-paged; Today uses one count query.
 
