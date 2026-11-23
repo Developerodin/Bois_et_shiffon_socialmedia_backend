@@ -1,10 +1,8 @@
 import "server-only";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
-import { brandMemberPerms, CLIENT_GRANT_WHERE, hasOtherHolder, isClientGrant, memberRole } from "@/server/auth/permissions";
+import { brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, isClientGrant, memberRole } from "@/server/auth/permissions";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
-
-type Db = Prisma.TransactionClient | typeof prisma;
 
 /** Who is looking at a brand's tasks, from the route scope already loaded (no extra read). */
 export type TaskViewer = { userId: string; workspaceId: string; brandId: string; canRead: boolean; canManage: boolean; client: boolean };
@@ -91,6 +89,8 @@ export async function isSoleStaff(workspaceId: string, brandId: string, userId: 
 /**
  * May `userId` be owner, reviewer or blocked-on of this task? They must see it: tasks.read as staff, or through a client
  * grant on a task that is client-visible to them (they review it, or its project is shared).
+ * Pass `task` as it will be AFTER the proposed change (e.g. `reviewerId: proposed`, the new `workProjectId`), so a client
+ * made reviewer of a task counts it as theirs, and moving a task out of a shared project is checked against the new one.
  * ponytail: someone whose custom workspace role holds tasks.read but not content.approve, and who also has a client
  * grant, counts as staff here but as a client in taskViewer; no built-in role does that.
  */

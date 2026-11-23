@@ -15,7 +15,7 @@ import { prisma } from "@/server/db/prisma";
  * ponytail: computed per request (2 small indexed queries); cache by role
  * updatedAt if it shows up in traces.
  */
-type Db = Prisma.TransactionClient | typeof prisma;
+export type Db = Prisma.TransactionClient | typeof prisma;
 
 export async function ensureSystemRoles(workspaceId: string, db: Db = prisma) {
   for (const r of SYSTEM_ROLES) {
