@@ -1537,3 +1537,11 @@ functional brief against the code (built, partial or missing). Use it to pick th
   `apps/mobile`. It only translates missing keys, so changed wording needs a new key.
 - **Never use the live database as Prisma's shadow database** (`migrate diff --shadow-database-url`): it wipes it.
   Write migrations by hand and apply them with `npx prisma migrate deploy`.
+
+## Phase 2 in progress (2026-11-23, 17:20)
+- Merged to main today (not pushed): reports-bulk-tasks, task-assignment (admins see/assign every task, role-owned tasks, invite/role/project checks), chat-posts (assistant lists posts and knows where things are; prompt v5).
+- Phase 2 plan: `docs/superpowers/plans/2026-11-23-phase-2-data.md` (four-lens reviewed; decisions in `2026-11-23-phase-2-review-notes.md`). Both untracked here; commit them with the branch.
+- Branch `phase-2-data` (worktree `C:/Users/INTEL/Desktop/sma-server-p2`, outside apps/ because a worktree inside apps/ breaks the npm workspaces) has: crm.read/ads.read permissions + role migration `20261125090000_crm_ads_read`, Shopify orders client, Facebook post_id fix, Search Console client, post-metrics client. Typecheck clean, 1537 unit tests green.
+- Not done: Task 1b foundation (DataSource table, `data.sync` job, sweep, routes) on `p2-foundation` (worktree `sma-p2-foundation`); wiring clients into the job; screens; Meta Ads; print/export; held items (FX, VAT, budgets) waiting on owner answers. Run `npm run sync:shared` at merge (shared/permissions.ts changed).
+- Open owner decision: block giving crm.read/ads.read to the Client reviewer role (as tasks.all is)?
+- Crash recovery: zeroed `.git/refs/heads/<branch>` → restore from `.git/logs/refs/heads/<branch>`; zeroed worktree index → move it aside and `git reset`; zero-filled working files → trust the committed branch.
