@@ -87,7 +87,7 @@ describe("notification API", () => {
     expect(await countUnread("u1", "w1")).toBe(100);
     const sql = sqlOf(db.$queryRaw.mock.calls[0]!);
     expect(sql).toMatch(/LIMIT 100/);
-    expect(sql).toMatch(/n\."readAt" IS NULL/);
+    expect(sql).toMatch(/"readAt" IS NULL OFFSET 0/);
     expect(m.visible).toHaveBeenCalledWith("u1", "w1", "t");
 
     const res = await countGet(req("/count"));
@@ -101,7 +101,8 @@ describe("notification API", () => {
     expect(await res.json()).toEqual({ notifications: [], nextCursor: null });
     const [count, list] = db.$queryRaw.mock.calls.map(sqlOf);
     const where = /FROM "Notification" n JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/;
-    expect(count).toMatch(where);
+    // The count reads the unread rows through a fenced subquery aliased n, then applies the same where.
+    expect(count).toMatch(/\) n JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/);
     expect(list).toMatch(where);
     expect(list).toMatch(/LIMIT 21/);
   });

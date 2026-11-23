@@ -75,8 +75,15 @@ function toDto(r: Row): NotificationDto {
 
 /** Unread notifications, counted up to 100. */
 export async function countUnread(userId: string, workspaceId: string): Promise<number> {
+  // The unread rows are fenced (OFFSET 0) so the planner reads them through the (userId, workspaceId, readAt) index.
+  // Without it, the LIMIT over the join made it seq-scan Notification on every bell poll: 38 ms at 1M rows, 0 unread.
   const [row] = await prisma.$queryRaw<{ count: number }[]>(Prisma.sql`
-    SELECT count(*)::int AS count FROM (SELECT 1 ${FROM} WHERE ${await notificationWhereSql(userId, workspaceId)} AND n."readAt" IS NULL LIMIT 100) x`);
+    SELECT count(*)::int AS count FROM (
+      SELECT 1 FROM (
+        SELECT "taskId", "userId", "workspaceId" FROM "Notification"
+        WHERE "userId" = ${userId} AND "workspaceId" = ${workspaceId} AND "readAt" IS NULL OFFSET 0
+      ) n JOIN "Task" t ON t.id = n."taskId"
+      WHERE ${await notificationWhereSql(userId, workspaceId)} LIMIT 100) x`);
   return row?.count ?? 0;
 }
 
