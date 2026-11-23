@@ -1,3 +1,4 @@
+import type { SyncStop } from "./sync-stop";
 import type { DataSource, IntegrationConnection, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { DATA_SOURCE_KINDS, DATA_SYNC_ERRORS, READ_KEY, type DataSourceDto, type DataSourceKind, type DataSyncReason, type DataSyncResult } from "@/shared";
@@ -33,23 +34,22 @@ import { ReconnectNeeded } from "@/server/services/connections";
  */
 export const DATA_SYNC_JOB = "data.sync";
 
-/**
- * Why a provider client stopped short. Every client returns `{ ...data, stoppedReason?: SyncStop }`; only bugs throw.
- * - capped, rate_limited: what was read is still written and advances (Shopify's prefix is contiguous).
- * - reconnect, failed: nothing is written.
- * - permission: the source lacks access to this data.
- * ponytail: SyncOutcome.reason and DATA_SYNC_ERRORS predate this; the existing clients are aligned to it at merge.
- */
-export type SyncStop = "reconnect" | "permission" | "rate_limited" | "failed" | "capped";
+export { type SyncStop } from "./sync-stop";
 
-/** The only text a stop ever shows (`lastError`); provider text never reaches it. */
-export const SYNC_STOP_ERRORS: Record<SyncStop, string> = {
-  reconnect: "The connection needs to be reconnected.",
-  permission: "The connected account can't see this data.",
-  rate_limited: "The provider asked us to slow down. The rest syncs on the next run.",
-  failed: "The sync failed. It will try again.",
-  capped: "Only part of the history was read. The rest syncs on the next run.",
-};
+/**
+ * A client's stop as the job's outcome: reconnect throws ReconnectNeeded (not retried), failed throws (retried);
+ * the rest are returned. capped and rate_limited still write what was read.
+ */
+export function stopReason(stop: SyncStop | undefined): SyncOutcome["reason"] {
+  switch (stop) {
+    case undefined: return null;
+    case "reconnect": throw new ReconnectNeeded("reconnect");
+    case "failed": throw new Error("data source sync failed");
+    case "permission": case "missing_scope": return "permission";
+    case "rate_limited": return "rate-limited";
+    case "capped": return "partial";
+  }
+}
 
 export type SyncMode = "daily" | "manual" | "backfill";
 /** Inclusive provider days, "YYYY-MM-DD". */
