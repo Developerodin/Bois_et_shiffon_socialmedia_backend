@@ -66,6 +66,8 @@ async function clientGrantOn(db: Db, scope: BrandScope, userId: string) {
       where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId, role: CLIENT_GRANT_WHERE, user: { status: "ACTIVE", deletedAt: null } },
       select: { role: { select: { isSystem: true, slug: true, permissions: true } } },
     }),
+    // ponytail: reads the stored copy of the workspace role on purpose (a DB filter); the role-reset migration keeps
+    // Owner/Admin rows equal to code, and a later change to those two needs a migration (permissions.catalog.ts).
     db.workspaceMember.findFirst({ where: { workspaceId: scope.workspaceId, userId, roleRef: { permissions: { has: "content.approve" } } }, select: { id: true } }),
   ]);
   return isClientMember(!!grant, approves ? ["content.approve"] : []) ? grant : null;
@@ -82,7 +84,7 @@ export const clientMemberSql = (user: Prisma.Sql, brand: Prisma.Sql, workspace: 
     WHERE cm."brandId" = ${brand} AND cm."userId" = ${user} AND cr."isSystem" AND cr.slug = ${CLIENT_REVIEWER})
   AND NOT EXISTS (
     SELECT 1 FROM "WorkspaceMember" cw JOIN "Role" cwr ON cwr.id = cw."roleId"
-    WHERE cw."workspaceId" = ${workspace} AND cw."userId" = ${user} AND 'content.approve' = ANY(cwr.permissions)))`;
+    WHERE cw."workspaceId" = ${workspace} AND cw."userId" = ${user} AND 'content.approve' = ANY(cwr.permissions)))`; // ponytail: stored copy, as isClientMember
 
 /** Can some client see the task (spec §6): its project is shared with the client, or its reviewer is a client? */
 export async function clientCanSee(db: Db, scope: BrandScope, t: TaskPeople): Promise<boolean> {
@@ -181,7 +183,6 @@ export function commentVisibility(v: TaskViewer): Prisma.TaskCommentWhereInput {
   return v.client ? { internal: false } : {};
 }
 
-/** Nobody else on the brand reads tasks as staff (client reviewers don't count), so no four-eyes rule can apply. */
 /** Who last sent each task for review (from the audit trail); tasks nobody sent are missing. */
 export async function lastSubmitters(tx: Db, taskIds: string[]): Promise<Map<string, string | null>> {
   if (!taskIds.length) return new Map();
@@ -199,6 +200,7 @@ export async function lastSubmitter(tx: Db, taskId: string): Promise<string | nu
   return (await lastSubmitters(tx, [taskId])).get(taskId) ?? null;
 }
 
+/** Nobody else on the brand reads tasks as staff (client reviewers don't count), so no four-eyes rule can apply. */
 export async function isSoleStaff(workspaceId: string, brandId: string, userId: string) {
   return !(await hasOtherHolder(workspaceId, brandId, userId, "tasks.read"));
 }

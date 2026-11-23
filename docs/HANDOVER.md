@@ -44,9 +44,9 @@ unflagged but permission-checked, so it is harmless with the web flag off.
 
 ### Permissions
 - New keys `tasks.read` and `tasks.manage` (project scope, group "tasks"; `shared/permissions.ts`).
-- Defaults: `tasks.read` for owner, admin, project-admin, manager, creator, commercial-owner, approver, viewer and
-  client-reviewer. `tasks.manage` for owner, admin, project-admin, manager, creator and commercial-owner. `member` has
-  neither. Custom PROJECT roles holding `content.create` get `tasks.read`.
+- Defaults: `tasks.read` for owner, admin, project-admin, manager, creator, approver, viewer and client-reviewer.
+  `tasks.manage` for owner, admin, project-admin, manager and creator; `tasks.all` for owner, admin and project-admin
+  (2026-11-23: commercial-owner merged into manager, see the task-assignment plan). `member` has none. Custom PROJECT roles holding `content.create` get `tasks.read`.
 - Notes to tasks needs `tasks.manage`. Search filters each kind by that kind's own list permission.
 
 ### Rulings that change behaviour

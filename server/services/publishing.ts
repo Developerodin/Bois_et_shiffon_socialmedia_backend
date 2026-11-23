@@ -159,6 +159,12 @@ async function gateWithLinks(db: Prisma.TransactionClient, scope: { workspaceId:
 export const TX = { maxWait: 10_000, timeout: 20_000 };
 /** Per-row lock for the transaction: posts (people and agents alike) and tasks. */
 export const lockRow = (tx: Prisma.TransactionClient, kind: "content" | "task", id: string) => tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`${kind}:${id}`}))`;
+/**
+ * lockRow for many ids in ONE round trip, taken in the order given (callers pass ids sorted the way the other
+ * multi-row lockers do, so two of them can't deadlock). WITH ORDINALITY + OFFSET 0 keep that order in the plan.
+ */
+export const lockRows = (tx: Prisma.TransactionClient, kind: "content" | "task", ids: string[]) =>
+  tx.$queryRaw`SELECT count(pg_advisory_xact_lock(hashtext(${kind} || ':' || u.id))) FROM (SELECT id FROM unnest(${ids}::text[]) WITH ORDINALITY AS u(id, n) ORDER BY n OFFSET 0) u`;
 /** Per-post lock shared by people (edit, approve, publish) and agents (Creator, Quality). */
 export const lock = (tx: Prisma.TransactionClient, itemId: string) => lockRow(tx, "content", itemId);
 

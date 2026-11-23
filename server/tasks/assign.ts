@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import { assigneesOf, notifyManyTx } from "@/server/notifications/tasks";
-import { lockRow, TX } from "@/server/services/publishing";
+import { lockRows, TX } from "@/server/services/publishing";
 import { isSoleStaff, visibleTaskSql, type TaskViewer } from "@/server/tasks/access";
 import { TaskError } from "@/server/tasks/errors";
 import { checkTaskLinks } from "@/server/tasks/links";
@@ -41,7 +41,7 @@ export async function assignTasks(scope: TaskScope, v: TaskViewer, input: Assign
   const ownerId = ownerRoleId ? null : (input.ownerId ?? null);
   const ids = [...input.ids].sort();
   const changed = await prisma.$transaction(async (tx) => {
-    for (const taskId of ids) await lockRow(tx, "task", taskId);
+    await lockRows(tx, "task", ids);
     const seen = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT t.id FROM "Task" t WHERE t.id IN (${Prisma.join(ids)}) AND ${visibleTaskSql(v)}`);
     if (seen.length !== ids.length) throw new TaskError("Task not found", 404);
     await checkTaskLinks(tx, scope, { ownerId, ownerRoleId });
