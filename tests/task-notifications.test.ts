@@ -19,7 +19,7 @@ const sweep = vi.hoisted(() => ({
 }));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/auth/request-user", () => ({ requestUserId: m.userId }));
-vi.mock("@/server/tasks/access", () => ({ visibleTasksAcrossSql: m.visible }));
+vi.mock("@/server/tasks/access", async (orig) => ({ clientMemberSql: (await orig<typeof import("@/server/tasks/access")>()).clientMemberSql, visibleTasksAcrossSql: m.visible }));
 vi.mock("next/server", async (orig) => ({ ...(await orig<object>()), after: vi.fn() }));
 vi.mock("@/server/jobs/queue", async (orig) => ({ ...(await orig<object>()), claimNextJob: sweep.claim, completeJob: sweep.complete, holdLease: () => () => {} }));
 vi.mock("@/server/services/subscriptions", () => ({ renewDuePlans: sweep.renew }));
@@ -104,6 +104,19 @@ describe("notification API", () => {
     expect(count).toMatch(where);
     expect(list).toMatch(where);
     expect(list).toMatch(/LIMIT 21/);
+  });
+
+  it("the actor says whether they are a client on the notification's brand", async () => {
+    const at = new Date("2026-11-23T10:00:00Z");
+    const base = { id: "n1", kind: "REVIEW_REQUESTED", brandId: "b1", taskId: "t1", taskTitle: "Fix", actorId: "u5", actorName: "Cli", actorEmail: "c@x.com", actorGone: false, readAt: null, createdAt: at };
+    db.$queryRaw.mockResolvedValueOnce([{ ...base, actorClient: true }, { ...base, id: "n2", actorId: "u2", actorName: "Bob", actorClient: false }]);
+    const body = await (await listGet(req(""))).json();
+    expect(body.notifications.map((n: { actor: unknown }) => n.actor)).toEqual([
+      { id: "u5", name: "Cli", gone: false, client: true },
+      { id: "u2", name: "Bob", gone: false, client: false },
+    ]);
+    const sql = sqlOf(db.$queryRaw.mock.calls[0]!);
+    expect(sql).toMatch(/cm\."brandId" = n\."brandId" AND cm\."userId" = n\."actorId"[\s\S]*'content\.approve' = ANY[\s\S]*AS "actorClient"/);
   });
 
   it("refuses a bad cursor with 400", async () => {

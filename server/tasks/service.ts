@@ -6,8 +6,7 @@ import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { TEAM_MEMBER } from "@/server/content/person-name";
 import { notifyTx } from "@/server/notifications/tasks";
 import { brandOwners, lockRow, TX } from "@/server/services/publishing";
-import { brandMemberPerms, CLIENT_GRANT_WHERE } from "@/server/auth/permissions";
-import { canBeAssigned, findVisibleTask, isSoleStaff, type TaskViewer } from "@/server/tasks/access";
+import { canBeAssigned, clientCanSee, findVisibleTask, isSoleStaff, type TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { TaskError } from "@/server/tasks/errors";
 import { toAttachmentDto } from "@/server/tasks/attachments";
@@ -83,10 +82,17 @@ export const rowOf = (t: Task): TaskRow => ({
   recheckOn: dayOf(t.recheckOn),
 });
 
-/** A user id → the person on a task, named from the brand's tasks.read people; someone not among them is `gone`. */
-export function personOf(names: { id: string; name: string }[]) {
-  const nameOf = new Map(names.map((p) => [p.id, p.name]));
-  return (userId: string | null): TaskPersonDto | null => (userId ? { id: userId, name: nameOf.get(userId) ?? TEAM_MEMBER, gone: !nameOf.has(userId) } : null);
+/**
+ * A user id → the person on a task, named from the brand's tasks.read people (brandOwners with includeClients, which
+ * says who is a client); someone not among them is `gone` (and not a client).
+ */
+export function personOf(names: { id: string; name: string; client?: boolean }[]) {
+  const byId = new Map(names.map((p) => [p.id, p]));
+  return (userId: string | null): TaskPersonDto | null => {
+    if (!userId) return null;
+    const p = byId.get(userId);
+    return { id: userId, name: p?.name ?? TEAM_MEMBER, gone: !p, client: !!p?.client };
+  };
 }
 
 /**
@@ -145,19 +151,6 @@ export async function toTaskDtos(scope: TaskScope, rows: TaskWithLinks[], people
 
 const notFound = () => new TaskError("Task not found", 404);
 
-/** Can some client reviewer see the task (spec §6): its reviewer holds a client grant on the brand, or its project is shared with the client? */
-async function clientCanSee(scope: TaskScope, t: Pick<Task, "reviewerId" | "workProjectId">): Promise<boolean> {
-  const [project, grant] = await Promise.all([
-    t.workProjectId ? prisma.workProject.findFirst({ where: { id: t.workProjectId, workspaceId: scope.workspaceId, clientVisible: true }, select: { id: true } }) : null,
-    t.reviewerId
-      ? prisma.brandMember.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId: t.reviewerId, role: CLIENT_GRANT_WHERE, user: { status: "ACTIVE", deletedAt: null } }, select: { id: true } })
-      : null,
-  ]);
-  if (project) return true;
-  // A reviewer who also approves as staff is not a client (same rule as brandAccess).
-  return !!grant && !(await brandMemberPerms(prisma, scope, t.reviewerId!, "content.approve"));
-}
-
 /** One task with its checklist lines (position, id) and photos (signed URLs); list rows carry only checklist counts. */
 export async function getTask(scope: TaskScope, v: TaskViewer, taskId: string): Promise<TaskDetailDto> {
   if (!(await findVisibleTask(prisma, v, taskId))) throw notFound();
@@ -167,7 +160,7 @@ export async function getTask(scope: TaskScope, v: TaskViewer, taskId: string): 
     toTaskDtos(scope, [row]),
     prisma.taskChecklistItem.findMany({ where: { taskId }, orderBy: [{ position: "asc" }, { id: "asc" }] }),
     prisma.taskAttachment.findMany({ where: { taskId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], include: { mediaUpload: { select: { key: true } } } }),
-    clientCanSee(scope, row),
+    clientCanSee(prisma, scope, row),
   ]);
   return { ...dto!, clientVisible, viewerIsClient: v.client, checklistItems: items.map(toChecklistDto), attachments: await Promise.all(attachments.map((a) => toAttachmentDto(a, a.mediaUpload.key))) };
 }

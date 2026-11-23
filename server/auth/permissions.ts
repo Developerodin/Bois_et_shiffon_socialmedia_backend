@@ -77,6 +77,12 @@ export function brandGrant(workspaceId: string, brandId: string, userId: string)
 export const isClientGrant = (role: { isSystem: boolean; slug: string }) => role.isSystem && role.slug === CLIENT_REVIEWER;
 /** The same rule as a Prisma filter on Role (`NOT: CLIENT_GRANT_WHERE` leaves client grants out). It and isClientGrant must change together. */
 export const CLIENT_GRANT_WHERE = { isSystem: true, slug: CLIENT_REVIEWER } as const;
+/**
+ * THE client rule: someone is a client on a brand when their grant there is a client grant and their workspace role
+ * doesn't approve content (else they approve as staff). brandAccess, the task reads and the people lists all use it;
+ * isClientOn (server/tasks/access.ts) and clientMemberSql are the same rule as a query.
+ */
+export const isClientMember = (clientGrant: boolean, workspacePerms: readonly string[]) => clientGrant && !workspacePerms.includes("content.approve");
 
 /**
  * Does someone other than `userId` hold `key` on this brand? A client reviewer's grant doesn't count: clients are never

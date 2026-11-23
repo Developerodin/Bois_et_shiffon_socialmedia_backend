@@ -6,7 +6,7 @@ import { requireWorkspaceMember } from "@/server/auth/access";
 import { requestUserId } from "@/server/auth/request-user";
 import { TEAM_MEMBER, personName } from "@/server/content/person-name";
 import { prisma } from "@/server/db/prisma";
-import { visibleTasksAcrossSql } from "@/server/tasks/access";
+import { clientMemberSql, visibleTasksAcrossSql } from "@/server/tasks/access";
 import { TaskError, taskProblem } from "@/server/tasks/errors";
 import type { NotificationDto, NotificationPageDto } from "@/shared";
 
@@ -40,7 +40,7 @@ function decodeCursor(s: string) {
 
 type Row = {
   id: string; kind: string; brandId: string; taskId: string | null; taskTitle: string | null; actorId: string | null;
-  actorName: string | null; actorEmail: string | null; actorGone: boolean | null; readAt: Date | null; createdAt: Date;
+  actorName: string | null; actorEmail: string | null; actorGone: boolean | null; actorClient: boolean | null; readAt: Date | null; createdAt: Date;
 };
 
 /** Newest first, 20 a page; `nextCursor` is null on the last page. */
@@ -50,7 +50,8 @@ export async function listNotifications(userId: string, workspaceId: string, cur
   if (after) where.push(Prisma.sql`(n."createdAt", n.id) < (${after.createdAt}::timestamp, ${after.id})`);
   const rows = await prisma.$queryRaw<Row[]>(Prisma.sql`
     SELECT n.id, n.kind::text AS kind, n."brandId", n."taskId", t.title AS "taskTitle", n."actorId", a.name AS "actorName",
-           a.email AS "actorEmail", (a."deletedAt" IS NOT NULL OR a.status <> 'ACTIVE') AS "actorGone", n."readAt", n."createdAt"
+           a.email AS "actorEmail", (a."deletedAt" IS NOT NULL OR a.status <> 'ACTIVE') AS "actorGone",
+           ${clientMemberSql(Prisma.sql`n."actorId"`, Prisma.sql`n."brandId"`, Prisma.sql`n."workspaceId"`)} AS "actorClient", n."readAt", n."createdAt"
     ${FROM} LEFT JOIN "User" a ON a.id = n."actorId"
     WHERE ${Prisma.join(where, " AND ")}
     ORDER BY n."createdAt" DESC, n.id DESC
@@ -66,8 +67,8 @@ export async function listNotifications(userId: string, workspaceId: string, cur
 function toDto(r: Row): NotificationDto {
   const actor = r.actorId
     ? r.actorEmail === null
-      ? { id: r.actorId, name: TEAM_MEMBER, gone: true }
-      : { id: r.actorId, name: personName({ name: r.actorName, email: r.actorEmail }, { reveal: false }), gone: !!r.actorGone }
+      ? { id: r.actorId, name: TEAM_MEMBER, gone: true, client: !!r.actorClient }
+      : { id: r.actorId, name: personName({ name: r.actorName, email: r.actorEmail }, { reveal: false }), gone: !!r.actorGone, client: !!r.actorClient }
     : null;
   return { id: r.id, kind: r.kind, brandId: r.brandId, taskId: r.taskId, taskTitle: r.taskTitle, actor, readAt: r.readAt?.toISOString() ?? null, createdAt: r.createdAt.toISOString() };
 }

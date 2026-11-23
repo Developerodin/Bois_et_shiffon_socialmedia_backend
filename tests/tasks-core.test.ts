@@ -149,7 +149,8 @@ describe("getTask", () => {
     db.taskChecklistItem.groupBy.mockResolvedValue([{ taskId: "t1", _count: { _all: 3, doneAt: 1 } }]);
     const dto = await getTask(scope, v, "t1");
     expect(dto.owner).toMatchObject({ id: "u9", gone: true });
-    expect(dto.reviewer).toEqual({ id: "u5", name: "Cli", gone: false });
+    expect(dto.reviewer).toEqual({ id: "u5", name: "Cli", gone: false, client: true });
+    expect(dto.owner).toMatchObject({ client: false });
     expect(dto.project).toEqual({ id: "p1", name: "Launch" });
     expect(dto.workProjectId).toBe("p1");
     expect(dto.checklist).toEqual({ done: 1, total: 3 });
@@ -320,8 +321,14 @@ describe("brandOwners", () => {
     expect(db.workspaceMember.findMany).not.toHaveBeenCalled();
   });
 
-  it("tasks.read with clients: workspace members by their role's key, client grants included", async () => {
+  it("tasks.read with clients: workspace members by their role's key, client grants included and marked", async () => {
     const rows = await brandOwners(scope, { key: "tasks.read", includeClients: true });
-    expect(rows.map((r) => r.id)).toEqual(["u1", "u2", "u3", "u5"]);
+    expect(rows.map((r) => [r.id, r.client])).toEqual([["u1", false], ["u2", false], ["u3", false], ["u5", true]]);
+  });
+
+  it("a client grant held by someone whose workspace role approves content is not a client", async () => {
+    db.workspaceMember.findMany.mockResolvedValue([{ userId: "u5", role: "MEMBER", roleRef: { permissions: ["brand.read", "content.approve"] } }]);
+    const rows = await brandOwners(scope, { key: "tasks.read", includeClients: true });
+    expect(rows.find((r) => r.id === "u5")).toEqual({ id: "u5", name: "Cli", client: false });
   });
 });

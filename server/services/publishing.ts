@@ -6,7 +6,7 @@ import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefuse
 import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { CAPTION_LIMITS, safeHttpUrl } from "@/shared";
-import { brandMemberPerms, hasOtherApprover, requirePermission } from "@/server/auth/permissions";
+import { brandMemberPerms, hasOtherApprover, isClientMember, requirePermission } from "@/server/auth/permissions";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { linkedProducts } from "@/server/catalog/linked";
 import { gateIssues, linkedIds, ProductOverride, snapshotOf } from "@/server/content/product-checks";
@@ -239,12 +239,17 @@ export async function brandOwners(
   scope: { workspaceId: string; brandId: string },
   { reveal = false, key = "brand.read", includeClients = false }: { reveal?: boolean; key?: PermissionKey; includeClients?: boolean } = {},
 ) {
-  const [{ viaWorkspace, people }, holders] = await Promise.all([
+  const [{ viaWorkspace, people }, roles] = await Promise.all([
     listProjectPeople(scope.workspaceId, scope.brandId),
-    // listProjectPeople's workspace list is already the brand.read holders.
-    key === "brand.read" ? null : prisma.workspaceMember.findMany({ where: { workspaceId: scope.workspaceId, roleRef: { permissions: { has: key } } }, select: { userId: true } }),
+    // listProjectPeople's workspace list is already the brand.read holders; another key, or telling clients apart, needs the roles.
+    key === "brand.read" && !includeClients
+      ? null
+      : prisma.workspaceMember.findMany({ where: { workspaceId: scope.workspaceId }, select: { userId: true, roleRef: { select: { permissions: true } } } }),
   ]);
-  const viaRole = holders ? new Set(holders.map((h) => h.userId)) : null;
+  const roleOf = new Map((roles ?? []).map((r) => [r.userId, r.roleRef?.permissions ?? []]));
+  const viaRole = key === "brand.read" ? null : new Set([...roleOf].filter(([, perms]) => perms.includes(key)).map(([userId]) => userId));
+  // With includeClients, each person says whether they are a client here (isClientMember).
+  const clients = new Set(includeClients ? people.filter((g) => isClientMember(g.client, roleOf.get(g.userId) ?? [])).map((g) => g.userId) : []);
   const byId = new Map<string, { id: string; name: string; named: boolean }>();
   // Project roles are free-form: a grant counts only when its role holds `key`. Disabled and deleted people never do.
   const reach = [
@@ -258,10 +263,11 @@ export async function brandOwners(
     if (!seen || (!seen.named && named)) byId.set(p.userId, { id: p.userId, name: personName(p, { reveal }), named });
   }
   let nameless = 0;
-  return [...byId.values()].map(({ id, name, named }) => {
-    if (named || reveal) return { id, name };
+  return [...byId.values()].map(({ id, name, named }): { id: string; name: string; client?: boolean } => {
+    const client = includeClients ? { client: clients.has(id) } : {};
+    if (named || reveal) return { id, name, ...client };
     nameless++;
-    return { id, name: nameless === 1 ? TEAM_MEMBER : `${TEAM_MEMBER} (${nameless})` };
+    return { id, name: nameless === 1 ? TEAM_MEMBER : `${TEAM_MEMBER} (${nameless})`, ...client };
   });
 }
 

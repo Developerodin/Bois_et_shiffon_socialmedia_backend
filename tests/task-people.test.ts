@@ -11,17 +11,22 @@ import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { GET as peopleGet } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/tasks/people/route";
 
 let perms = new Set<PermissionKey>(["brand.read", "tasks.read"]);
+let clientReviewer = false;
 const get = () => peopleGet(new Request("http://x/api"), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) });
 
 beforeEach(() => {
   vi.clearAllMocks();
   perms = new Set<PermissionKey>(["brand.read", "tasks.read"]);
+  clientReviewer = false;
   m.authorize.mockImplementation(async (_r: Request, _p: unknown, key: PermissionKey) => {
     if (!perms.has(key)) throw new AccessDeniedError(`Missing permission ${key}`);
-    return { workspaceId: "w1", brandId: "b1", userId: "u1", perms, clientReviewer: false };
+    return { workspaceId: "w1", brandId: "b1", userId: "u1", perms, clientReviewer };
   });
   // Workspace roles holding tasks.read: Ana only (Dee's role reads the brand but not its tasks).
-  db.workspaceMember.findMany.mockResolvedValue([{ userId: "u1" }]);
+  db.workspaceMember.findMany.mockResolvedValue([
+    { userId: "u1", roleRef: { permissions: ["brand.read", "tasks.read", "content.approve"] } },
+    { userId: "u4", roleRef: { permissions: ["brand.read"] } },
+  ]);
   m.people.mockResolvedValue({
     viaWorkspace: [
       { userId: "u1", name: "Ana", email: "ana@x.com", role: "Owner", active: true },
@@ -37,15 +42,15 @@ beforeEach(() => {
 });
 
 describe("GET tasks/people", () => {
-  it("lists tasks.read holders by name, clients included, without emails", async () => {
+  it("lists tasks.read holders by name, clients included and marked, without emails", async () => {
     const res = await get();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({
       people: [
-        { id: "u1", name: "Ana", gone: false },
-        { id: "u5", name: "Bea", gone: false },
-        { id: "u3", name: "Cy", gone: false },
+        { id: "u1", name: "Ana", gone: false, client: false },
+        { id: "u5", name: "Bea", gone: false, client: true },
+        { id: "u3", name: "Cy", gone: false, client: false },
       ],
     });
     expect(JSON.stringify(body)).not.toContain("@");
@@ -53,6 +58,12 @@ describe("GET tasks/people", () => {
 
   it("no tasks.read → 403", async () => {
     perms = new Set<PermissionKey>(["brand.read"]);
+    expect((await get()).status).toBe(403);
+    expect(m.people).not.toHaveBeenCalled();
+  });
+
+  it("a client reviewer → 403 (the list names the team)", async () => {
+    clientReviewer = true;
     expect((await get()).status).toBe(403);
     expect(m.people).not.toHaveBeenCalled();
   });

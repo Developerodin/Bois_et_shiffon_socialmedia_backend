@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 
 const db = vi.hoisted(() => ({
-  workspaceMember: { findMany: vi.fn(), findFirst: vi.fn() },
+  workspaceMember: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn() },
   brandMember: { findMany: vi.fn(), findFirst: vi.fn() },
   role: { findMany: vi.fn(async () => []) },
   workProject: { findFirst: vi.fn() },
@@ -10,7 +10,7 @@ const db = vi.hoisted(() => ({
 }));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 
-import { canBeAssigned, commentVisibility, findVisibleTask, isSoleStaff, taskViewer, visibleTaskSql } from "@/server/tasks/access";
+import { canBeAssigned, clientCanSee, commentVisibility, findVisibleTask, isClientOn, isSoleStaff, taskViewer, visibleTaskSql, visibleTasksAcrossSql } from "@/server/tasks/access";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import type { prisma } from "@/server/db/prisma";
 
@@ -35,7 +35,7 @@ describe("visibleTaskSql", () => {
   it("client predicate has the reviewer-or-shared clause", () => {
     const s = visibleTaskSql(viewer(["brand.read", "tasks.read"], true), "x");
     expect(s.sql).toBe(
-      '(x."workspaceId" = ? AND x."brandId" = ? AND (x."reviewerId" = ? OR EXISTS (SELECT 1 FROM "WorkProject" p WHERE p.id = x."workProjectId" AND p."clientVisible")))',
+      '(x."workspaceId" = ? AND x."brandId" = ? AND (x."reviewerId" = ? OR EXISTS (SELECT 1 FROM "WorkProject" p WHERE p.id = x."workProjectId" AND p."brandId" = x."brandId" AND p."clientVisible")))',
     );
     expect(s.values).toEqual(["w1", "b1", "u1"]);
   });
@@ -73,30 +73,104 @@ describe("taskViewer and comments", () => {
   });
 });
 
+type Where = { where: Record<string, unknown> };
+/** Who holds what: staff read tasks (workspace role or a staff grant), clients hold a client grant, approvers approve through their workspace role. */
+function people({ staff = [] as string[], clients = [] as string[], approvers = [] as string[], clientPerms = ["brand.read", "tasks.read"] } = {}) {
+  db.workspaceMember.findFirst.mockImplementation(async ({ where }: Where) => {
+    const has = (where.roleRef as { permissions: { has: string } }).permissions.has;
+    const user = where.userId as string;
+    return (has === "content.approve" ? approvers : staff).includes(user) ? { id: "m" } : null;
+  });
+  db.brandMember.findFirst.mockImplementation(async ({ where }: Where) =>
+    (where.role as { NOT?: unknown }).NOT ? null : clients.includes(where.userId as string) ? { role: { permissions: clientPerms } } : null,
+  );
+}
+
+describe("isClientOn", () => {
+  it("a client grant without content.approve from the workspace role is a client", async () => {
+    people({ clients: ["u5"] });
+    expect(await isClientOn(tx, scope, "u5")).toBe(true);
+    expect(db.brandMember.findFirst.mock.calls[0]![0].where).toMatchObject({ workspaceId: "w1", brandId: "b1", userId: "u5", role: { isSystem: true, slug: "client-reviewer" } });
+  });
+
+  it("a client grant held by someone whose workspace role approves is staff; no client grant is no client", async () => {
+    people({ clients: ["u5"], approvers: ["u5"] });
+    expect(await isClientOn(tx, scope, "u5")).toBe(false);
+    expect(await isClientOn(tx, scope, "u2")).toBe(false);
+  });
+});
+
+describe("clientCanSee", () => {
+  it("a shared project of the same brand, or a client reviewer", async () => {
+    people({ clients: ["u5"], staff: ["u2"] });
+    expect(await clientCanSee(tx, scope, { reviewerId: "u5", workProjectId: null })).toBe(true);
+    expect(await clientCanSee(tx, scope, { reviewerId: "u2", workProjectId: null })).toBe(false);
+    expect(await clientCanSee(tx, scope, { reviewerId: null, workProjectId: "p1" })).toBe(false);
+    expect(db.workProject.findFirst.mock.calls[0]![0].where).toEqual({ id: "p1", workspaceId: "w1", brandId: "b1", clientVisible: true });
+    db.workProject.findFirst.mockResolvedValue({ id: "p1" });
+    expect(await clientCanSee(tx, scope, { reviewerId: null, workProjectId: "p1" })).toBe(true);
+  });
+
+  it("a reviewer with a client grant who approves as staff doesn't make the task client-visible", async () => {
+    people({ clients: ["u5"], approvers: ["u5"] });
+    expect(await clientCanSee(tx, scope, { reviewerId: "u5", workProjectId: null })).toBe(false);
+  });
+});
+
 describe("canBeAssigned", () => {
   const task = { reviewerId: null, workProjectId: "p1" };
 
   it("assignee without tasks.read is refused", async () => {
+    people();
     expect(await canBeAssigned(tx, scope, "u2", task)).toBe(false);
-    expect(db.workspaceMember.findFirst.mock.calls[0]![0].where).toMatchObject({ userId: "u2", roleRef: { permissions: { has: "tasks.read" } } });
+    expect(db.workspaceMember.findFirst.mock.calls.map((c) => c[0].where)).toContainEqual(expect.objectContaining({ userId: "u2", roleRef: { permissions: { has: "tasks.read" } } }));
   });
 
   it("staff with tasks.read can be given any task of the brand", async () => {
-    db.brandMember.findFirst.mockImplementation(async ({ where }: { where: { role: { NOT?: unknown } } }) => (where.role.NOT ? { id: "g1" } : null));
+    people({ staff: ["u2"] });
     expect(await canBeAssigned(tx, scope, "u2", task)).toBe(true);
   });
 
   it("client assignee refused on a non-shared task", async () => {
-    db.brandMember.findFirst.mockImplementation(async ({ where }: { where: { role: { NOT?: unknown } } }) => (where.role.NOT ? null : { id: "g1" }));
+    people({ clients: ["u2"] });
     expect(await canBeAssigned(tx, scope, "u2", task)).toBe(false);
     expect(db.workProject.findFirst.mock.calls[0]![0].where).toMatchObject({ id: "p1", workspaceId: "w1", brandId: "b1", clientVisible: true });
   });
 
   it("client assignee allowed on a shared task or one they review", async () => {
-    db.brandMember.findFirst.mockImplementation(async ({ where }: { where: { role: { NOT?: unknown } } }) => (where.role.NOT ? null : { id: "g1" }));
+    people({ clients: ["u2"] });
     expect(await canBeAssigned(tx, scope, "u2", { reviewerId: "u2", workProjectId: null })).toBe(true);
     db.workProject.findFirst.mockResolvedValue({ id: "p1" });
     expect(await canBeAssigned(tx, scope, "u2", task)).toBe(true);
+  });
+
+  it("a client whose workspace role reads tasks is still a client (as in taskViewer)", async () => {
+    people({ staff: ["u2"], clients: ["u2"] });
+    expect(await canBeAssigned(tx, scope, "u2", task)).toBe(false);
+  });
+
+  it("a client grant without tasks.read is refused", async () => {
+    people({ clients: ["u2"], clientPerms: ["brand.read"] });
+    expect(await canBeAssigned(tx, scope, "u2", { reviewerId: "u2", workProjectId: null })).toBe(false);
+  });
+});
+
+describe("visibleTasksAcrossSql", () => {
+  it("leaves out archived brands", async () => {
+    db.workspaceMember.findUnique.mockResolvedValue({ roleRef: { permissions: ["brand.read", "tasks.read"] } });
+    db.brandMember.findMany.mockResolvedValue([]);
+    const s = await visibleTasksAcrossSql("u1", "w1");
+    expect(s.sql).toContain(`EXISTS (SELECT 1 FROM "Brand" b WHERE b.id = t."brandId" AND b."workspaceId" = ? AND b.status <> 'ARCHIVED')`);
+  });
+
+  it("a client grant without content.approve from the workspace role reads that brand as a client", async () => {
+    db.workspaceMember.findUnique.mockResolvedValue({ roleRef: { permissions: ["brand.read", "tasks.read"] } });
+    db.brandMember.findMany.mockResolvedValue([{ brandId: "b2", role: { isSystem: true, slug: "client-reviewer", permissions: ["brand.read", "tasks.read"] } }]);
+    const s = await visibleTasksAcrossSql("u1", "w1");
+    expect(s.sql).toContain('t."brandId" NOT IN (?)');
+    expect(s.sql).toContain('p."brandId" = t."brandId"');
+    db.workspaceMember.findUnique.mockResolvedValue({ roleRef: { permissions: ["brand.read", "tasks.read", "content.approve"] } });
+    expect((await visibleTasksAcrossSql("u1", "w1")).sql).not.toContain("NOT IN");
   });
 });
 
