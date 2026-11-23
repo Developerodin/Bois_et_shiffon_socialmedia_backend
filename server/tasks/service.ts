@@ -21,7 +21,11 @@ export type TaskScope = { userId: string; workspaceId: string; brandId: string; 
 export const day = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use a YYYY-MM-DD date")
-  .refine((s) => new Date(`${s}T00:00:00Z`).toISOString().startsWith(s), "Not a real date");
+  // Month 13 or 00 makes an Invalid Date, whose toISOString throws; check it first so it is a 400, not a 500.
+  .refine((s) => {
+    const d = new Date(`${s}T00:00:00Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(s);
+  }, "Not a real date");
 const link = z.string().trim().max(2_000).refine((s) => !!safeHttpUrl(s), "Use an http(s) address");
 const id = z.string().min(1).max(100);
 const opt = <T extends z.ZodType>(t: T) => t.nullable().optional();
@@ -221,6 +225,14 @@ export async function patchTask(scope: TaskScope, v: TaskViewer, taskId: string,
     // A reviewed task keeps a reviewer: dropping it would let cancel → reopen → mark done skip the review.
     if ("reviewerId" in write && !write.reviewerId && (await tx.taskComment.findFirst({ where: { taskId, kind: { in: ["APPROVED", "CHANGES_REQUESTED"] } }, select: { id: true } }))) {
       throw new TaskError("This task has been reviewed, so it keeps a reviewer. Pick another reviewer instead.", 409, "task.reviewed");
+    }
+    // The submitForReview rule, kept while in review: swapping reviewer or owner must not let the owner approve their own task.
+    if (current.status === "IN_REVIEW" && ("ownerId" in write || "reviewerId" in write)) {
+      const owner = ("ownerId" in write ? write.ownerId : current.ownerId) as string | null;
+      const reviewer = ("reviewerId" in write ? write.reviewerId : current.reviewerId) as string | null;
+      if (owner && owner === reviewer && !(await isSoleStaff(scope.workspaceId, scope.brandId, owner))) {
+        throw new TaskError("The reviewer can't be the owner.", 409, "task.reviewerIsOwner");
+      }
     }
     const people = "workProjectId" in write ? { ownerId: current.ownerId, reviewerId: current.reviewerId, blockedOnId: current.blockedOnId } : {};
     await checkTaskLinks(tx, scope, { ...people, ...write }, current);
