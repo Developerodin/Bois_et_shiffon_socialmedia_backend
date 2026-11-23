@@ -137,7 +137,7 @@ Server
 - Turning a project's client sharing off while a client reads it can race (one read may still show it).
 - Overdue and re-check notices are still written for archived brands and departed owners (the bell hides archived
   brands).
-- startDailyAgents throwing skips the daily task steps.
+- startScheduledAgents throwing skips the daily task steps.
 - The per-user hourly note-to-tasks count is spent when the workspace cap refuses.
 - Next migration: a Notification createdAt index, Notification.taskId and Task.auditReportId indexes. Today counts
   run one query per index.

@@ -151,4 +151,17 @@ describe("tasks from a report", () => {
     expect(await prisma.taskComment.findMany({ where: { taskId: replaced!.id }, select: { kind: true, body: true } })).toEqual([{ kind: "SYSTEM", body: expect.stringMatching(/^Replaced by the \d{4}-\d{2}-\d{2} GEO review$/) }]);
     expect((await prisma.task.findUniqueOrThrow({ where: { id: byHand.id } })).status).toBe("TODO");
   });
+
+  it("a review task the system replaced comes back when a later review names it again", async () => {
+    await run(await save("GEO", [f("content-old-a", { category: "Content (AI review)", title: "old-a" })]));
+    expect((await tasksOf("content-old-a")).map((t) => t.status)).toEqual(["CANCELLED", "TODO"]);
+  });
+
+  it("the 50 cap counts only findings that get a task, so the rest come with the next report", async () => {
+    const many = Array.from({ length: 51 }, (_, i) => f(`cap-${String(i).padStart(2, "0")}`));
+    await run(await save("SEO", many));
+    expect(await prisma.task.count({ where: { brandId, findingId: { startsWith: "cap-" } } })).toBe(50);
+    await run(await save("SEO", many));
+    expect(await tasksOf("cap-50")).toHaveLength(1);
+  });
 });

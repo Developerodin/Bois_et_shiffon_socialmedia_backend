@@ -149,7 +149,7 @@ export async function kickIfDue() {
 }
 
 /**
- * Daily cron entry: start every scheduled agent for every active brand, and queue each brand's catalogue sync.
+ * Daily cron entry: start the daily agents for every active brand and the weekly ones that are due (startScheduledAgents), and queue each brand's catalogue sync.
  * The sweep job is unique per day (idempotency key), so a double cron delivery
  * runs it once; a retried sweep skips agents already started today.
  */

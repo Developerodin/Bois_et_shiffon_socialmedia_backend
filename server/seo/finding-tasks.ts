@@ -184,13 +184,19 @@ export async function tasksFromReport(payload: unknown): Promise<void> {
     ? await prisma.agentRun.findFirst({ where: { id: report.agentRunId, workspaceId, brandId }, select: { id: true, triggeredByUserId: true, createdAt: true } })
     : null;
   const findings = findingsOf(report.findings);
-  const wanted = findings.slice(0, TASKS_PER_REPORT);
   // Every earlier task of these findings, newest first (the (brand, kind, finding, createdAt) index).
   const history = await prisma.task.findMany({
-    where: { workspaceId, brandId, findingKind: kind, findingId: { in: wanted.map((f) => f.id) } },
+    where: { workspaceId, brandId, findingKind: kind, findingId: { in: findings.map((f) => f.id) } },
     orderBy: { createdAt: "desc" },
-    select: { findingId: true, status: true, completedAt: true, recheckOn: true },
+    select: { id: true, findingId: true, status: true, completedAt: true, recheckOn: true },
   });
+  // Cancelled by replaceReviewTasks, not by a person: that is no decision against the finding.
+  const cancelledIds = history.filter((t) => t.status === "CANCELLED").map((t) => t.id);
+  const replaced = new Set(
+    cancelledIds.length
+      ? (await prisma.auditEvent.findMany({ where: { workspaceId, brandId, entityType: "Task", entityId: { in: cancelledIds }, action: "task.replaced-by-audit" }, select: { entityId: true } })).map((e) => e.entityId)
+      : [],
+  );
   const started = run?.createdAt ?? report.createdAt;
   const now = new Date();
   const hasTask = (findingId: string) => {
@@ -198,13 +204,13 @@ export async function tasksFromReport(payload: unknown): Promise<void> {
     if (past.some((t) => (OPEN as string[]).includes(t.status))) return true;
     const last = past[0];
     if (!last) return false;
-    if (last.status === "CANCELLED") return true;
+    if (last.status === "CANCELLED") return !replaced.has(last.id);
     return last.status === "DONE" && ((last.completedAt !== null && last.completedAt > started) || (last.recheckOn !== null && last.recheckOn > now));
   };
   const scope = { workspaceId, brandId, userId: null };
   const metadata = { source: "audit", agentRunId: run?.id ?? null, triggeredByUserId: run?.triggeredByUserId ?? null };
-  for (const finding of wanted) {
-    if (hasTask(finding.id)) continue;
+  // The cap counts only findings that get a task, so findings already handled don't hold back the ones after them.
+  for (const finding of findings.filter((f) => !hasTask(f.id)).slice(0, TASKS_PER_REPORT)) {
     try {
       await prisma.$transaction((tx) => createFindingTask(tx, scope, report, finding, metadata), TX);
     } catch (e) {
