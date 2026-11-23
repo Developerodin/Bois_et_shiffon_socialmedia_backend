@@ -6,6 +6,7 @@ import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { TEAM_MEMBER } from "@/server/content/person-name";
 import { notifyTx } from "@/server/notifications/tasks";
 import { brandOwners, lockRow, TX } from "@/server/services/publishing";
+import { brandMemberPerms, CLIENT_GRANT_WHERE } from "@/server/auth/permissions";
 import { canBeAssigned, findVisibleTask, isSoleStaff, type TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { TaskError } from "@/server/tasks/errors";
@@ -144,17 +145,31 @@ export async function toTaskDtos(scope: TaskScope, rows: TaskWithLinks[], people
 
 const notFound = () => new TaskError("Task not found", 404);
 
+/** Can some client reviewer see the task (spec §6): its reviewer holds a client grant on the brand, or its project is shared with the client? */
+async function clientCanSee(scope: TaskScope, t: Pick<Task, "reviewerId" | "workProjectId">): Promise<boolean> {
+  const [project, grant] = await Promise.all([
+    t.workProjectId ? prisma.workProject.findFirst({ where: { id: t.workProjectId, workspaceId: scope.workspaceId, clientVisible: true }, select: { id: true } }) : null,
+    t.reviewerId
+      ? prisma.brandMember.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId: t.reviewerId, role: CLIENT_GRANT_WHERE, user: { status: "ACTIVE", deletedAt: null } }, select: { id: true } })
+      : null,
+  ]);
+  if (project) return true;
+  // A reviewer who also approves as staff is not a client (same rule as brandAccess).
+  return !!grant && !(await brandMemberPerms(prisma, scope, t.reviewerId!, "content.approve"));
+}
+
 /** One task with its checklist lines (position, id) and photos (signed URLs); list rows carry only checklist counts. */
 export async function getTask(scope: TaskScope, v: TaskViewer, taskId: string): Promise<TaskDetailDto> {
   if (!(await findVisibleTask(prisma, v, taskId))) throw notFound();
   const row = await prisma.task.findUnique({ where: { id: taskId }, include: TASK_DTO_INCLUDE });
   if (!row) throw notFound();
-  const [[dto], items, attachments] = await Promise.all([
+  const [[dto], items, attachments, clientVisible] = await Promise.all([
     toTaskDtos(scope, [row]),
     prisma.taskChecklistItem.findMany({ where: { taskId }, orderBy: [{ position: "asc" }, { id: "asc" }] }),
     prisma.taskAttachment.findMany({ where: { taskId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], include: { mediaUpload: { select: { key: true } } } }),
+    clientCanSee(scope, row),
   ]);
-  return { ...dto!, checklistItems: items.map(toChecklistDto), attachments: await Promise.all(attachments.map((a) => toAttachmentDto(a, a.mediaUpload.key))) };
+  return { ...dto!, clientVisible, viewerIsClient: v.client, checklistItems: items.map(toChecklistDto), attachments: await Promise.all(attachments.map((a) => toAttachmentDto(a, a.mediaUpload.key))) };
 }
 
 /** A new task (tasks.manage). With a requestId, a repeat returns the task the first request made. */

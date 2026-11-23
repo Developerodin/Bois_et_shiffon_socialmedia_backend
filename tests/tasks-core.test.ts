@@ -172,6 +172,34 @@ describe("getTask", () => {
     expect(m.signed).toHaveBeenCalledWith("w1/b1/uploads/a.jpg");
   });
 
+  it("clientVisible true when the reviewer is a client", async () => {
+    db.task.findUnique.mockResolvedValue(row({ reviewerId: "u5" }));
+    db.brandMember.findFirst.mockImplementation(async ({ where }: Where) => ((where.role as { NOT?: unknown }).NOT ? null : { id: "g2" }));
+    const dto = await getTask(scope, v, "t1");
+    expect(dto.clientVisible).toBe(true);
+    expect(db.brandMember.findFirst.mock.calls[0]![0].where).toMatchObject({ userId: "u5", brandId: "b1", role: { isSystem: true, slug: "client-reviewer" } });
+  });
+
+  it("clientVisible true when the project is shared", async () => {
+    db.task.findUnique.mockResolvedValue(row({ workProjectId: "p1" }));
+    db.workProject.findFirst.mockResolvedValue({ id: "p1" });
+    expect((await getTask(scope, v, "t1")).clientVisible).toBe(true);
+    expect(db.workProject.findFirst.mock.calls[0]![0].where).toMatchObject({ id: "p1", clientVisible: true });
+  });
+
+  it("clientVisible false otherwise", async () => {
+    expect((await getTask(scope, v, "t1")).clientVisible).toBe(false);
+    db.task.findUnique.mockResolvedValue(row({ reviewerId: "u2", workProjectId: "p1" }));
+    expect((await getTask(scope, v, "t1")).clientVisible).toBe(false);
+  });
+
+  it("viewerIsClient reflects the viewer", async () => {
+    expect((await getTask(scope, v, "t1")).viewerIsClient).toBe(false);
+    const c = { ...scope, clientReviewer: true };
+    db.task.findUnique.mockResolvedValue(row({ reviewerId: "u1" }));
+    expect((await getTask(c, taskViewer(c), "t1")).viewerIsClient).toBe(true);
+  });
+
   it("list rows stay light: counts only, no lines or attachments read", async () => {
     const [dto] = await toTaskDtos(scope, [row() as never]);
     expect(dto).not.toHaveProperty("checklistItems");
