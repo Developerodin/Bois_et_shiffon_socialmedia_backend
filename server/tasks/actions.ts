@@ -8,7 +8,7 @@ import { canBeAssigned, findVisibleTask, isSoleStaff, lastSubmitter, type TaskVi
 import { taskAudit } from "@/server/tasks/audit";
 import { isUniqueViolation, TaskError } from "@/server/tasks/errors";
 import { checkTaskLinks } from "@/server/tasks/links";
-import { actorRole, getTask, rowOf, type TaskScope } from "@/server/tasks/service";
+import { actorRole, getTask, myRoleOn, rowOf, type TaskScope } from "@/server/tasks/service";
 import { applyAction, TASK_ACTIONS, type TaskDetailDto } from "@/shared";
 
 const id = z.string().min(1).max(100);
@@ -33,21 +33,32 @@ const DATE_FIELDS = new Set(["completedAt", "checkedLiveAt", "findingClearedAt",
  * Move a task through its status rules (shared applyAction) as the caller: owner, reviewer or manager per action. In one
  * locked transaction: the change, the reviewer's APPROVED / CHANGES_REQUESTED comment, the audit event and the
  * reviewer's notice on submitForReview. The reviewer must still be able to see the task to approve or ask for changes.
+ * Visibility is checked under the lock, since a reassignment just before can hide the task.
+ * `take`: someone holding the task's owning role makes it theirs (ownerId = them, role cleared); no notice. A take
+ * that lost the race to someone else is a 409 task.taken, also when the winner's take hid the task from the caller.
  */
 export async function runTaskAction(scope: TaskScope, v: TaskViewer, taskId: string, body: TaskActionInput): Promise<TaskDetailDto> {
   const { action } = body;
   await prisma.$transaction(async (tx) => {
-    if (!(await findVisibleTask(tx, v, taskId))) throw new TaskError("Task not found", 404);
     await lockRow(tx, "task", taskId);
+    if (!(await findVisibleTask(tx, v, taskId))) {
+      const taken = action === "take" && !v.client && (await tx.task.findFirst({ where: { id: taskId, workspaceId: scope.workspaceId, brandId: scope.brandId, ownerId: { not: null } }, select: { id: true } }));
+      if (taken) throw new TaskError("Someone else has taken this task.", 409, "task.taken");
+      throw new TaskError("Task not found", 404);
+    }
     const current = await tx.task.findUnique({ where: { id: taskId } });
     if (!current) throw new TaskError("Task not found", 404);
     const isOwner = current.ownerId === scope.userId;
-    // Only submitForReview asks whether the owner may review their own task (nobody else on the brand could).
-    const soleStaff = action === "submitForReview" && isOwner && (await isSoleStaff(scope.workspaceId, scope.brandId, scope.userId));
-    const result = applyAction(rowOf(current), action, actorRole(scope, current, soleStaff), { reviewerId: body.reviewerId, reason: body.reason, blockedOnId: body.blockedOnId, now: new Date().toISOString() });
+    // submitForReview asks whether the owner may review their own task (nobody else on the brand could); take asks
+    // whether the reviewer of a task in review may own it.
+    const asksSole = (action === "submitForReview" && isOwner) || (action === "take" && current.status === "IN_REVIEW" && current.reviewerId === scope.userId);
+    const soleStaff = asksSole && (await isSoleStaff(scope.workspaceId, scope.brandId, scope.userId));
+    const myRole = action === "take" ? await myRoleOn(tx, scope) : null;
+    const actor = { ...actorRole(scope, current, soleStaff, myRole), ...(action === "take" ? { soleStaff } : {}) };
+    const result = applyAction(rowOf(current), action, actor, { reviewerId: body.reviewerId, reason: body.reason, blockedOnId: body.blockedOnId, now: new Date().toISOString() });
     if (!result.ok) throw new TaskError(result.reason, 409, result.code);
     const { patch } = result;
-    await checkTaskLinks(tx, scope, { reviewerId: patch.reviewerId, blockedOnId: patch.blockedOnId }, current);
+    await checkTaskLinks(tx, scope, { ownerId: patch.ownerId, reviewerId: patch.reviewerId, blockedOnId: patch.blockedOnId }, current);
     if ((action === "approve" || action === "requestChanges") && !(await canBeAssigned(tx, scope, scope.userId, current))) {
       throw new TaskError("You can no longer review this task.", 403);
     }

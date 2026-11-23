@@ -12,6 +12,8 @@ const db = vi.hoisted(() => {
     notification: { createMany: vi.fn() },
     workspaceMember: { findFirst: vi.fn() },
     brandMember: { findFirst: vi.fn() },
+    // The visibility read of a batch's rows: every task id asked for is visible.
+    $queryRaw: vi.fn(async (q: { values: unknown[] }) => q.values.filter((x): x is string => typeof x === "string" && /^t\d+$/.test(x)).map((id) => ({ id }))),
     $transaction: vi.fn(),
   };
   d.$transaction.mockImplementation(async (fn: (tx: typeof d) => unknown) => fn(d));
@@ -36,6 +38,7 @@ import { POST as batchPost } from "@/app/api/v1/workspaces/[workspaceId]/brands/
 import { POST as tasksPost } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/tasks/route";
 
 const MANAGER: PermissionKey[] = ["brand.read", "tasks.read", "tasks.manage"];
+const ADMIN: PermissionKey[] = [...MANAGER, "tasks.all"];
 const scopeOf = (perms: PermissionKey[]) => ({ workspaceId: "w1", brandId: "b1", userId: "u1", perms: new Set(perms), clientReviewer: false });
 const RID = "6f1c2c1e-6a43-4c1b-9a3e-2f1d5b7c8a90";
 const NOW = new Date("2026-11-23T23:30:00Z");
@@ -98,7 +101,14 @@ describe("proposeTasks", () => {
     expect(JSON.stringify(db.auditEvent.create.mock.calls[0]![0].data)).not.toContain("menu");
   });
 
+  it("without tasks.all only you can be the proposed owner", async () => {
+    m.ai.mockResolvedValue({ proposals: [proposal({ owner: "Bob Martin" }), proposal({ owner: "Ana" })] });
+    const out = await proposeTasks(scope, v(), "note", NOW);
+    expect(out.proposals.map((p) => p.ownerId)).toEqual([undefined, "u1"]);
+  });
+
   it("unknown owner names dropped", async () => {
+    scope = scopeOf(ADMIN);
     m.ai.mockResolvedValue({
       proposals: [proposal({ owner: " bob martin ", dueOn: "2026-11-27" }), proposal({ owner: "Zed", dueOn: "2026-02-30", description: "  " }), proposal({ title: "  " })],
     });
@@ -180,7 +190,14 @@ describe("createTaskBatch", () => {
     expect(db.notification.createMany).not.toHaveBeenCalled();
   });
 
+  it("without tasks.all, a row owned by someone else refuses the whole batch (403)", async () => {
+    const err = await createTaskBatch(scope, v(), { requestId: RID, tasks: [input({ ownerId: "u1" }), input({ ownerId: "u2" })] }).catch((e) => e);
+    expect(err).toMatchObject({ status: 403 });
+    expect(db.task.createManyAndReturn).not.toHaveBeenCalled();
+  });
+
   it("creates every row with <requestId>:<i>, audits each and tells new owners", async () => {
+    scope = scopeOf(ADMIN);
     read();
     const out = await createTaskBatch(scope, v(), { requestId: RID, tasks: [input({ ownerId: "u2", dueOn: "2026-11-30" }), input({ title: "Second", ownerId: "u1" })] });
     const data = db.task.createManyAndReturn.mock.calls[0]![0].data;
@@ -202,7 +219,8 @@ describe("createTaskBatch", () => {
       where.id ? where.id.in.map((id) => row(Number(id.slice(1)))) : [{ id: "t1", requestId: `${RID}:1` }, { id: "t0", requestId: `${RID}:0` }],
     );
     const out = await createTaskBatch(scope, v(), { requestId: RID, tasks: [input(), input()] });
-    expect(db.task.findMany.mock.calls[0]![0].where).toMatchObject({ workspaceId: "w1", brandId: "b1", requestId: { startsWith: `${RID}:` } });
+    // Only the same person's earlier rows count as a repeat.
+    expect(db.task.findMany.mock.calls[0]![0].where).toMatchObject({ workspaceId: "w1", brandId: "b1", createdById: "u1", requestId: { startsWith: `${RID}:` } });
     expect(db.task.createManyAndReturn).not.toHaveBeenCalled();
     expect(out.tasks.map((t) => t.id)).toEqual(["t0", "t1"]);
   });

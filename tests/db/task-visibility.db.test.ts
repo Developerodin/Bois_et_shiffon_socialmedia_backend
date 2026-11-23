@@ -7,7 +7,7 @@ import { taskViewer, visibleTaskSql, visibleTasksAcrossSql } from "@/server/task
 /**
  * One workspace, two brands. Staff (workspace role with every task key) sees all; the client holds the built-in
  * client-reviewer grant on b1 only and a workspace role without project keys. `mixed` is a member with a creator grant
- * on b1 and a client grant on b2; `ownerClient` is an Owner who also holds a client grant on b2 (still staff there).
+ * on b1 (no tasks.all: only their own tasks there) and a client grant on b2; `ownerClient` is an Owner who also holds a client grant on b2 (still staff there).
  */
 const ids = async (where: Prisma.Sql) =>
   (await prisma.$queryRaw<{ id: string }[]>`SELECT t.id FROM "Task" t WHERE ${where}`).map((r) => r.id).sort();
@@ -76,6 +76,7 @@ beforeAll(async () => {
   await make("plain", {});
   await make("otherBrand", { brandId: b2 });
   await make("mixedReviewed", { brandId: b2, reviewerId: mixed });
+  await make("mixedOwned", { ownerId: mixed });
 });
 
 /** The per-brand form, from the same scope a brand route gets. A brand the person can't open shows nothing. */
@@ -89,11 +90,11 @@ describe("task visibility", () => {
   it("client sees reviewed or shared only", async () => {
     expect(await perBrand(client, b1)).toEqual([task.reviewed, task.shared].sort());
     expect(await perBrand(client, b2)).toEqual([]);
-    expect(await perBrand(staff, b1)).toEqual([task.reviewed, task.shared, task.internal, task.plain].sort());
+    expect(await perBrand(staff, b1)).toEqual([task.reviewed, task.shared, task.internal, task.plain, task.mixedOwned].sort());
   });
 
-  it("staff on one brand and a client on another sees all of the first and only what they review on the second", async () => {
-    expect(await perBrand(mixed, b1)).toEqual([task.reviewed, task.shared, task.internal, task.plain].sort());
+  it("a creator on one brand and a client on another sees their own tasks on the first and only what they review on the second", async () => {
+    expect(await perBrand(mixed, b1)).toEqual([task.mixedOwned]);
     expect(await perBrand(mixed, b2)).toEqual([task.mixedReviewed]);
   });
 

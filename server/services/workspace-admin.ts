@@ -1,10 +1,11 @@
 import type { Prisma } from "@prisma/client";
 import { archiveMemberClones } from "@/server/reels/clones";
 import { z } from "zod";
-import { isPermissionKey, LEGACY_ROLE_SLUG, permissionScope } from "@/server/auth/permissions.catalog";
-import { memberRole } from "@/server/auth/permissions";
+import { isPermissionKey, LEGACY_ROLE_SLUG, permissionScope, rolePermissions } from "@/server/auth/permissions.catalog";
+import { isClientGrant, memberRole } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
-import { AccountFlowError } from "@/server/services/accounts";
+import { AccountFlowError, assertCanGive } from "@/server/services/accounts";
+import { OPEN_TASK_STATUSES } from "@/shared";
 
 /** Members + roles administration (Cad roles/members services, simplified). */
 
@@ -38,7 +39,7 @@ export async function listRoles(workspaceId: string) {
     description: r.description,
     isSystem: r.isSystem,
     scope: r.scope,
-    permissions: r.permissions.filter(isPermissionKey),
+    permissions: rolePermissions(r).filter(isPermissionKey),
     memberCount: r._count.members + r._count.brandMembers,
   }));
 }
@@ -78,15 +79,22 @@ export async function updateRole(
 ) {
   const role = await prisma.role.findFirst({ where: { id: roleId, workspaceId } });
   if (!role) throw new AccountFlowError("Role not found", 404);
-  // Built-in roles: owners may change their permissions (not their name); the Owner role always keeps everything.
+  // Built-in roles: owners may change their permissions (not their name). Owner and Admin always hold what the catalog
+  // gives them (rolePermissions), so they can't be edited.
   if (role.isSystem) {
     if (role.slug === "owner") throw new AccountFlowError("The Owner role always has every permission", 409);
-    if (!(await memberRole(workspaceId, actorUserId))?.role?.permissions.includes("workspace.manage")) {
+    if (role.slug === "admin") throw new AccountFlowError("The Admin role always has every permission but ownership", 409);
+    const actor = (await memberRole(workspaceId, actorUserId))?.role;
+    if (!actor || !rolePermissions(actor).includes("workspace.manage")) {
       throw new AccountFlowError("Only owners can change a built-in role", 409);
     }
   }
   await assertCanGrant(workspaceId, actorUserId, input.permissions);
   assertFitsScope(role.scope, input.permissions);
+  // A client sees only what they review or what is shared with them: never every task.
+  if (isClientGrant(role) && input.permissions?.includes("tasks.all")) {
+    throw new AccountFlowError("The Client reviewer role can't see every task", 409);
+  }
   const updated = await prisma.role.update({
     where: { id: role.id },
     data: role.isSystem
@@ -106,6 +114,10 @@ export async function deleteRole(workspaceId: string, actorUserId: string, roleI
   if (role.isSystem) throw new AccountFlowError("System roles can't be deleted", 409);
   if (role._count.members || role._count.brandMembers || role._count.invitations) {
     throw new AccountFlowError("Move members and invitations off this role first", 409);
+  }
+  // Deleting it would leave its open tasks with no owner (the column is SET NULL).
+  if (await prisma.task.findFirst({ where: { workspaceId, ownerRoleId: role.id, status: { in: [...OPEN_TASK_STATUSES] } }, select: { id: true } })) {
+    throw new AccountFlowError("Give this role's open tasks to someone else first", 409);
   }
   await prisma.role.delete({ where: { id: role.id } });
   await audit(workspaceId, actorUserId, "role.deleted", role.id, { name: role.name });
@@ -160,6 +172,7 @@ export async function changeMemberRole(workspaceId: string, actorUserId: string,
     const actor = await memberRole(workspaceId, actorUserId);
     if (actor?.role?.slug !== "owner") throw new AccountFlowError("Only owners can change ownership", 409);
   }
+  await assertCanGive(workspaceId, actorUserId, role);
   if (current?.role?.slug === "owner" && role.slug !== "owner" && (await ownerCount(workspaceId)) <= 1) {
     throw new AccountFlowError("A workspace needs at least one owner", 409);
   }

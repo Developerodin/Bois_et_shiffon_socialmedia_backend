@@ -1,6 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { ADMIN_PAGE_SIZE, type LogKind, type MemberPermissions, type WorkspaceSort } from "@/shared";
-import { LEGACY_ROLE_SLUG, PERMISSIONS, type PermissionKey } from "@/server/auth/permissions.catalog";
+import { LEGACY_ROLE_SLUG, PERMISSIONS, rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { prisma } from "@/server/db/prisma";
 
 /**
@@ -183,12 +183,12 @@ export async function workspaceDetail(workspaceId: string) {
       user: m.user,
       joinedAt: m.createdAt,
       role: role ? { name: role.name, slug: role.slug } : null,
-      workspacePermissions: perms(role?.permissions ?? [], role?.name ?? "–"),
+      workspacePermissions: perms(role ? rolePermissions(role) : [], role?.name ?? "–"),
       // Per project: what they can do there, and which role each permission comes from.
       projects: ws.brands.map((b) => {
         const grant = b.members.find((bm) => bm.userId === m.userId);
-        const fromWs = new Set(role?.permissions ?? []);
-        const extra = (grant?.role.permissions ?? []).filter((p) => !fromWs.has(p));
+        const fromWs = new Set(role ? rolePermissions(role) : []);
+        const extra = (grant ? rolePermissions(grant.role) : []).filter((p) => !fromWs.has(p));
         return { brandId: b.id, brand: b.displayName, projectRole: grant?.role.name ?? null, effective: [...perms([...fromWs], role?.name ?? "–"), ...perms(extra, grant?.role.name ?? "–")] };
       }),
     };
@@ -201,7 +201,7 @@ export async function workspaceDetail(workspaceId: string) {
     calls30,
     members,
     brands: ws.brands.map((b) => ({ id: b.id, name: b.displayName, status: b.status, createdAt: b.createdAt, members: b.members.map((m) => ({ userId: m.userId, email: m.user.email, name: m.user.name, role: m.role.name })) })),
-    roles: ws.roles.map((r) => ({ name: r.name, slug: r.slug, scope: r.scope, isSystem: r.isSystem, description: r.description, permissions: r.permissions, holders: ws.members.filter((m) => roleOf(m)?.id === r.id).length + ws.brands.reduce((n, b) => n + b.members.filter((bm) => bm.roleId === r.id).length, 0) })),
+    roles: ws.roles.map((r) => ({ name: r.name, slug: r.slug, scope: r.scope, isSystem: r.isSystem, description: r.description, permissions: rolePermissions(r), holders: ws.members.filter((m) => roleOf(m)?.id === r.id).length + ws.brands.reduce((n, b) => n + b.members.filter((bm) => bm.roleId === r.id).length, 0) })),
     invitations: ws.invitations.map((i) => ({ email: i.email, role: i.role.name, project: i.brand?.displayName ?? null, expiresAt: i.expiresAt })),
   };
 }
@@ -253,8 +253,8 @@ export async function personDetail(userId: string) {
       name: m.workspace.name,
       joinedAt: m.createdAt,
       role: role?.name ?? null,
-      permissions: perms(role?.permissions ?? [], role?.name ?? "–"),
-      projects: user.brandMembers.filter((b) => b.brand.workspaceId === m.workspace.id).map((b) => ({ id: b.brand.id, name: b.brand.displayName, role: b.role.name, permissions: perms(b.role.permissions, b.role.name) })),
+      permissions: perms(role ? rolePermissions(role) : [], role?.name ?? "–"),
+      projects: user.brandMembers.filter((b) => b.brand.workspaceId === m.workspace.id).map((b) => ({ id: b.brand.id, name: b.brand.displayName, role: b.role.name, permissions: perms(rolePermissions(b.role), b.role.name) })),
     };
   });
   return {

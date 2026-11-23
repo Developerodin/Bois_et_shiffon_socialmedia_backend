@@ -103,8 +103,8 @@ const people = (scope: TaskScope) => brandOwners(scope, { key: "tasks.read", inc
 
 /**
  * A page of projects (30), soonest due first (undated last), then id; archived ones only when asked for by status.
- * A client sees only projects shared with them. Progress for the page comes from one groupBy; every task in a shared
- * project is visible to its client, so the counts need no visibility filter.
+ * A client sees only projects shared with them. Progress for the page counts only the viewer's visible tasks
+ * (visibleTaskSql), in one query, as getProject does, so the list and the project agree.
  */
 export async function listProjects(scope: TaskScope, v: TaskViewer, q: z.infer<typeof ListProjectsQuery>): Promise<{ projects: WorkProjectDto[]; nextCursor: string | null }> {
   const where: Prisma.WorkProjectWhereInput = { ...projectWhere(v), status: q.status ?? { not: "ARCHIVED" } };
@@ -121,13 +121,11 @@ export async function listProjects(scope: TaskScope, v: TaskViewer, q: z.infer<t
   ]);
   const page = rows.slice(0, PAGE);
   const groups = page.length
-    ? await prisma.task.groupBy({ by: ["workProjectId", "status"], where: { workspaceId: v.workspaceId, brandId: v.brandId, workProjectId: { in: page.map((p) => p.id) } }, _count: { _all: true } })
+    ? await prisma.$queryRaw<{ workProjectId: string; status: string; count: number }[]>`SELECT t."workProjectId", t.status::text AS status, count(*)::int AS count FROM "Task" t
+        WHERE t."workProjectId" IN (${Prisma.join(page.map((p) => p.id))}) AND ${visibleTaskSql(v)} GROUP BY t."workProjectId", t.status`
     : [];
   const counts = new Map<string, Record<string, number>>();
-  for (const g of groups) {
-    if (!g.workProjectId) continue;
-    counts.set(g.workProjectId, { ...counts.get(g.workProjectId), [g.status]: g._count._all });
-  }
+  for (const g of groups) counts.set(g.workProjectId, { ...counts.get(g.workProjectId), [g.status]: g.count });
   const person = personOf(names);
   return { projects: page.map((p) => toDto(p, person, counts.get(p.id) ?? {})), nextCursor: rows.length > PAGE ? (page.at(-1)?.id ?? null) : null };
 }

@@ -111,11 +111,11 @@ describe("Client reviewer role", () => {
       expect(has(slug, "inbox.read")).toBe(true);
       expect(has(slug, "content.download")).toBe(true);
     }
-    for (const slug of ["viewer", "creator", "commercial-owner", "member"]) {
+    for (const slug of ["viewer", "creator", "member"]) {
       expect(has(slug, "inbox.read")).toBe(false);
       expect(has(slug, "content.download")).toBe(false);
     }
-    // inbox.read: the system roles the migration names are exactly the catalog's holders.
+    // inbox.read: the migration named today's holders (Commercial owner, since merged into Manager, held none).
     const named = sql.match(/'inbox\.read'\), "updatedAt" = now\(\)\s+WHERE "isSystem" AND "slug" IN \(([^)]*)\)/)![1]!.match(/'[^']+'/g)!.map((s) => s.slice(1, -1));
     expect(named.sort()).toEqual(SYSTEM_ROLES.filter((r) => (r.permissions as string[]).includes("inbox.read")).map((r) => r.slug).sort());
     // content.download: the migration's rule (publish.execute or content.approve) gives the catalog's holders.

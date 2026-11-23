@@ -5,7 +5,7 @@ import type { Db } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import type { Finding } from "@/server/seo/checks";
 import { lockRow, TX } from "@/server/services/publishing";
-import type { TaskViewer } from "@/server/tasks/access";
+import { findVisibleTask, type TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { taskStatusInSql } from "@/server/tasks/sql";
 import { isUniqueViolation, TaskError } from "@/server/tasks/errors";
@@ -84,7 +84,8 @@ async function createFindingTask(tx: Db, scope: FindingScope & { userId: string 
 /**
  * "Make a task" on an audit finding (tasks.manage): the open task for (kind, findingId) if there is one, else a new one.
  * findingKind and findingId are always set together, so the one-open-task-per-finding index covers every such task;
- * two people clicking at once both get the task the index let through.
+ * two people clicking at once both get the task the index let through. An open task the caller can't see (someone
+ * else's, without tasks.all) is a 409 task.findingTaken, not a 404 and not the task.
  */
 export async function taskFromFinding(scope: TaskScope, v: TaskViewer, reportId: string, findingId: string): Promise<{ task: TaskDto; existed: boolean }> {
   const report = await prisma.auditReport.findFirst({ where: { id: reportId, workspaceId: scope.workspaceId, brandId: scope.brandId } });
@@ -93,8 +94,12 @@ export async function taskFromFinding(scope: TaskScope, v: TaskViewer, reportId:
   if (!finding) throw new TaskError("Finding not found", 404);
   // A positional id names another finding in each report: only a task made from this same report is that finding's.
   const openTask = () => openFindingTask(prisma, scope, report.kind, findingId, isPositionalFindingId(findingId) ? report.id : undefined);
+  const existing = async (id: string) => {
+    if (!(await findVisibleTask(prisma, v, id))) throw new TaskError("This finding already has a task, owned by someone else.", 409, "task.findingTaken");
+    return { task: await getTask(scope, v, id), existed: true };
+  };
   const found = await openTask();
-  if (found) return { task: await getTask(scope, v, found.id), existed: true };
+  if (found) return existing(found.id);
   try {
     const id = await prisma.$transaction((tx) => createFindingTask(tx, scope, report, finding), TX);
     return { task: await getTask(scope, v, id), existed: false };
@@ -103,7 +108,7 @@ export async function taskFromFinding(scope: TaskScope, v: TaskViewer, reportId:
     const winner = await openTask();
     // The index is per (kind, id), so an older report's open task with the same positional id blocks a new one.
     if (!winner) throw new TaskError("An open task from an earlier audit already uses this finding's number. Close it first.", 409, "task.findingTaken");
-    return { task: await getTask(scope, v, winner.id), existed: true };
+    return existing(winner.id);
   }
 }
 
@@ -233,14 +238,14 @@ export async function fileFindingTasks(ids: z.infer<typeof ReportPayload>, userI
 
 /**
  * The AI content review words its findings anew each run, so last week's review tasks would pile up beside this week's.
- * Its open tasks that this report no longer lists, that an audit made and nobody has taken up (to do, no owner, no
- * reviewer), are cancelled with a SYSTEM comment. Re-checked under each task's lock, as clearFindings does.
+ * Its open tasks that this report no longer lists, that an audit made and nobody has taken up (to do, no owner or
+ * owning role, no reviewer), are cancelled with a SYSTEM comment. Re-checked under each task's lock, as clearFindings does.
  * ponytail: a person who only edited, commented on or dated such a task doesn't keep it; set an owner to keep one.
  */
 async function replaceReviewTasks(report: { id: string; workspaceId: string; brandId: string; createdAt: Date }, present: Set<string>) {
   const { workspaceId, brandId } = report;
   const candidates = await prisma.task.findMany({
-    where: { workspaceId, brandId, findingKind: "GEO", findingId: { startsWith: "content-", notIn: [...present] }, status: "TODO", ownerId: null, reviewerId: null, createdById: null },
+    where: { workspaceId, brandId, findingKind: "GEO", findingId: { startsWith: "content-", notIn: [...present] }, status: "TODO", ownerId: null, ownerRoleId: null, reviewerId: null, createdById: null },
     select: { id: true, title: true },
   });
   if (!candidates.length) return;
@@ -258,7 +263,7 @@ async function replaceReviewTasks(report: { id: string; workspaceId: string; bra
     const lockIds = replace.map((t) => t.id).sort();
     for (const id of lockIds) await lockRow(tx, "task", id);
     // The same fields the cancel action writes (status, block cleared).
-    const cancelled = await tx.$queryRaw<{ id: string }[]>`UPDATE "Task" t SET status = 'CANCELLED', "blockedReason" = NULL, "blockedOnId" = NULL, "updatedAt" = ${now} WHERE t.id = ANY(${lockIds}) AND t.status = 'TODO' AND t."ownerId" IS NULL AND t."reviewerId" IS NULL RETURNING t.id`;
+    const cancelled = await tx.$queryRaw<{ id: string }[]>`UPDATE "Task" t SET status = 'CANCELLED', "blockedReason" = NULL, "blockedOnId" = NULL, "updatedAt" = ${now} WHERE t.id = ANY(${lockIds}) AND t.status = 'TODO' AND t."ownerId" IS NULL AND t."ownerRoleId" IS NULL AND t."reviewerId" IS NULL RETURNING t.id`;
     const ids = cancelled.map((r) => r.id);
     if (!ids.length) return;
     await tx.taskComment.createMany({

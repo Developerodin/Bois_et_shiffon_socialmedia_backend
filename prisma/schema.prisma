@@ -273,6 +273,8 @@ model BrandMember {
   @@unique([brandId, userId])
   @@index([workspaceId, brandId])
   @@index([userId])
+  /// Who holds a role on a brand: a role task's visibility and its TASK_ASSIGNED notices.
+  @@index([brandId, roleId])
 }
 
 // --- Slice 0: duties, jobs, agents, audit, AI run log (foundation design §4–5, §8b) ---
@@ -608,6 +610,7 @@ model Role {
   members      WorkspaceMember[]
   brandMembers BrandMember[]
   invitations  Invitation[]
+  ownedTasks   Task[]            @relation("TaskOwnerRole")
 
   @@unique([workspaceId, slug])
 }
@@ -1384,6 +1387,9 @@ model Task {
   priority           TaskPriority       @default(NORMAL)
   areas              TaskArea[]         @default([GENERAL])
   ownerId            String?
+  /// A project role owns the task until someone holding it takes it. At most one of ownerId and ownerRoleId is set
+  /// (CHECK task_one_owner).
+  ownerRoleId        String?
   /// Set when the task needs review; such a task reaches DONE only through approve.
   reviewerId         String?
   createdById        String?
@@ -1421,6 +1427,7 @@ model Task {
 
   brand         Brand               @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   owner         User?               @relation("TaskOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  ownerRole     Role?               @relation("TaskOwnerRole", fields: [ownerRoleId], references: [id], onDelete: SetNull)
   reviewer      User?               @relation("TaskReviewer", fields: [reviewerId], references: [id], onDelete: SetNull)
   createdBy     User?               @relation("TaskCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   blockedOn     User?               @relation("TaskBlockedOn", fields: [blockedOnId], references: [id], onDelete: SetNull)

@@ -17,7 +17,8 @@ let plain: string;
 let staff: string;
 let client: string;
 
-const STAFF: PermissionKey[] = ["brand.read", "tasks.read", "tasks.manage"];
+// Staff who see every task (tasks.all); the own-tasks rule has its own tests (task-assignment.db.test.ts).
+const STAFF: PermissionKey[] = ["brand.read", "tasks.read", "tasks.manage", "tasks.all"];
 const scopeOf = (brandId: string, userId = staff, clientReviewer = false, perms: PermissionKey[] = STAFF) =>
   ({ workspaceId: ws, brandId, userId, perms: new Set(perms), clientReviewer });
 

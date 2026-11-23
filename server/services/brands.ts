@@ -1,5 +1,6 @@
 import { BrandStatus } from "@prisma/client";
 import { memberRole } from "@/server/auth/permissions";
+import { rolePermissions } from "@/server/auth/permissions.catalog";
 import { prisma } from "@/server/db/prisma";
 
 export type BrandListItem = {
@@ -19,7 +20,8 @@ export async function listAccessibleBrands(
   workspaceId: string,
   userId: string,
 ): Promise<BrandListItem[]> {
-  const all = (await memberRole(workspaceId, userId))?.role?.permissions.includes("brand.read") ?? false;
+  const role = (await memberRole(workspaceId, userId))?.role;
+  const all = role ? rolePermissions(role).includes("brand.read") : false;
   const brands = await prisma.brand.findMany({
     where: {
       workspaceId,

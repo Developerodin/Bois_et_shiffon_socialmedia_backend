@@ -12,7 +12,7 @@ beforeAll(async () => {
   const ws = (await prisma.workspace.create({ data: { name: "W", slug: "w-task-reopen" } })).id;
   const brandId = (await prisma.brand.create({ data: { workspaceId: ws, slug: "b", displayName: "B" } })).id;
   const userId = (await prisma.user.create({ data: { email: "manager@task-reopen.test" } })).id;
-  scope = { workspaceId: ws, brandId, userId, perms: new Set(["brand.read", "tasks.read", "tasks.manage"]), clientReviewer: false };
+  scope = { workspaceId: ws, brandId, userId, perms: new Set(["brand.read", "tasks.read", "tasks.manage", "tasks.all"]), clientReviewer: false };
   const finding = { workspaceId: ws, brandId, findingKind: "SEO" as const, findingId: "missing-meta" };
   done = (await prisma.task.create({ data: { ...finding, title: "Old", status: "DONE", completedAt: new Date() } })).id;
   await prisma.task.create({ data: { ...finding, title: "New", status: "TODO" } });

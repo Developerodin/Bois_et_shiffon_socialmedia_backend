@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import { brandOwners } from "@/server/services/publishing";
-import { visibleTaskSql, type TaskViewer } from "@/server/tasks/access";
+import { ownedBySql, visibleTaskSql, type TaskViewer } from "@/server/tasks/access";
 import { fromCursor, toCursor } from "@/server/tasks/cursor";
 import { TaskError } from "@/server/tasks/errors";
 import { TASK_DTO_INCLUDE, toTaskDtos, type TaskScope } from "@/server/tasks/service";
@@ -65,7 +65,8 @@ export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.S
   const where: Prisma.Sql[] = [visibleTaskSql(v)];
   if (done) where.push(Prisma.sql`t.status = 'DONE' AND t."completedAt" > ${new Date(now.getTime() - DONE_DAYS * 86_400_000).toISOString()}::timestamp`);
   else where.push(OPEN);
-  if (q.view === "mine") where.push(Prisma.sql`t."ownerId" = ${v.userId}`);
+  // Yours, or your role's until someone takes it.
+  if (q.view === "mine") where.push(ownedBySql(v.userId));
   if (q.view === "approvals") where.push(toReview(v.userId));
   // The same expression as the ORDER BY and cursor, so the (brand, due, id) index serves the filter too.
   // Overdue too, so the index scan stops before the undated rows (DUE is infinity there, never before today).
@@ -151,9 +152,11 @@ export async function listTasks(scope: TaskScope, v: TaskViewer, q: ListQuery, n
 export async function todayTasks(scope: TaskScope, v: TaskViewer, now = new Date()): Promise<TodayDto> {
   const base = Prisma.sql`FROM "Task" t WHERE ${visibleTaskSql(v)} AND ${OPEN}`;
   const groups = {
-    // DUE as the (brand, owner, due, id) index has it, so the scan stops before the undated rows (DUE infinity).
-    mine: Prisma.sql`t."ownerId" = ${v.userId} AND ${DUE} <= ${localToday(v.brandId, now)}`,
+    // DUE as the (brand, owner, due, id) and (brand, ownerRole, due, id) indexes have it, so the scan stops before the
+    // undated rows (DUE infinity). Yours, or your role's until someone takes it (ownedBySql).
+    mine: Prisma.sql`${ownedBySql(v.userId)} AND ${DUE} <= ${localToday(v.brandId, now)}`,
     approvals: toReview(v.userId),
+    // ponytail: person-based; a blocked task of your role shows here once someone takes it.
     blockers: Prisma.sql`t."blockedReason" IS NOT NULL AND (t."ownerId" = ${v.userId} OR t."blockedOnId" = ${v.userId})`,
   };
   const names = Object.keys(groups) as (keyof typeof groups)[];

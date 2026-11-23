@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { allowedActions, applyAction, MANAGE_PATCH_FIELDS, pickPatch, type ActorRole, type TaskRow } from "@/shared";
 
 const task = (o: Partial<TaskRow> = {}): TaskRow => ({
-  status: "IN_PROGRESS", reviewerId: null, ownerId: "o", url: null, blockedReason: null, blockedOnId: null,
+  status: "IN_PROGRESS", reviewerId: null, ownerId: "o", ownerRoleId: null, url: null, blockedReason: null, blockedOnId: null,
   completedAt: null, checkedLiveAt: null, checkedLiveById: null, findingClearedAt: null, recheckOn: null, ...o,
 });
-const owner: ActorRole = { userId: "o", isOwner: true, isReviewer: false, canManage: false, soleStaff: false, isBlockedOn: false };
-const reviewer: ActorRole = { userId: "r", isOwner: false, isReviewer: true, canManage: false, soleStaff: false, isBlockedOn: false };
-const manager: ActorRole = { userId: "m", isOwner: false, isReviewer: false, canManage: true, soleStaff: false, isBlockedOn: false };
+const owner: ActorRole = { userId: "o", isOwner: true, isReviewer: false, canManage: false, soleStaff: false, isBlockedOn: false, holdsOwnerRole: false };
+const reviewer: ActorRole = { userId: "r", isOwner: false, isReviewer: true, canManage: false, soleStaff: false, isBlockedOn: false, holdsOwnerRole: false };
+const manager: ActorRole = { userId: "m", isOwner: false, isReviewer: false, canManage: true, soleStaff: false, isBlockedOn: false, holdsOwnerRole: false };
 const now = "2026-11-23T10:00:00.000Z";
 
 describe("task rules", () => {
@@ -47,10 +47,26 @@ describe("task rules", () => {
   });
   it("blocked-on person may unblock", () => {
     const t = task({ blockedReason: "wait", blockedOnId: "x" });
-    const other: ActorRole = { userId: "x", isOwner: false, isReviewer: false, canManage: false, soleStaff: false, isBlockedOn: true };
+    const other: ActorRole = { userId: "x", isOwner: false, isReviewer: false, canManage: false, soleStaff: false, isBlockedOn: true, holdsOwnerRole: false };
     expect(applyAction(t, "unblock", other, { now })).toMatchObject({ ok: true });
     expect(allowedActions(t, other)).toEqual(["unblock"]);
     expect(applyAction(t, "unblock", { ...other, isBlockedOn: false }, { now })).toMatchObject({ ok: false });
+  });
+  it("take: a role holder makes a role's task theirs, once", () => {
+    const roleTask = task({ ownerId: null, ownerRoleId: "creators", status: "TODO" });
+    const holder: ActorRole = { userId: "h", isOwner: false, isReviewer: false, canManage: false, soleStaff: false, isBlockedOn: false, holdsOwnerRole: true };
+    expect(applyAction(roleTask, "take", holder, { now })).toEqual({ ok: true, patch: { ownerId: "h", ownerRoleId: null } });
+    expect(allowedActions(roleTask, holder)).toEqual(["take"]);
+    expect(applyAction(roleTask, "take", { ...holder, holdsOwnerRole: false }, { now })).toMatchObject({ ok: false });
+    expect(applyAction(roleTask, "take", manager, { now })).toMatchObject({ ok: false });
+    expect(applyAction(task(), "take", holder, { now })).toMatchObject({ ok: false, code: "task.taken" });
+    expect(applyAction({ ...roleTask, status: "DONE" }, "take", holder, { now })).toMatchObject({ ok: false });
+  });
+  it("take: the reviewer of a task in review can't own it, unless sole staff", () => {
+    const inReview = task({ ownerId: null, ownerRoleId: "creators", status: "IN_REVIEW", reviewerId: "h" });
+    const holder: ActorRole = { userId: "h", isOwner: false, isReviewer: true, canManage: false, soleStaff: false, isBlockedOn: false, holdsOwnerRole: true };
+    expect(applyAction(inReview, "take", holder, { now })).toMatchObject({ ok: false, code: "task.reviewerIsOwner" });
+    expect(applyAction(inReview, "take", { ...holder, soleStaff: true }, { now })).toMatchObject({ ok: true });
   });
   it("close clears blocked", () => {
     const t = task({ blockedReason: "wait", blockedOnId: "x" });

@@ -42,7 +42,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   routeScope = scopeOf(MANAGER);
   db.$queryRaw.mockResolvedValue([{ id: "t1" }]);
-  db.task.findUnique.mockResolvedValue({ title: "Fix menu", ownerId: "u2" });
+  // u1 (the manager) made the task; u2 owns it.
+  db.task.findUnique.mockResolvedValue({ title: "Fix menu", ownerId: "u2", createdById: "u1" });
   db.mediaUpload.findFirst.mockResolvedValue({ id: "up1", key: "w1/b1/uploads/a.jpg" });
   db.taskAttachment.findFirst.mockResolvedValue(attachment());
   db.taskAttachment.create.mockImplementation(async ({ data }: { data: object }) => attachment(data as Record<string, unknown>));
@@ -90,6 +91,13 @@ describe("attachments", () => {
     await expect(removeAttachment(readerOwner, taskViewer(readerOwner), "t1", "at1")).rejects.toMatchObject({ status: 403 });
     await addAttachment(creatorOwner, taskViewer(creatorOwner), "t1", { mediaUploadId: "up1", role: "BEFORE" });
     expect(db.taskAttachment.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("a manager without tasks.all who neither owns nor made the task gets 403; with tasks.all may attach", async () => {
+    db.task.findUnique.mockResolvedValue({ title: "Fix menu", ownerId: "u2", createdById: "u9" });
+    await expect(addAttachment(manager, taskViewer(manager), "t1", { mediaUploadId: "up1", role: "BEFORE" })).rejects.toMatchObject({ status: 403 });
+    const admin = scopeOf([...MANAGER, "tasks.all"]);
+    await expect(addAttachment(admin, taskViewer(admin), "t1", { mediaUploadId: "up1", role: "BEFORE" })).resolves.toMatchObject({ id: "at1" });
   });
 
   it("someone else with content.create but not owner or manager gets 403", async () => {

@@ -25,8 +25,11 @@ const READ: PermissionKey[] = ["brand.read", "agents.read", "analytics.read"];
 export const CLIENT_REVIEWER = "client-reviewer";
 
 /**
- * Seeded per workspace; read-only in the UI. Workspace roles decide who runs the workspace;
- * project roles decide what someone does on one project (brand).
+ * Seeded per workspace. Workspace roles decide who runs the workspace; project roles decide what someone does on one
+ * project (brand). Owner and Admin take their permissions from here (rolePermissions), so a change to them applies to
+ * every workspace at once; owners may edit the other built-ins, so a new key reaches those through a migration.
+ * ponytail: Prisma filters on Role.permissions (`permissions: { has }`, `= ANY(permissions)`) read the stored copy, also
+ * Owner's and Admin's; ship a change to those two with a migration that rewrites their rows (as 20261124130000 does).
  */
 export const SYSTEM_ROLES: ReadonlyArray<{
   slug: string;
@@ -44,8 +47,8 @@ export const SYSTEM_ROLES: ReadonlyArray<{
     slug: "manager",
     name: "Manager",
     scope: "PROJECT",
-    description: "Runs agents, strategy, the calendar and publishing",
-    permissions: [...READ, "agents.run", "context.edit", "context.confirm", "content.create", "content.download", "publish.execute", "integrations.manage", "inbox.read", "tasks.read", "tasks.manage"],
+    description: "Runs agents, strategy, the calendar, publishing, product priorities, campaigns and offers",
+    permissions: [...READ, "agents.run", "context.edit", "context.confirm", "content.create", "content.download", "publish.execute", "integrations.manage", "inbox.read", "commercial.manage", "tasks.read", "tasks.manage"],
   },
   { slug: "creator", name: "Creator", scope: "PROJECT", description: "Writes and edits drafts", permissions: [...READ, "content.create", "tasks.read", "tasks.manage"] },
   {
@@ -63,15 +66,21 @@ export const SYSTEM_ROLES: ReadonlyArray<{
     // No agents.read (assistant, Translate) and no inbox.read: customer messages stay with the team that answers them.
     permissions: ["brand.read", "analytics.read", "content.approve", "content.download", "tasks.read"],
   },
-  {
-    slug: "commercial-owner",
-    name: "Commercial owner",
-    scope: "PROJECT",
-    description: "Sets product priorities, campaigns and offers",
-    permissions: [...READ, "commercial.manage", "tasks.read", "tasks.manage"],
-  },
   { slug: "viewer", name: "Viewer", scope: "PROJECT", description: "Read-only access to this project", permissions: [...READ, "tasks.read"] },
 ];
+
+/** The built-in roles whose permissions are fixed in code: they hold every key (Admin all but ownership), always. */
+const FIXED_ROLES = ["owner", "admin"];
+
+/**
+ * A role's permissions: built-in Owner and Admin from SYSTEM_ROLES (a new key reaches them with the code, and a stale
+ * stored copy can't lock owners out); every other role, the other built-ins included (owners may edit those), from
+ * its row.
+ */
+export function rolePermissions(role: { isSystem: boolean; slug: string; permissions: string[] }): string[] {
+  if (!role.isSystem || !FIXED_ROLES.includes(role.slug)) return role.permissions;
+  return SYSTEM_ROLES.find((r) => r.slug === role.slug)!.permissions;
+}
 
 /** Legacy WorkspaceRole enum → system role slug (fallback while roleId is null). */
 export const LEGACY_ROLE_SLUG = {

@@ -22,7 +22,7 @@ beforeAll(async () => {
   );
   await prisma.workspaceMember.createMany({ data: [owner, second].map((u) => ({ workspaceId: ws, userId: u.id, roleId: role.id })) });
   other = second.id;
-  scope = { workspaceId: ws, brandId, userId: owner.id, perms: new Set(["brand.read", "tasks.read", "tasks.manage"]), clientReviewer: false };
+  scope = { workspaceId: ws, brandId, userId: owner.id, perms: new Set(["brand.read", "tasks.read", "tasks.manage", "tasks.all"]), clientReviewer: false };
   taskId = (await prisma.task.create({ data: { workspaceId: ws, brandId, title: "T", status: "IN_REVIEW", ownerId: owner.id, reviewerId: gone.id } })).id;
 });
 

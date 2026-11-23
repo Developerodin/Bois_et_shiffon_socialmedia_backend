@@ -106,17 +106,18 @@ describe("createProject", () => {
 });
 
 describe("listProjects", () => {
-  it("progress ignores cancelled", async () => {
+  it("progress ignores cancelled, and counts only the viewer's visible tasks", async () => {
     db.workProject.findMany.mockResolvedValue([project()]);
-    db.task.groupBy.mockResolvedValue([
-      { workProjectId: "p1", status: "DONE", _count: { _all: 2 } },
-      { workProjectId: "p1", status: "TODO", _count: { _all: 1 } },
-      { workProjectId: "p1", status: "CANCELLED", _count: { _all: 3 } },
+    db.$queryRaw.mockResolvedValue([
+      { workProjectId: "p1", status: "DONE", count: 2 },
+      { workProjectId: "p1", status: "TODO", count: 1 },
+      { workProjectId: "p1", status: "CANCELLED", count: 3 },
     ]);
     const { projects } = await listProjects(scope, v(), {});
     expect(projects[0]!.progress).toEqual({ done: 2, total: 3 });
-    expect(db.task.groupBy).toHaveBeenCalledTimes(1);
-    expect(db.task.groupBy.mock.calls[0]![0].by).toEqual(["workProjectId", "status"]);
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+    const parts = (db.$queryRaw.mock.calls[0] as unknown[]).slice(1);
+    expect(parts.some((x) => String((x as { sql?: string })?.sql).includes(`t."workspaceId" = ?`))).toBe(true);
   });
 
   it("client lists only shared projects", async () => {

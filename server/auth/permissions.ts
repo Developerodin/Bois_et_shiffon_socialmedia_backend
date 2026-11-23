@@ -3,6 +3,7 @@ import { AccessDeniedError } from "@/server/auth/errors";
 import {
   CLIENT_REVIEWER,
   LEGACY_ROLE_SLUG,
+  rolePermissions,
   SYSTEM_ROLES,
   type PermissionKey,
 } from "@/server/auth/permissions.catalog";
@@ -21,8 +22,8 @@ export async function ensureSystemRoles(workspaceId: string, db: Db = prisma) {
   for (const r of SYSTEM_ROLES) {
     await db.role.upsert({
       where: { workspaceId_slug: { workspaceId, slug: r.slug } },
-      // Owners may have edited a built-in role's permissions: keep them (Owner always tracks the catalog).
-      update: { name: r.name, description: r.description, scope: r.scope, isSystem: true, ...(r.slug === "owner" ? { permissions: r.permissions } : {}) },
+      // Owners may have edited a built-in role's permissions: keep them (Owner and Admin read theirs from code anyway).
+      update: { name: r.name, description: r.description, scope: r.scope, isSystem: true },
       create: { workspaceId, slug: r.slug, name: r.name, description: r.description, scope: r.scope, permissions: r.permissions, isSystem: true },
     });
   }
@@ -60,11 +61,11 @@ export async function permissionsOf(
   preread?: Awaited<ReturnType<typeof brandGrant>>,
 ): Promise<Set<PermissionKey>> {
   if (!found?.role) return new Set();
-  const perms = new Set(found.role.permissions as PermissionKey[]);
+  const perms = new Set(rolePermissions(found.role) as PermissionKey[]);
   if (!brandId) return perms;
 
   const grant = preread === undefined ? await brandGrant(workspaceId, brandId, userId) : preread;
-  for (const p of grant?.role.permissions ?? []) perms.add(p as PermissionKey);
+  for (const p of grant ? rolePermissions(grant.role) : []) perms.add(p as PermissionKey);
   return perms;
 }
 
@@ -91,16 +92,16 @@ export const isClientMember = (clientGrant: boolean, workspacePerms: readonly st
  */
 export async function hasOtherHolder(workspaceId: string, brandId: string, userId: string, key: PermissionKey) {
   const [members, legacy, grants] = await Promise.all([
-    prisma.workspaceMember.findMany({ where: { workspaceId, userId: { not: userId } }, select: { userId: true, role: true, roleRef: { select: { permissions: true } } } }),
-    prisma.role.findMany({ where: { workspaceId, slug: { in: Object.values(LEGACY_ROLE_SLUG) } }, select: { slug: true, permissions: true } }),
+    prisma.workspaceMember.findMany({ where: { workspaceId, userId: { not: userId } }, select: { userId: true, role: true, roleRef: { select: { isSystem: true, slug: true, permissions: true } } } }),
+    prisma.role.findMany({ where: { workspaceId, slug: { in: Object.values(LEGACY_ROLE_SLUG) } }, select: { isSystem: true, slug: true, permissions: true } }),
     prisma.brandMember.findMany({ where: { workspaceId, brandId, userId: { not: userId } }, select: { userId: true, role: { select: { isSystem: true, slug: true, permissions: true } } } }),
   ]);
-  const legacyPerms = new Map(legacy.map((r) => [r.slug, r.permissions]));
-  const roleOf = (m: (typeof members)[number]) => m.roleRef?.permissions ?? legacyPerms.get(LEGACY_ROLE_SLUG[m.role]);
+  const legacyPerms = new Map(legacy.map((r) => [r.slug, rolePermissions(r)]));
+  const roleOf = (m: (typeof members)[number]) => (m.roleRef ? rolePermissions(m.roleRef) : legacyPerms.get(LEGACY_ROLE_SLUG[m.role]));
   if (members.some((m) => roleOf(m)?.includes(key))) return true;
   // As in effectivePermissions: a grant counts only for someone with a workspace role.
   const withRole = new Set(members.filter((m) => roleOf(m)).map((m) => m.userId));
-  return grants.some((g) => withRole.has(g.userId) && !isClientGrant(g.role) && g.role.permissions.includes(key));
+  return grants.some((g) => withRole.has(g.userId) && !isClientGrant(g.role) && rolePermissions(g.role).includes(key));
 }
 
 /**

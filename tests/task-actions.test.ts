@@ -173,6 +173,38 @@ describe("other actions", () => {
     expect(updated()).toEqual({ blockedReason: "Photos", blockedOnId: "u3" });
   });
 
+  it("take: a holder of the owning role makes it theirs under the lock, role cleared, audited, nobody told", async () => {
+    db.task.findUnique.mockResolvedValue(row({ status: "TODO", ownerId: null, ownerRoleId: "r1", createdById: "u9" }));
+    db.brandMember.findFirst.mockImplementation(async ({ where, select }: Where & { select?: Record<string, unknown> }) => (select?.roleId ? { roleId: "r1" } : null));
+    await runTaskAction(scope, v, "t1", { action: "take" });
+    expect(updated()).toEqual({ ownerId: "u1", ownerRoleId: null });
+    expect(audits()[0]).toMatchObject({ action: "task.take", entityId: "t1" });
+    expect(db.notification.createMany).not.toHaveBeenCalled();
+    // The lock comes before the visibility read (a reassignment just before can hide the task).
+    expect(db.$executeRaw.mock.invocationCallOrder[0]!).toBeLessThan(db.$queryRaw.mock.invocationCallOrder[0]!);
+  });
+
+  it("take: someone without the role is refused; a task someone took is a 409 task.taken, also once it is hidden", async () => {
+    db.task.findUnique.mockResolvedValue(row({ status: "TODO", ownerId: null, ownerRoleId: "r1", createdById: "u9" }));
+    db.brandMember.findFirst.mockResolvedValue({ roleId: "r2" });
+    await expect(runTaskAction(scope, v, "t1", { action: "take" })).rejects.toMatchObject({ status: 409 });
+    db.task.findUnique.mockResolvedValue(row({ status: "TODO", ownerId: "u2", ownerRoleId: null, createdById: "u1" }));
+    await expect(runTaskAction(scope, v, "t1", { action: "take" })).rejects.toMatchObject({ status: 409, code: "task.taken" });
+    db.$queryRaw.mockResolvedValue([]);
+    (db.task as unknown as { findFirst: ReturnType<typeof vi.fn> }).findFirst = vi.fn(async () => ({ id: "t1" }));
+    await expect(runTaskAction(scope, v, "t1", { action: "take" })).rejects.toMatchObject({ status: 409, code: "task.taken" });
+    await expect(runTaskAction(scope, v, "t1", { action: "start" })).rejects.toMatchObject({ status: 404 });
+    expect(db.task.update).not.toHaveBeenCalled();
+  });
+
+  it("without tasks.all, a manager can't cancel a task they neither own nor made", async () => {
+    db.task.findUnique.mockResolvedValue(row({ ownerId: "u2", createdById: "u3" }));
+    await expect(runTaskAction(scope, v, "t1", { action: "cancel" })).rejects.toMatchObject({ status: 409 });
+    scope.perms = new Set([...MANAGER, "tasks.all"]);
+    await runTaskAction(scope, taskViewer(scope), "t1", { action: "cancel" });
+    expect(updated()).toMatchObject({ status: "CANCELLED" });
+  });
+
   it("a refused action is a 409 with the reason; an invisible task is a 404", async () => {
     db.task.findUnique.mockResolvedValue(row({ status: "DONE" }));
     await expect(runTaskAction(scope, v, "t1", { action: "start" })).rejects.toMatchObject({ status: 409, message: "Only a to-do task can be started." });

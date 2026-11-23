@@ -7,7 +7,7 @@ import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { CAPTION_LIMITS, CHANNEL_TEXT_MAX, safeHttpUrl } from "@/shared";
 import { brandMemberPerms, hasOtherApprover, isClientMember, requirePermission } from "@/server/auth/permissions";
-import type { PermissionKey } from "@/server/auth/permissions.catalog";
+import { rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { linkedProducts } from "@/server/catalog/linked";
 import { gateIssues, linkedIds, ProductOverride, snapshotOf } from "@/server/content/product-checks";
 import { campaignsById } from "@/server/catalog/campaigns";
@@ -241,9 +241,9 @@ export async function brandOwners(
     // listProjectPeople's workspace list is already the brand.read holders; another key, or telling clients apart, needs the roles.
     key === "brand.read" && !includeClients
       ? null
-      : prisma.workspaceMember.findMany({ where: { workspaceId: scope.workspaceId }, select: { userId: true, roleRef: { select: { permissions: true } } } }),
+      : prisma.workspaceMember.findMany({ where: { workspaceId: scope.workspaceId }, select: { userId: true, roleRef: { select: { isSystem: true, slug: true, permissions: true } } } }),
   ]);
-  const roleOf = new Map((roles ?? []).map((r) => [r.userId, r.roleRef?.permissions ?? []]));
+  const roleOf = new Map((roles ?? []).map((r) => [r.userId, r.roleRef ? rolePermissions(r.roleRef) : []]));
   const viaRole = key === "brand.read" ? null : new Set([...roleOf].filter(([, perms]) => perms.includes(key)).map(([userId]) => userId));
   // With includeClients, each person says whether they are a client here (isClientMember).
   const clients = new Set(includeClients ? people.filter((g) => isClientMember(g.client, roleOf.get(g.userId) ?? [])).map((g) => g.userId) : []);

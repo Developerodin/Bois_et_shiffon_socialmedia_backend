@@ -2,12 +2,18 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, isClientGrant, isClientMember, memberRole } from "@/server/auth/permissions";
-import { CLIENT_REVIEWER, type PermissionKey } from "@/server/auth/permissions.catalog";
+import { CLIENT_REVIEWER, rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { lockRow } from "@/server/services/publishing";
 import { TaskError } from "@/server/tasks/errors";
 
-/** Who is looking at a brand's tasks, from the route scope already loaded (no extra read). */
-export type TaskViewer = { userId: string; workspaceId: string; brandId: string; canRead: boolean; canManage: boolean; client: boolean };
+/**
+ * Who is looking at a brand's tasks, from the route scope already loaded (no extra read). `all` (tasks.all, staff only):
+ * sees every task; without it a person sees only their own (ownClause).
+ */
+export type TaskViewer = { userId: string; workspaceId: string; brandId: string; canRead: boolean; canManage: boolean; all: boolean; client: boolean };
+
+/** tasks.all as it counts: a client reviewer never sees every task, whatever their roles hold. */
+export const seesAllTasks = (scope: { perms: Set<PermissionKey>; clientReviewer?: boolean }) => scope.perms.has("tasks.all") && !scope.clientReviewer;
 
 export function taskViewer(scope: { userId: string; workspaceId: string; brandId: string; perms: Set<PermissionKey>; clientReviewer: boolean }): TaskViewer {
   return {
@@ -16,9 +22,17 @@ export function taskViewer(scope: { userId: string; workspaceId: string; brandId
     brandId: scope.brandId,
     canRead: scope.perms.has("tasks.read"),
     canManage: scope.perms.has("tasks.manage"),
+    all: seesAllTasks(scope),
     client: scope.clientReviewer,
   };
 }
+
+/**
+ * May this person edit the task and run its manager actions: tasks.all, or tasks.manage on a task they own or created
+ * (a role's task is taken first). actorRole, patchTask and lockTaskForEdit share it.
+ */
+export const managesTask = (scope: { userId: string; perms: Set<PermissionKey>; clientReviewer?: boolean }, t: { ownerId: string | null; createdById: string | null }) =>
+  seesAllTasks(scope) || (scope.perms.has("tasks.manage") && (t.ownerId === scope.userId || t.createdById === scope.userId));
 
 /** A table alias for raw SQL: a plain identifier only, since it is spliced in as text. */
 function ref(alias: string) {
@@ -50,7 +64,7 @@ async function clientGrantOn(db: Db, scope: BrandScope, userId: string) {
   const [grant, approves] = await Promise.all([
     db.brandMember.findFirst({
       where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId, role: CLIENT_GRANT_WHERE, user: { status: "ACTIVE", deletedAt: null } },
-      select: { role: { select: { permissions: true } } },
+      select: { role: { select: { isSystem: true, slug: true, permissions: true } } },
     }),
     db.workspaceMember.findFirst({ where: { workspaceId: scope.workspaceId, userId, roleRef: { permissions: { has: "content.approve" } } }, select: { id: true } }),
   ]);
@@ -77,21 +91,38 @@ export async function clientCanSee(db: Db, scope: BrandScope, t: TaskPeople): Pr
 }
 
 /**
+ * The task is `userId`'s to do: they own it, or a project role they hold on its brand does. The mine view and Today's
+ * mine group use it as is; ownClause adds the other ways a task concerns someone.
+ */
+export const ownedBySql = (userId: string, alias = "t") => ownedBy(userId, ref(alias));
+const ownedBy = (userId: string, a: Prisma.Sql) =>
+  Prisma.sql`(${a}."ownerId" = ${userId} OR (${a}."ownerRoleId" IS NOT NULL AND EXISTS (SELECT 1 FROM "BrandMember" bm WHERE bm."brandId" = ${a}."brandId" AND bm."userId" = ${userId} AND bm."roleId" = ${a}."ownerRoleId")))`;
+
+/**
+ * THE staff rule without tasks.all: the task is theirs (ownedBySql), they review it, it waits on them, or they created
+ * it. Unassigned tasks nobody created (SEO and GEO audit tasks) are seen only with tasks.all.
+ */
+const ownClause = (userId: string, a: Prisma.Sql) =>
+  Prisma.sql`(${ownedBy(userId, a)} OR ${a}."reviewerId" = ${userId} OR ${a}."blockedOnId" = ${userId} OR ${a}."createdById" = ${userId})`;
+
+/**
  * THE definition of which tasks a person sees on one brand, as a SQL condition on the Task row `alias`. Every task read
  * (lists, search, comments, attachments, notifications, counts) builds on it or on visibleTasksAcrossSql below.
+ * tasks.all: the whole brand; a client: clientClause; other staff: ownClause.
  */
 export function visibleTaskSql(v: TaskViewer, alias = "t"): Prisma.Sql {
   if (!v.canRead) return Prisma.sql`FALSE`;
   const a = ref(alias);
   const brand = Prisma.sql`${a}."workspaceId" = ${v.workspaceId} AND ${a}."brandId" = ${v.brandId}`;
-  return v.client ? Prisma.sql`(${brand} AND ${clientClause(v.userId, a)})` : Prisma.sql`(${brand})`;
+  if (v.client) return Prisma.sql`(${brand} AND ${clientClause(v.userId, a)})`;
+  return v.all ? Prisma.sql`(${brand})` : Prisma.sql`(${brand} AND ${ownClause(v.userId, a)})`;
 }
 
 /**
  * visibleTaskSql over every brand of the workspace at once (notifications): reads the person's role and project grants
  * once, then decides per brand as brandAccess + taskViewer would (brand.read and tasks.read from role ∪ grant; a
- * client-reviewer grant without content.approve from the workspace role makes them a client there, isClientMember).
- * Archived brands are left out, as brandAccess refuses them.
+ * client-reviewer grant without content.approve from the workspace role makes them a client there, isClientMember;
+ * tasks.all from role ∪ grant, ignored for a client). Archived brands are left out, as brandAccess refuses them.
  */
 export async function visibleTasksAcrossSql(userId: string, workspaceId: string, alias = "t"): Promise<Prisma.Sql> {
   const a = ref(alias);
@@ -100,23 +131,28 @@ export async function visibleTasksAcrossSql(userId: string, workspaceId: string,
     prisma.brandMember.findMany({ where: { workspaceId, userId }, select: { brandId: true, role: { select: { isSystem: true, slug: true, permissions: true } } } }),
   ]);
   if (!found?.role) return Prisma.sql`FALSE`;
-  const own = found.role.permissions;
+  const own = rolePermissions(found.role);
   const reads = (perms: string[]) => perms.includes("brand.read") && perms.includes("tasks.read");
-  const staff: string[] = [];
   const client: string[] = [];
+  const all: string[] = [];
+  const mine: string[] = [];
   for (const g of grants) {
-    const perms = [...own, ...g.role.permissions];
+    const perms = [...own, ...rolePermissions(g.role)];
     if (isClientMember(isClientGrant(g.role), own)) {
       if (reads(perms)) client.push(g.brandId);
-    } else if (reads(perms)) staff.push(g.brandId);
+    } else if (reads(perms)) (perms.includes("tasks.all") ? all : mine).push(g.brandId);
   }
   const anyOf = (ids: string[]) => (ids.length ? Prisma.sql`${a}."brandId" IN (${Prisma.join(ids)})` : Prisma.sql`FALSE`);
-  // The workspace role alone reaches every brand (Owner/Admin), except where a client grant makes them a client.
-  const staffSql = reads(own)
-    ? client.length ? Prisma.sql`${a}."brandId" NOT IN (${Prisma.join(client)})` : Prisma.sql`TRUE`
-    : anyOf(staff);
+  const noneOf = (ids: string[]) => (ids.length ? Prisma.sql`${a}."brandId" NOT IN (${Prisma.join(ids)})` : Prisma.sql`TRUE`);
+  // The workspace role alone reaches every brand (Owner/Admin), except where a client grant makes them a client; a
+  // brand without a grant follows the workspace role's tasks.all.
+  const [allSql, mineSql] = !reads(own)
+    ? [anyOf(all), anyOf(mine)]
+    : own.includes("tasks.all")
+      ? [noneOf(client), Prisma.sql`FALSE`]
+      : [anyOf(all), noneOf([...client, ...all])];
   const live = Prisma.sql`EXISTS (SELECT 1 FROM "Brand" b WHERE b.id = ${a}."brandId" AND b."workspaceId" = ${workspaceId} AND b.status <> 'ARCHIVED')`;
-  return Prisma.sql`(${a}."workspaceId" = ${workspaceId} AND ${live} AND (${staffSql} OR (${anyOf(client)} AND ${clientClause(userId, a)})))`;
+  return Prisma.sql`(${a}."workspaceId" = ${workspaceId} AND ${live} AND (${allSql} OR (${mineSql} AND ${ownClause(userId, a)}) OR (${anyOf(client)} AND ${clientClause(userId, a)})))`;
 }
 
 /** The task if this viewer may see it, else null (callers answer 404). Every route on a task or its children starts here. */
@@ -126,17 +162,17 @@ export async function findVisibleTask(tx: Db, v: TaskViewer, id: string): Promis
 }
 
 /**
- * Start a write to a task's children (checklist, attachments): 404 unless the viewer sees it, then the task lock, then
- * owner or tasks.manage (403). `ownerNeeds`: a key the owner must also hold (attachments need content.create).
- * Returns the task's title for the audit event.
+ * Start a write to a task's children (checklist, attachments): the task lock, then 404 unless the viewer still sees it
+ * (a reassignment just before can hide it), then managesTask or the owner (403). `ownerNeeds`: a key the owner must
+ * also hold (attachments need content.create). Returns the task's title for the audit event.
  */
 export async function lockTaskForEdit(tx: Prisma.TransactionClient, v: TaskViewer, perms: Set<PermissionKey>, taskId: string, ownerNeeds?: PermissionKey): Promise<{ title: string }> {
-  if (!(await findVisibleTask(tx, v, taskId))) throw new TaskError("Task not found", 404);
   await lockRow(tx, "task", taskId);
-  const task = await tx.task.findUnique({ where: { id: taskId }, select: { title: true, ownerId: true } });
+  if (!(await findVisibleTask(tx, v, taskId))) throw new TaskError("Task not found", 404);
+  const task = await tx.task.findUnique({ where: { id: taskId }, select: { title: true, ownerId: true, createdById: true } });
   if (!task) throw new TaskError("Task not found", 404);
   const owner = task.ownerId === v.userId && (!ownerNeeds || perms.has(ownerNeeds));
-  if (!v.canManage && !owner) throw new TaskError("Only the task's owner or a manager can change this.", 403);
+  if (!managesTask({ userId: v.userId, perms, clientReviewer: v.client }, task) && !owner) throw new TaskError("Only the task's owner, its creator or an admin can change this.", 403);
   return { title: task.title };
 }
 
@@ -177,6 +213,6 @@ export async function canBeAssigned(tx: Db, scope: BrandScope, userId: string, t
   // brandMemberPerms: the workspace role or a non-client grant (a brand has one grant per person).
   const [client, staffReads] = await Promise.all([clientGrantOn(tx, scope, userId), brandMemberPerms(tx, scope, userId, "tasks.read")]);
   if (!client) return staffReads;
-  if (!staffReads && !client.role.permissions.includes("tasks.read")) return false;
+  if (!staffReads && !rolePermissions(client.role).includes("tasks.read")) return false;
   return clientSees(tx, scope, userId, task);
 }

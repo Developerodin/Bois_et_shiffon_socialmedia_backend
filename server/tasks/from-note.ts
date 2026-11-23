@@ -1,18 +1,18 @@
 import "server-only";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import { generateObject } from "@/server/ai/provider";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
 import { wallTime } from "@/server/content/offer-checks";
-import { notifyTx } from "@/server/notifications/tasks";
+import { assigneesOf, notifyManyTx } from "@/server/notifications/tasks";
 import { brandOwners, TX } from "@/server/services/publishing";
-import type { TaskViewer } from "@/server/tasks/access";
+import { visibleTaskSql, type TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { isUniqueViolation, TaskError } from "@/server/tasks/errors";
 import { checkTaskLinks } from "@/server/tasks/links";
-import { columns, day, TASK_DTO_INCLUDE, TaskInput, toTaskDtos, type TaskScope } from "@/server/tasks/service";
+import { columns, day, TASK_DTO_INCLUDE, TaskInput, toTaskDtos, withOneOwner, type TaskScope } from "@/server/tasks/service";
 import { TASK_AREAS, TASK_PRIORITIES, type TaskDto, type TaskProposalDto, type TaskProposalsDto } from "@/shared";
 
 export const FROM_NOTE_WORKFLOW = "tasks.from-note";
@@ -50,9 +50,10 @@ const norm = (s: string) => s.trim().toLowerCase();
  * credits), so capped at 10 calls an hour per person and 100 a day per workspace. The note and the brand's member
  * names reach the model only as labelled, JSON-encoded data. A named owner becomes an id only when exactly one person
  * who reads the brand's tasks has that name; anything else (unknown, ambiguous, a bad date) is dropped, not guessed.
+ * Without tasks.all, only the caller can be named owner (POST tasks/batch would refuse anyone else).
  * The audit event keeps counts, never the note.
  */
-export async function proposeTasks(scope: TaskScope, _v: TaskViewer, raw: string, now = new Date()): Promise<TaskProposalsDto> {
+export async function proposeTasks(scope: TaskScope, v: TaskViewer, raw: string, now = new Date()): Promise<TaskProposalsDto> {
   const text = raw.trim();
   if (!text) throw new TaskError("Paste a note first", 400);
   if (text.length > NOTE_MAX) throw new TaskError(`A note can be at most ${NOTE_MAX} characters`, 400);
@@ -84,7 +85,8 @@ export async function proposeTasks(scope: TaskScope, _v: TaskViewer, raw: string
     const title = p.title.trim().slice(0, 200);
     if (!title) continue;
     const description = p.description?.trim().slice(0, 10_000);
-    const ownerId = p.owner ? byName.get(norm(p.owner)) : null;
+    const named = p.owner ? byName.get(norm(p.owner)) : null;
+    const ownerId = named && (v.all || named === scope.userId) ? named : null;
     const dueOn = p.dueOn && day.safeParse(p.dueOn).success ? p.dueOn : null;
     const areas = [...new Set(p.areas)];
     proposals.push({
@@ -107,14 +109,16 @@ export type BatchInput = z.infer<typeof BatchInput>;
 /**
  * Create up to 20 tasks in one transaction (tasks.manage). Each row runs the checks POST tasks runs (TaskInput, then
  * checkTaskLinks: one foreign id refuses the whole batch), gets `requestId` `<requestId>:<i>`, its own task.create
- * audit event and a TASK_ASSIGNED notice. A repeat of the request returns the rows the first one made (in row order);
- * two at once collide on the (brandId, requestId) index and the loser returns the winner's rows.
+ * audit event and a TASK_ASSIGNED notice. A repeat of the request by the same person returns the rows their first one
+ * made (in row order); two at once collide on the (brandId, requestId) index and the loser returns the winner's rows.
+ * Another owner or a role needs tasks.all (checkTaskLinks: 403 for the whole batch).
  * ponytail: a retry with the same requestId but different rows gets the first rows back (as POST tasks does).
  */
-export async function createTaskBatch(scope: TaskScope, _v: TaskViewer, input: BatchInput): Promise<{ tasks: TaskDto[] }> {
+export async function createTaskBatch(scope: TaskScope, v: TaskViewer, input: BatchInput): Promise<{ tasks: TaskDto[] }> {
   const prefix = `${input.requestId}:`;
+  const rowsIn = input.tasks.map(withOneOwner);
   const existing = async (db: Prisma.TransactionClient | typeof prisma) => {
-    const rows = await db.task.findMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, requestId: { startsWith: prefix } }, select: { id: true, requestId: true } });
+    const rows = await db.task.findMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, createdById: scope.userId, requestId: { startsWith: prefix } }, select: { id: true, requestId: true } });
     return rows.sort((a, b) => Number(a.requestId!.slice(prefix.length)) - Number(b.requestId!.slice(prefix.length))).map((r) => r.id);
   };
   let ids: string[];
@@ -122,9 +126,9 @@ export async function createTaskBatch(scope: TaskScope, _v: TaskViewer, input: B
     ids = await prisma.$transaction(async (tx) => {
       const done = await existing(tx);
       if (done.length) return done;
-      for (const t of input.tasks) await checkTaskLinks(tx, scope, t);
+      for (const t of rowsIn) await checkTaskLinks(tx, scope, t);
       const created = await tx.task.createManyAndReturn({
-        data: input.tasks.map((t, i) => ({
+        data: rowsIn.map((t, i) => ({
           ...(columns(t) as Prisma.TaskUncheckedCreateInput),
           title: t.title,
           workspaceId: scope.workspaceId,
@@ -132,13 +136,14 @@ export async function createTaskBatch(scope: TaskScope, _v: TaskViewer, input: B
           createdById: scope.userId,
           requestId: `${prefix}${i}`,
         })),
-        select: { id: true, title: true, ownerId: true, requestId: true },
+        select: { id: true, title: true, ownerId: true, ownerRoleId: true, requestId: true },
       });
       const byRequest = new Map(created.map((c) => [c.requestId, c]));
-      const rows = input.tasks.map((_, i) => byRequest.get(`${prefix}${i}`)!);
+      const rows = rowsIn.map((_, i) => byRequest.get(`${prefix}${i}`)!);
       for (const task of rows) {
         const event = await taskAudit(tx, scope, "task.create", { type: "Task", id: task.id, title: task.title }, { requestId: task.requestId });
-        await notifyTx(tx, { userId: task.ownerId, workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "TASK_ASSIGNED", taskId: task.id, actorId: scope.userId, auditEventId: event.id });
+        const to = await assigneesOf(tx, { ...scope, ...task });
+        await notifyManyTx(tx, to, { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "TASK_ASSIGNED", taskId: task.id, actorId: scope.userId, auditEventId: event.id });
       }
       return rows.map((r) => r.id);
     }, TX);
@@ -147,7 +152,9 @@ export async function createTaskBatch(scope: TaskScope, _v: TaskViewer, input: B
     ids = await existing(prisma);
     if (!ids.length) throw e;
   }
-  const found = await prisma.task.findMany({ where: { id: { in: ids } }, include: TASK_DTO_INCLUDE });
+  // Only rows the caller sees (theirs as creator, so all of them today), as every task read.
+  const seen = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT t.id FROM "Task" t WHERE t.id IN (${Prisma.join(ids)}) AND ${visibleTaskSql(v)}`);
+  const found = await prisma.task.findMany({ where: { id: { in: seen.map((r) => r.id) } }, include: TASK_DTO_INCLUDE });
   const byId = new Map(found.map((t) => [t.id, t]));
   return { tasks: await toTaskDtos(scope, ids.flatMap((id) => byId.get(id) ?? [])) };
 }

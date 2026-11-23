@@ -4,6 +4,8 @@ import { prisma } from "@/server/db/prisma";
 import { brandLocalDay, openTaskSql } from "@/server/tasks/sql";
 
 // ponytail: runs at 05:00 UTC; brands west of UTC hear a day late. Hourly sweep firing per brand-local day if that matters.
+// ponytail: notices go to t."ownerId" only, so a task a role owns gets no overdue or re-check notice until someone
+// takes it; tell the role's holders (assigneesOf) if those tasks start slipping.
 
 const OPEN = openTaskSql;
 /** The task's brand-local day at `now` (brandLocalDay; the queries join the task's BrandProfile as bp). */

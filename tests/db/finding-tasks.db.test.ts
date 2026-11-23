@@ -29,6 +29,14 @@ describe("make a task from a finding", () => {
     expect(a.task.id).toBe(b.task.id);
     expect(await prisma.task.count({ where: { brandId: scope.brandId, findingId: "title-missing" } })).toBe(1);
   });
+
+  it("someone else without tasks.all gets 409 task.findingTaken, not the task; with tasks.all, the task", async () => {
+    const other = (await prisma.user.create({ data: { email: "other@finding-tasks.test" } })).id;
+    const s = { ...scope, userId: other };
+    await expect(taskFromFinding(s, taskViewer(s), reportId, "title-missing")).rejects.toMatchObject({ status: 409, code: "task.findingTaken" });
+    const admin = { ...s, perms: new Set([...s.perms, "tasks.all" as const]) };
+    expect(await taskFromFinding(admin, taskViewer(admin), reportId, "title-missing")).toMatchObject({ existed: true });
+  });
 });
 
 describe("clear job", () => {

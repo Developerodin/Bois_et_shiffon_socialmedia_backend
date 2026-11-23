@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const db = vi.hoisted(() => ({ workspaceMember: { findMany: vi.fn() } }));
+const db = vi.hoisted(() => ({ workspaceMember: { findMany: vi.fn() }, role: { findMany: vi.fn() } }));
 const m = vi.hoisted(() => ({ people: vi.fn(), authorize: vi.fn() }));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/services/project-members", () => ({ listProjectPeople: m.people }));
@@ -52,8 +52,18 @@ describe("GET tasks/people", () => {
         { id: "u5", name: "Bea", gone: false, client: true },
         { id: "u3", name: "Cy", gone: false, client: false },
       ],
+      roles: [],
     });
     expect(JSON.stringify(body)).not.toContain("@");
+    expect(db.role.findMany).not.toHaveBeenCalled();
+  });
+
+  it("with tasks.all also lists the roles a task can be given to (project roles that read tasks, never the client one)", async () => {
+    perms = new Set<PermissionKey>(["brand.read", "tasks.read", "tasks.all"]);
+    db.role.findMany.mockResolvedValue([{ id: "r", name: "Creator" }]);
+    const body = await (await get()).json();
+    expect(body.roles).toEqual([{ id: "r", name: "Creator" }]);
+    expect(db.role.findMany.mock.calls[0]![0].where).toEqual({ workspaceId: "w1", scope: "PROJECT", permissions: { has: "tasks.read" }, NOT: { isSystem: true, slug: "client-reviewer" } });
   });
 
   it("no tasks.read → 403", async () => {

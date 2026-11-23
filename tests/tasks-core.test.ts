@@ -14,7 +14,7 @@ const db = vi.hoisted(() => {
     notification: { createMany: vi.fn() },
     workspaceMember: { findFirst: vi.fn(), findMany: vi.fn() },
     brandMember: { findFirst: vi.fn(), findMany: vi.fn(async (): Promise<unknown[]> => []) },
-    role: { findMany: vi.fn(async (): Promise<unknown[]> => []) },
+    role: { findMany: vi.fn(async (): Promise<unknown[]> => []), findFirst: vi.fn() },
     $queryRaw: vi.fn(),
     $executeRaw: vi.fn(async () => 0),
     $transaction: vi.fn(),
@@ -50,12 +50,13 @@ const RID = "6f1c2c1e-6a43-4c1b-9a3e-2f1d5b7c8a90";
 let staff = new Set(["u1", "u2", "u3"]);
 const row = (o: Record<string, unknown> = {}) => ({
   id: "t1", workspaceId: "w1", brandId: "b1", title: "Fix menu", description: null, status: "TODO", priority: "NORMAL", areas: ["WEBSITE"],
-  ownerId: "u1", reviewerId: null, createdById: "u1", dueOn: new Date("2026-11-30T00:00:00Z"), blockedReason: null, blockedOnId: null,
+  ownerId: "u1", ownerRoleId: null, reviewerId: null, createdById: "u1", dueOn: new Date("2026-11-30T00:00:00Z"), blockedReason: null, blockedOnId: null,
   workProjectId: null, contentItemId: null, url: null, changeKind: null, acceptanceCriteria: null, previewUrl: null, checkedLiveAt: null,
   checkedLiveById: null, auditReportId: null, findingKind: null, findingId: null, findingUrls: [], findingClearedAt: null, recheckOn: null,
   completedAt: null, requestId: null, createdAt: new Date("2026-11-23T10:00:00Z"), updatedAt: new Date("2026-11-23T10:00:00Z"),
-  workProject: null, contentItem: null, ...o,
+  workProject: null, contentItem: null, ownerRole: null, ...o,
 });
+const ADMIN: PermissionKey[] = [...MANAGER, "tasks.all"];
 const people = () => ({
   viaWorkspace: [
     { userId: "u1", name: "Ana", email: "ana@x.com", role: "Owner", active: true },
@@ -113,7 +114,8 @@ describe("createTask", () => {
     const dto = await createTask(scope, v, input({ requestId: RID }));
     expect(dto.id).toBe("t1");
     expect(db.task.create).not.toHaveBeenCalled();
-    expect(db.task.findFirst.mock.calls[0]![0].where).toMatchObject({ workspaceId: "w1", brandId: "b1", requestId: RID });
+    // Only the same person's earlier request counts.
+    expect(db.task.findFirst.mock.calls[0]![0].where).toMatchObject({ workspaceId: "w1", brandId: "b1", requestId: RID, createdById: "u1" });
     expect(db.$executeRaw).toHaveBeenCalled();
   });
 
@@ -126,12 +128,44 @@ describe("createTask", () => {
   });
 
   it("an owner who can't see tasks → 400", async () => {
-    const err = await createTask(scope, v, input({ ownerId: "u4" })).catch((e) => e);
+    scope.perms = new Set(ADMIN);
+    const err = await createTask(scope, taskViewer(scope), input({ ownerId: "u4" })).catch((e) => e);
     expect(err).toMatchObject({ status: 400, message: "Invalid ownerId" });
   });
 
+  it("without tasks.all, a new task's owner is you or nobody, never someone else or a role (403)", async () => {
+    await expect(createTask(scope, v, input({ ownerId: "u2" }))).rejects.toMatchObject({ status: 403, code: "task.assignNotAllowed" });
+    await expect(createTask(scope, v, input({ ownerRoleId: "r1" }))).rejects.toMatchObject({ status: 403 });
+    expect(db.task.create).not.toHaveBeenCalled();
+  });
+
+  it("a person and a role at once → 400", async () => {
+    scope.perms = new Set(ADMIN);
+    await expect(createTask(scope, taskViewer(scope), input({ ownerId: "u2", ownerRoleId: "r1" }))).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("with tasks.all, a task for a role is checked, written with no owner, and tells the role's active holders", async () => {
+    scope.perms = new Set(ADMIN);
+    db.role.findFirst.mockResolvedValue({ id: "r1" });
+    db.task.create.mockResolvedValue({ id: "t1", title: "Fix menu", ownerId: null, ownerRoleId: "r1" });
+    db.brandMember.findMany.mockResolvedValueOnce([{ userId: "u3" }, { userId: "u1" }]);
+    await createTask(scope, taskViewer(scope), input({ ownerRoleId: "r1" }));
+    expect(db.role.findFirst.mock.calls[0]![0].where).toEqual({ id: "r1", workspaceId: "w1", scope: "PROJECT", permissions: { has: "tasks.read" }, NOT: { isSystem: true, slug: "client-reviewer" } });
+    expect(db.task.create.mock.calls[0]![0].data).toMatchObject({ ownerId: null, ownerRoleId: "r1" });
+    expect(db.brandMember.findMany.mock.calls.map((c) => (c as unknown as [{ where: unknown }])[0].where)).toContainEqual({ workspaceId: "w1", brandId: "b1", roleId: "r1", user: { status: "ACTIVE", deletedAt: null } });
+    // Everyone holding the role but the actor.
+    expect(db.notification.createMany.mock.calls[0]![0].data.map((n: { userId: string }) => n.userId)).toEqual(["u3"]);
+  });
+
+  it("a role that isn't a task role (another workspace's, a workspace role, the client one) → 400", async () => {
+    scope.perms = new Set(ADMIN);
+    db.role.findFirst.mockResolvedValue(null);
+    await expect(createTask(scope, taskViewer(scope), input({ ownerRoleId: "r9" }))).rejects.toMatchObject({ status: 400, message: "Invalid ownerRoleId" });
+  });
+
   it("create with another owner notifies them; audit task.create written", async () => {
-    await createTask(scope, v, input({ ownerId: "u2", dueOn: "2026-11-30" }));
+    scope.perms = new Set(ADMIN);
+    await createTask(scope, taskViewer(scope), input({ ownerId: "u2", dueOn: "2026-11-30" }));
     const data = db.task.create.mock.calls[0]![0].data;
     expect(data).toMatchObject({ workspaceId: "w1", brandId: "b1", createdById: "u1", ownerId: "u2", dueOn: new Date("2026-11-30T00:00:00Z") });
     expect(audits()[0]).toMatchObject({ action: "task.create", entityType: "Task", entityId: "t1", actorUserId: "u1", workspaceId: "w1", brandId: "b1" });
@@ -318,8 +352,35 @@ describe("patchTask", () => {
   });
 
   it("an owner change notifies the new owner", async () => {
-    await patchTask(scope, v, "t1", { ownerId: "u3" });
+    scope.perms = new Set(ADMIN);
+    await patchTask(scope, taskViewer(scope), "t1", { ownerId: "u3" });
     expect(db.notification.createMany.mock.calls[0]![0].data[0]).toMatchObject({ userId: "u3", kind: "TASK_ASSIGNED", dedupeKey: "TASK_ASSIGNED:u3:a1" });
+  });
+
+  it("without tasks.all: giving your task to someone else is 403, to yourself or nobody is fine", async () => {
+    await expect(patchTask(scope, v, "t1", { ownerId: "u3" })).rejects.toMatchObject({ status: 403 });
+    await expect(patchTask(scope, v, "t1", { ownerRoleId: "r1" })).rejects.toMatchObject({ status: 403 });
+    await patchTask(scope, v, "t1", { ownerId: null });
+    expect(updated()).toEqual({ ownerId: null });
+  });
+
+  it("without tasks.all, a task you neither own nor made can't be edited (403); with it, it can", async () => {
+    db.task.findUnique.mockResolvedValue(row({ ownerId: "u2", createdById: "u3" }));
+    await expect(patchTask(scope, v, "t1", { title: "New" })).rejects.toMatchObject({ status: 403 });
+    scope.perms = new Set(ADMIN);
+    await patchTask(scope, taskViewer(scope), "t1", { title: "New" });
+    expect(updated()).toEqual({ title: "New" });
+  });
+
+  it("setting a role clears the person; setting a person clears the role", async () => {
+    scope.perms = new Set(ADMIN);
+    db.role.findFirst.mockResolvedValue({ id: "r1" });
+    await patchTask(scope, taskViewer(scope), "t1", { ownerRoleId: "r1" });
+    expect(updated()).toEqual({ ownerId: null, ownerRoleId: "r1" });
+    db.task.update.mockClear();
+    db.task.findUnique.mockResolvedValue(row({ ownerId: null, ownerRoleId: "r1" }));
+    await patchTask(scope, taskViewer(scope), "t1", { ownerId: "u3" });
+    expect(updated()).toEqual({ ownerId: "u3", ownerRoleId: null });
   });
 
   it("moving to a project the current owner can't see is refused", async () => {

@@ -2,8 +2,8 @@ import { randomBytes } from "node:crypto";
 import type { EmailStatus, Prisma } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
-import { memberRole } from "@/server/auth/permissions";
-import { SYSTEM_ROLES } from "@/server/auth/permissions.catalog";
+import { effectivePermissions, memberRole } from "@/server/auth/permissions";
+import { rolePermissions, SYSTEM_ROLES } from "@/server/auth/permissions.catalog";
 import { hitRateLimit, limitKey, resetRateLimit } from "@/server/auth/rate-limit";
 import { appUrl, hashToken, MIN_PASSWORD_LENGTH, newToken } from "@/server/auth/tokens";
 import { prisma } from "@/server/db/prisma";
@@ -14,10 +14,24 @@ import { ensureStarterGrant } from "@/server/services/credits";
 export class AccountFlowError extends Error {
   constructor(
     message: string,
-    readonly status: 400 | 404 | 409 | 429,
+    readonly status: 400 | 403 | 404 | 409 | 429,
   ) {
     super(message);
     this.name = "AccountFlowError";
+  }
+}
+
+/**
+ * No handing out more than you hold: giving someone `role` (a grant, a role change or an invitation) needs every one of
+ * its permissions (rolePermissions) among the actor's own, on that project (`brandId`) or in the workspace. Owners are
+ * never blocked. Also covers raising your own role. Invitations are checked when made; accepting one grants its role.
+ */
+export async function assertCanGive(workspaceId: string, actorUserId: string, role: { isSystem: boolean; slug: string; permissions: string[] }, brandId?: string) {
+  const actor = await memberRole(workspaceId, actorUserId);
+  if (actor?.role?.isSystem && actor.role.slug === "owner") return;
+  const held = await effectivePermissions(workspaceId, actorUserId, brandId);
+  if (rolePermissions(role).some((p) => !held.has(p as never))) {
+    throw new AccountFlowError("You can't give a role with permissions you don't have", 403);
   }
 }
 
@@ -50,6 +64,7 @@ export async function createInvitation(input: {
   if (role.slug === "owner" && (await memberRole(input.workspaceId, input.invitedByUserId))?.role?.slug !== "owner") {
     throw new AccountFlowError("Only owners can invite another owner", 409);
   }
+  await assertCanGive(input.workspaceId, input.invitedByUserId, role, input.brandId);
   const already = await prisma.workspaceMember.findFirst({
     where: { workspaceId: input.workspaceId, user: { email } },
   });

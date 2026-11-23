@@ -1,7 +1,8 @@
 import type { Prisma } from "@prisma/client";
 import { isClientGrant, memberRole } from "@/server/auth/permissions";
+import { rolePermissions } from "@/server/auth/permissions.catalog";
 import { prisma } from "@/server/db/prisma";
-import { AccountFlowError, createInvitation } from "@/server/services/accounts";
+import { AccountFlowError, assertCanGive, createInvitation } from "@/server/services/accounts";
 
 const isActive = (u: { status: string; deletedAt: Date | null }) => u.status === "ACTIVE" && !u.deletedAt;
 
@@ -22,10 +23,10 @@ export async function listProjectPeople(workspaceId: string, brandId: string) {
   return {
     // ponytail: legacy members with roleId null are left out here; none exist since the role migration.
     viaWorkspace: members
-      .filter((m) => m.roleRef?.permissions.includes("brand.read"))
+      .filter((m) => m.roleRef && rolePermissions(m.roleRef).includes("brand.read"))
       .map((m) => ({ userId: m.userId, name: m.user.name, email: m.user.email, role: m.roleRef!.name, active: isActive(m.user) })),
     // client: the grant is the system client-reviewer role (brandOwners leaves those out).
-    people: grants.map((g) => ({ id: g.id, userId: g.userId, name: g.user.name, email: g.user.email, role: { id: g.role.id, name: g.role.name, permissions: g.role.permissions }, active: isActive(g.user), client: isClientGrant(g.role) })),
+    people: grants.map((g) => ({ id: g.id, userId: g.userId, name: g.user.name, email: g.user.email, role: { id: g.role.id, name: g.role.name, permissions: rolePermissions(g.role) }, active: isActive(g.user), client: isClientGrant(g.role) })),
     invitations: invites.map((i) => ({ id: i.id, email: i.email, role: { id: i.role.id, name: i.role.name }, expiresAt: i.expiresAt.toISOString() })),
   };
 }
@@ -39,6 +40,7 @@ async function projectRole(workspaceId: string, roleId: string) {
 /** Add someone to the project: a grant if they're already in the workspace, else a project invitation. */
 export async function addToProject(input: { workspaceId: string; brandId: string; actorUserId: string; email: string; roleId: string }) {
   const role = await projectRole(input.workspaceId, input.roleId);
+  await assertCanGive(input.workspaceId, input.actorUserId, role, input.brandId);
   const email = input.email.trim().toLowerCase();
   const member = await prisma.workspaceMember.findFirst({ where: { workspaceId: input.workspaceId, user: { email } } });
   if (!member) {
@@ -51,7 +53,8 @@ export async function addToProject(input: { workspaceId: string; brandId: string
     });
     return { invited: true as const, invitationId: invitation.id, inviteUrl, emailDelivery };
   }
-  if ((await memberRole(input.workspaceId, member.userId))?.role?.permissions.includes("brand.read")) {
+  const wsRole = (await memberRole(input.workspaceId, member.userId))?.role;
+  if (wsRole && rolePermissions(wsRole).includes("brand.read")) {
     throw new AccountFlowError("This person already reaches every project through their workspace role", 409);
   }
   const grant = await prisma.brandMember.upsert({
@@ -65,6 +68,7 @@ export async function addToProject(input: { workspaceId: string; brandId: string
 
 export async function changeProjectRole(input: { workspaceId: string; brandId: string; actorUserId: string; grantId: string; roleId: string }) {
   const role = await projectRole(input.workspaceId, input.roleId);
+  await assertCanGive(input.workspaceId, input.actorUserId, role, input.brandId);
   const res = await prisma.brandMember.updateMany({
     where: { id: input.grantId, workspaceId: input.workspaceId, brandId: input.brandId },
     data: { roleId: role.id },
