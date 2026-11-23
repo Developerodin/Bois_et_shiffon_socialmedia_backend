@@ -4,7 +4,7 @@ import { prisma } from "@/server/db/prisma";
 import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { fetchOrders, type ShopOrderRow } from "./shopify-orders";
-import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome, type SyncStop } from "./sources";
+import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from "./sources";
 
 /**
  * SHOPIFY_ORDERS runner: reads every order updated since `DataSource.cursor` (Shopify's updated_at high-water mark;
@@ -15,11 +15,6 @@ import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome, type Syn
 
 export const FIRST_RUN_DAYS = 60;
 const PAGE = 100;
-
-async function readOrders(conn: { shop: string; accessToken: string }, since: Date, signal: AbortSignal) {
-  const r = await fetchOrders(conn, since, signal);
-  return { orders: r.orders, cursorEnd: r.cursorEnd, stop: r.stoppedReason };
-}
 
 /**
  * One `INSERT … ON CONFLICT (brandId, shopifyId) DO UPDATE` for up to a page of orders, the page sent as one JSON
@@ -62,17 +57,18 @@ export async function syncShopifyOrders(
   const conn = ctx.connection;
   if (!conn) return { count: 0, reason: stopReason("reconnect") };
   const since = ctx.source.cursor ? new Date(ctx.source.cursor) : new Date(now.getTime() - FIRST_RUN_DAYS * 86_400_000);
-  const read = await readOrders({ shop: conn.externalAccountId, accessToken: await accessToken(conn) }, since, ctx.signal);
+  const read = await fetchOrders({ shop: conn.externalAccountId, accessToken: await accessToken(conn) }, since, ctx.signal);
+  const stop = read.stoppedReason;
   // A refused token is the connection's fault (products stop too); a missing scope or permission is not.
-  if (read.stop === "reconnect") await markReconnect(conn.id, SHOPIFY_REFUSED);
-  if (read.stop === "reconnect" || read.stop === "failed" || read.stop === "permission" || read.stop === "missing_scope") {
-    return { count: 0, reason: stopReason(read.stop) };
+  if (stop === "reconnect") await markReconnect(conn.id, SHOPIFY_REFUSED);
+  if (stop === "reconnect" || stop === "failed" || stop === "permission" || stop === "missing_scope") {
+    return { count: 0, reason: stopReason(stop) };
   }
   const scope = { workspaceId: ctx.source.workspaceId, brandId: ctx.source.brandId, connectionId: conn.id };
   // One statement per page of rows; the client returns them oldest update first, so a write that throws leaves the
   // saved cursor where it was and the next run re-reads (upserts are idempotent).
   for (let i = 0; i < read.orders.length; i += PAGE) await upsertOrders(scope, read.orders.slice(i, i + PAGE));
-  return { count: read.orders.length, reason: stopReason(read.stop), cursor: read.cursorEnd.toISOString() };
+  return { count: read.orders.length, reason: stopReason(stop), cursor: read.cursorEnd.toISOString() };
 }
 
 registerSync("SHOPIFY_ORDERS", (ctx) => syncShopifyOrders(ctx));

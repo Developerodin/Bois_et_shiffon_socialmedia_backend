@@ -23,7 +23,7 @@ export const READ_KEY = {
 } as const satisfies Record<DataSourceKind, PermissionKey>;
 
 /** Why the last sync didn't fully succeed, as a kind the apps word themselves. */
-export type DataSyncReason = "reconnect" | "permission" | "partial" | "failed" | "rate-limited";
+export type DataSyncReason = "reconnect" | "permission" | "partial" | "failed" | "rate_limited";
 
 /** The only error texts ever stored or returned for a sync: provider text is logged, never shown. */
 export const DATA_SYNC_ERRORS: Record<DataSyncReason, string> = {
@@ -31,7 +31,7 @@ export const DATA_SYNC_ERRORS: Record<DataSyncReason, string> = {
   permission: "The account didn't grant access to these numbers. Reconnect it and allow access.",
   partial: "Some days are still loading.",
   failed: "The last sync couldn't read the numbers. It tries again tomorrow, or press Sync now.",
-  "rate-limited": "The provider asked us to slow down. The next sync picks up where this one stopped.",
+  rate_limited: "The provider asked us to slow down. The next sync picks up where this one stopped.",
 };
 
 /** DataSource.lastResult. `okAt`: the last successful sync ("Updated 3 h ago"). */

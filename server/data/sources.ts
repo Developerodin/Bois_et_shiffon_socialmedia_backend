@@ -30,12 +30,10 @@ import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
  *
  * Errors: throw ReconnectNeeded for a refused token (status ERROR, not retried), anything else to retry (maxAttempts 3).
  * A missing permission, a provider rate limit or a stop mid-window is not thrown: return reason "permission",
- * "rate-limited" or "partial". Provider text may go to the log (never URLs: tokens ride in query strings), never into
+ * "rate_limited" or "partial". Provider text may go to the log (never URLs: tokens ride in query strings), never into
  * `lastResult`, which only holds DATA_SYNC_ERRORS strings.
  */
 export const DATA_SYNC_JOB = "data.sync";
-
-export { type SyncStop } from "./sync-stop";
 
 /**
  * A client's stop as the job's outcome: reconnect throws ReconnectNeeded (not retried), failed throws (retried);
@@ -47,7 +45,7 @@ export function stopReason(stop: SyncStop | undefined): SyncOutcome["reason"] {
     case "reconnect": throw new ReconnectNeeded("reconnect");
     case "failed": throw new Error("data source sync failed");
     case "permission": case "missing_scope": return "permission";
-    case "rate_limited": return "rate-limited";
+    case "rate_limited": return "rate_limited";
     case "capped": return "partial";
   }
 }
@@ -72,7 +70,9 @@ export type SyncOutcome = {
   count: number;
   /** Every day of the window was read and written. A complete backfill window advances syncedThrough. */
   complete?: boolean;
-  reason?: Extract<DataSyncReason, "partial" | "permission" | "rate-limited"> | null;
+  reason?: Extract<DataSyncReason, "partial" | "permission" | "rate_limited"> | null;
+  /** Daily and manual runs: the days read. A complete one moves syncedThrough on contiguously (never starts it). */
+  window?: DayWindow;
   /** Shopify's updated_at high-water mark, saved as DataSource.cursor */
   cursor?: string;
 };
@@ -81,11 +81,10 @@ export type SyncRunner = (ctx: SyncContext) => Promise<SyncOutcome>;
 const RUNNERS: Partial<Record<DataSourceKind, SyncRunner>> = {};
 export const registerSync = (kind: DataSourceKind, runner: SyncRunner) => void (RUNNERS[kind] = runner);
 
-/** A kind whose client isn't built yet: the job completes and writes nothing. */
-export const NOT_BUILT = { count: 0, notBuilt: true } as const;
-export async function runSync(kind: DataSourceKind, ctx: SyncContext): Promise<SyncOutcome | typeof NOT_BUILT> {
+export async function runSync(kind: DataSourceKind, ctx: SyncContext): Promise<SyncOutcome> {
   const runner = RUNNERS[kind];
-  return runner ? runner(ctx) : NOT_BUILT;
+  if (!runner) throw new Error(`no data sync registered for ${kind}`);
+  return runner(ctx);
 }
 
 // ---- day helpers -------------------------------------------------------------------------------------------------
@@ -167,17 +166,47 @@ export function enqueueSourceSync(
   });
 }
 
+/** A source's backfill, saved as `settings.backfill` when it starts so the sweep can restart a chain that died. */
+export type BackfillPlan = { start: string; end: string; days: number };
+/** `total` provider days up to the day before `today`, read `windowDays` at a time. */
+export function backfillPlan(today: string, total: number, windowDays: number): BackfillPlan {
+  const end = addDays(today, -1);
+  return { start: addDays(end, -(total - 1)), end, days: windowDays };
+}
+const planOf = (settings: unknown) => (settings as { backfill?: BackfillPlan } | null)?.backfill;
+
+/** Queues the next window of a source's backfill (the first, when nothing is held yet); null once it's done. */
+export function enqueueBackfill(source: SourceRef & { syncedThrough: Date | null }, plan: BackfillPlan, opts: { key?: string } = {}) {
+  const next = nextBackfillWindow(dayOf(source.syncedThrough), plan.start, plan.end, plan.days);
+  return next ? enqueueSourceSync(source, "backfill", { window: { ...next, end: plan.end }, key: opts.key }) : null;
+}
+
 /**
  * Daily sweep step: one query, enqueue only (no provider calls), each source at its own offset in the next two hours.
  * Sources in ERROR are included (a failed day tries again; a refused token fails fast until reconnected); OFF ones not.
- * ponytail: one upsert per source; at a few thousand sources batch them with createMany(skipDuplicates).
+ * A source whose backfill isn't through its end and has no backfill job queued or running gets its next window
+ * queued too: a chain that died (out of retries) starts again from syncedThrough.
+ * ponytail: one upsert per source (plus one job lookup per unfinished backfill); at a few thousand sources batch them
+ * with createMany(skipDuplicates).
  */
 export async function enqueueDailyDataSyncs(now = new Date()) {
   const sources = await prisma.dataSource.findMany({
     where: { status: { not: "OFF" }, brand: { status: "ACTIVE" } },
-    select: { id: true, workspaceId: true, brandId: true, kind: true, updatedAt: true },
+    select: { id: true, workspaceId: true, brandId: true, kind: true, updatedAt: true, syncedThrough: true, settings: true },
   });
-  for (const s of sources) await enqueueSourceSync(s, "daily", { runAt: new Date(now.getTime() + spreadSecs(s.id) * 1000) });
+  const day = now.toISOString().slice(0, 10);
+  for (const s of sources) {
+    await enqueueSourceSync(s, "daily", { runAt: new Date(now.getTime() + spreadSecs(s.id) * 1000) });
+    const plan = planOf(s.settings);
+    const held = dayOf(s.syncedThrough);
+    if (!plan || (held !== null && held >= plan.end)) continue;
+    const alive = await prisma.job.findFirst({
+      where: { type: DATA_SYNC_JOB, status: { in: ["PENDING", "RUNNING"] }, idempotencyKey: { startsWith: `data:${s.id}:backfill:` } },
+      select: { id: true },
+    });
+    // Keyed by the sweep's day: a double sweep restarts it once.
+    if (!alive) await enqueueBackfill(s, plan, { key: `data:${s.id}:backfill:restart:${day}` });
+  }
   return sources.length;
 }
 
@@ -225,7 +254,7 @@ export async function runDataSync(payload: unknown, lease: Lease) {
   }
 
   const window = p.mode === "backfill" && p.from && p.to ? { from: p.from, to: p.to } : undefined;
-  let outcome: Awaited<ReturnType<typeof runSync>>;
+  let outcome: SyncOutcome;
   try {
     outcome = await runSync(source.kind, { source, connection, mode: p.mode, window, lease, signal: AbortSignal.timeout(DEADLINE_MS) });
   } catch (error) {
@@ -233,9 +262,10 @@ export async function runDataSync(payload: unknown, lease: Lease) {
     await recordSync(source, error instanceof ReconnectNeeded ? "reconnect" : "failed", 0);
     throw error;
   }
-  if ("notBuilt" in outcome) return void console.info(`[data] ${source.kind} sync isn't built yet; nothing written`);
-
-  const syncedThrough = window ? advanceSyncedThrough(dayOf(source.syncedThrough), window, !!outcome.complete) : dayOf(source.syncedThrough);
+  // A daily or manual run only extends a held range: it never starts one, or the backfill would skip its days.
+  const held = dayOf(source.syncedThrough);
+  const read = window ?? (held !== null ? outcome.window : undefined);
+  const syncedThrough = read ? advanceSyncedThrough(held, read, !!outcome.complete) : held;
   await recordSync(source, outcome.reason ?? null, outcome.count, {
     ...(syncedThrough !== dayOf(source.syncedThrough) ? { syncedThrough: new Date(`${syncedThrough}T00:00:00Z`) } : {}),
     ...(outcome.cursor !== undefined ? { cursor: outcome.cursor } : {}),
@@ -246,7 +276,8 @@ export async function runDataSync(payload: unknown, lease: Lease) {
   if (!window || !p.end) return;
   const days = (Date.parse(window.to) - Date.parse(window.from)) / 86_400_000 + 1;
   if (outcome.complete) {
-    const next = nextBackfillWindow(syncedThrough, window.from, p.end, days);
+    // From the day after this window: if syncedThrough couldn't move (a gap before it), this window isn't re-queued.
+    const next = nextBackfillWindow(syncedThrough, addDays(window.to, 1), p.end, days);
     if (next) await enqueueSourceSync(source, "backfill", { window: { ...next, end: p.end } });
   } else if ((p.retry ?? 0) < PARTIAL_RETRIES) {
     await enqueueSourceSync(source, "backfill", { window: { ...window, end: p.end }, retry: (p.retry ?? 0) + 1, runAt: new Date(Date.now() + PARTIAL_RETRY_MS) });

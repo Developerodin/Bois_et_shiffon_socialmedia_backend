@@ -1,6 +1,6 @@
 // recorded 2026-11-23, Graph API v23.0 / Threads API v1.0 (shape from docs)
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { hasFacebookPostId, readPostMetrics, refreshDue, type ConnectionToRead } from "@/server/data/post-metrics";
+import { hasFacebookPostId, readPostMetrics, type ConnectionToRead } from "@/server/data/post-metrics";
 
 const TOKEN = "EAAB-secret-token-123";
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -159,25 +159,3 @@ describe("readPostMetrics", () => {
   });
 });
 
-describe("refreshDue", () => {
-  const pub = new Date("2026-11-01T10:00:00Z");
-  const at = (days: number, hours = 0) => new Date(pub.getTime() + days * 86_400_000 + hours * 3_600_000);
-  it.each([
-    // [age of now in days, last read age in days or null, due]
-    [0.5, null, true],
-    [3, 2, true], // daily to day 7
-    [3, 2.5, false],
-    [6.9, 5.95, true],
-    [8, 7, false], // every 3 days to day 14
-    [10, 7, true],
-    [15, 14, false], // weekly to day 30
-    [21, 14, true],
-    [29, 28, false],
-    [29.9, null, true],
-    [30, 21, false], // none after
-    [45, null, false],
-  ] as const)("now day %s, last read day %s → %s", (now, last, due) => {
-    expect(refreshDue(pub, last === null ? null : at(last), at(now))).toBe(due);
-  });
-  it("a daily run a little earlier than yesterday's still counts", () => expect(refreshDue(pub, at(2, 1), at(3, 0))).toBe(true));
-});

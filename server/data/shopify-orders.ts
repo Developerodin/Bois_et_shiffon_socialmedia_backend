@@ -84,7 +84,8 @@ export type FetchOrdersResult = {
 
 const OVERLAP_MS = 3_600_000; // re-reads the last hour: covers clock skew and same-second updates at a page edge
 const MAX_PAGES = 50;
-const MAX_MS = 4 * 60_000;
+/** Below the job's 240 s deadline, so a long read ends as `capped` with its pages rather than aborting. */
+const MAX_MS = 180_000;
 
 /** Adds decimal amounts exactly (Prisma.Decimal, never floats) → a fixed-2 string: "0.1" + "0.2" → "0.30". */
 const add = (...values: string[]) => values.reduce((sum, v) => sum.plus(v), new Prisma.Decimal(0)).toFixed(2);
@@ -117,7 +118,7 @@ export function mapOrder(o: OrderNode): ShopOrderRow {
 /**
  * Every order updated since `sinceUpdatedAt` (minus a 1 h overlap), oldest update first, cursor-paginated.
  * All pages are buffered and returned together; nothing is written here.
- * `rate_limited` (still throttled after the helper's retries) and `capped` (50 pages or 4 minutes) return the pages
+ * `rate_limited` (still throttled after the helper's retries) and `capped` (50 pages, 3 minutes or the job's deadline) return the pages
  * finished so far: because pages are sorted by updatedAt they form a contiguous prefix and `cursorEnd` covers exactly
  * them, so the caller writes them and advances — capped is progress, not a failure.
  * `reconnect` (401/403), `missing_scope` (ACCESS_DENIED: the token lacks read_orders, the catalogue keeps working) and
@@ -141,7 +142,7 @@ export async function fetchOrders(
   });
 
   for (let page = 0; page < MAX_PAGES; page++) {
-    if (page > 0 && Date.now() - started > MAX_MS) return done("capped");
+    if (page > 0 && (Date.now() - started > MAX_MS || signal?.aborted)) return done("capped");
     type Page = { orders: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: OrderNode[] } };
     let data: Page;
     try {
@@ -150,7 +151,9 @@ export async function fetchOrders(
       const none = (stoppedReason: SyncStop): FetchOrdersResult => ({ orders: [], cursorEnd: sinceUpdatedAt, stoppedReason });
       // ACCESS_DENIED is a missing scope (read_orders), not a dead token: the connection must not be marked for reconnect.
       if (err instanceof ReconnectNeeded) return none(err.message === "Shopify ACCESS_DENIED" ? "missing_scope" : "reconnect");
-      if (!(err instanceof Error) || signal?.aborted) throw err;
+      // The job's deadline hit mid-page: the pages before it are a sorted prefix, so keep them.
+      if (signal?.aborted) return done("capped");
+      if (!(err instanceof Error)) throw err;
       if (/THROTTLED/.test(err.message)) return done("rate_limited");
       if (err.message.startsWith("Shopify ") || err instanceof TypeError || err.name === "TimeoutError" || err.name === "AbortError") {
         console.error("[shopify-orders] failed", err.name, err.message.startsWith("Shopify ") ? err.message : "");

@@ -113,7 +113,7 @@ describe("syncPostMetrics", () => {
   it("a rate limit on a connection is the run's reason and keeps what was read", async () => {
     const a = await post("pm-a", ago(2));
     client.read.mockResolvedValue([{ connectionId: "pm-a-ig", provider: "INSTAGRAM", stoppedReason: "rate_limited", unread: [], posts: [{ attemptId: a, ok: true, metrics: metrics(3) }] }]);
-    expect(await syncPostMetrics({ source: { workspaceId: ws, brandId: "pm-a" } as never }, now)).toEqual({ count: 1, reason: "rate-limited" });
+    expect(await syncPostMetrics({ source: { workspaceId: ws, brandId: "pm-a" } as never }, now)).toEqual({ count: 1, reason: "rate_limited" });
   });
 
   it("a refused token marks that connection only, and the run still saves the others", async () => {

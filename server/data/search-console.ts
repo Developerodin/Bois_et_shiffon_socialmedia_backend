@@ -30,19 +30,12 @@ export const MAX_PAGE_KEY = 1000;
 
 export type StopReason = Exclude<SyncStop, "missing_scope">;
 
+/** Message is the stop itself: the routes word it (search-sync liveSites). */
 export class SearchConsoleError extends Error {
   constructor(readonly reason: StopReason) {
-    super(MESSAGES[reason]);
+    super(`Search Console ${reason}`);
   }
 }
-
-const MESSAGES: Record<StopReason, string> = {
-  reconnect: "Reconnect Google to allow Search Console",
-  permission: "This Google account can't see that Search Console site any more",
-  rate_limited: "Search Console is busy. Try again later.",
-  failed: "Search Console didn't answer. Try again later.",
-  capped: "Search Console took too long. The rest is read next time.",
-};
 
 export type Metrics = { clicks: number; impressions: number; positionSum: number };
 export type PageMetrics = Metrics & { page: string };

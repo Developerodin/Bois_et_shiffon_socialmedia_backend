@@ -137,7 +137,7 @@ describe("META_ADS sync", () => {
   it("a rate-limited window keeps the chunks read and is partial; a disabled account is permission and writes nothing", async () => {
     const s = await adSource("ad-a", "act_1");
     meta.fetchAdWindow.mockResolvedValue(window([{ day: "2026-11-01", campaigns: [camp("c1", "3")] }], { stoppedReason: "rate_limited" }));
-    expect(await runSync("META_ADS", ctx(s, { from: "2026-11-01", to: "2026-11-10" }))).toEqual({ count: 1, complete: false, reason: "rate-limited" });
+    expect(await runSync("META_ADS", ctx(s, { from: "2026-11-01", to: "2026-11-10" }))).toEqual({ count: 1, complete: false, reason: "rate_limited" });
     await prisma.adDay.deleteMany({});
     meta.fetchAdWindow.mockResolvedValue(window([{ day: "2026-11-01", campaigns: [camp("c1", "3")] }], { stoppedReason: "permission", disabled: true }));
     expect(await runSync("META_ADS", ctx(s, { from: "2026-11-01", to: "2026-11-01" }))).toEqual({ count: 0, complete: false, reason: "permission" });

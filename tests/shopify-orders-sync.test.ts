@@ -45,7 +45,7 @@ describe("syncShopifyOrders", () => {
 
   it.each([
     ["capped", "partial"],
-    ["rate_limited", "rate-limited"],
+    ["rate_limited", "rate_limited"],
   ])("a %s stop still writes what was read and moves the cursor", async (stoppedReason, reason) => {
     m.fetchOrders.mockResolvedValue({ orders: [order(1)], cursorEnd, stoppedReason });
     expect(await syncShopifyOrders(ctx(null), now)).toEqual({ count: 1, reason, cursor: cursorEnd.toISOString() });

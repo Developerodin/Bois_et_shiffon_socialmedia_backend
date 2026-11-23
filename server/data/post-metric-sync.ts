@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
-import { readPostMetrics, type ConnectionRead, type ConnectionToRead, type MetricsProvider, type PostMetrics } from "./post-metrics";
-import { registerSync, zoneToday, type SyncContext, type SyncOutcome, type SyncStop } from "./sources";
+import { readPostMetrics, type ConnectionToRead, type MetricsProvider, type PostMetrics } from "./post-metrics";
+import { brandTimeZone, registerSync, stopReason, zoneToday, type SyncContext, type SyncOutcome } from "./sources";
+import type { SyncStop } from "./sync-stop";
 
 /**
  * The POST_METRICS runner (plan Task 4b): one source per brand, connection null, so each due post's own connection is
@@ -19,10 +20,10 @@ const LAST_DAY = DECAY[DECAY.length - 1].before;
 export const DUE_LIMIT = 500;
 const PRUNE_BATCH = 1000;
 const PRUNE_ROUNDS = 10;
-
-// ---- adapter over post-metrics.ts (another branch renames `stopped` → `stoppedReason: SyncStop`; change it here) --
-const stopOf = (r: ConnectionRead): SyncStop | undefined => r.stoppedReason;
-const read = (connections: ConnectionToRead[]) => readPostMetrics(connections);
+/** Reading stops this long into a run (below the job's 240 s deadline) and writes what it read ("capped"). */
+const READ_MS = 150_000;
+/** Instagram and Threads cost one GET per post: at most this many per connection per run; the rest go next run. */
+export const PER_POST_LIMIT = 200;
 
 /** `now` as the naive UTC timestamp Prisma's timestamp(3) columns hold. */
 const utc = (d: Date) => Prisma.sql`(${d.toISOString()}::timestamptz AT TIME ZONE 'UTC')`;
@@ -34,7 +35,8 @@ const utc = (d: Date) => Prisma.sql`(${d.toISOString()}::timestamptz AT TIME ZON
 export function dueSql(now: Date) {
   const age = Prisma.sql`(${utc(now)} - a."publishedAt")`;
   const every = Prisma.join(DECAY.map((d) => Prisma.sql`WHEN ${age} < make_interval(days => ${d.before}::int) THEN ${d.every}::int`), " ");
-  return Prisma.sql`a."publishedAt" <= ${utc(now)} AND ${age} < make_interval(days => ${LAST_DAY}::int)
+  // The plain publishedAt bound lets the index seek; the age CASE below then picks the band.
+  return Prisma.sql`a."publishedAt" <= ${utc(now)} AND a."publishedAt" > ${utc(now)} - make_interval(days => ${LAST_DAY}::int)
     AND (m."readAt" IS NULL OR m."readAt" <= ${utc(now)} - make_interval(days => CASE ${every} END) + interval '6 hours')`;
 }
 
@@ -85,6 +87,8 @@ export async function pruneFinal(scope: { workspaceId: string; brandId: string }
         SELECT pm.id FROM "PostMetric" pm JOIN "PublicationAttempt" a ON a.id = pm."publicationAttemptId"
         WHERE pm."workspaceId" = ${scope.workspaceId} AND pm."brandId" = ${scope.brandId}
           AND a."publishedAt" < ${utc(now)} - make_interval(days => ${LAST_DAY}::int)
+          -- Only attempts that crossed day 30 lately: older ones were pruned on the runs since.
+          AND a."publishedAt" >= ${utc(now)} - make_interval(days => ${LAST_DAY + 10}::int)
           AND pm.day < (SELECT max(f.day) FROM "PostMetric" f WHERE f."publicationAttemptId" = pm."publicationAttemptId")
         LIMIT ${PRUNE_BATCH})`;
     total += n;
@@ -93,15 +97,17 @@ export async function pruneFinal(scope: { workspaceId: string; brandId: string }
   return total;
 }
 
-/** The worst stop across connections, as the run's reason (a reconnect skips that connection's posts only). */
+const WORST: SyncStop[] = ["permission", "missing_scope", "rate_limited", "capped", "failed"];
+/**
+ * The worst stop across connections, as the run's reason (a reconnect skips that connection's posts only). One
+ * connection failing is partial for the brand (the others were written), so it counts as capped, not a throw.
+ */
 function outcomeReason(stops: SyncStop[]): SyncOutcome["reason"] {
-  if (stops.includes("permission") || stops.includes("missing_scope")) return "permission";
-  if (stops.includes("rate_limited")) return "rate-limited";
-  if (stops.includes("failed") || stops.includes("capped")) return "partial";
-  return null;
+  const worst = WORST.find((s) => stops.includes(s));
+  return stopReason(worst === "failed" ? "capped" : worst);
 }
 
-export async function syncPostMetrics(ctx: Pick<SyncContext, "source">, now = new Date()): Promise<SyncOutcome> {
+export async function syncPostMetrics(ctx: Pick<SyncContext, "source"> & { signal?: AbortSignal }, now = new Date()): Promise<SyncOutcome> {
   const scope = { workspaceId: ctx.source.workspaceId, brandId: ctx.source.brandId };
   const due = await duePosts(scope, now);
   const byConnection = new Map<string, Due[]>();
@@ -119,14 +125,17 @@ export async function syncPostMetrics(ctx: Pick<SyncContext, "source">, now = ne
       console.warn("[post-metrics] connection needs reconnecting; its posts skipped", conn.id);
       continue;
     }
-    const posts = byConnection.get(conn.id)!;
+    const due = byConnection.get(conn.id)!;
+    const posts = due[0].provider === "META" ? due : due.slice(0, PER_POST_LIMIT);
+    if (posts.length < due.length) stops.push("capped");
     toRead.push({ connectionId: conn.id, provider: posts[0].provider, token, posts: posts.map((p) => ({ attemptId: p.id, postId: p.externalId })) });
   }
 
-  const results = toRead.length ? await read(toRead) : [];
+  const stopAt = Date.now() + READ_MS;
+  const results = toRead.length ? await readPostMetrics(toRead, { stop: () => !!ctx.signal?.aborted || Date.now() > stopAt }) : [];
   const rows: { attemptId: string; metrics: PostMetrics }[] = [];
   for (const r of results) {
-    const stop = stopOf(r);
+    const stop = r.stoppedReason;
     // A refused token (190 / 401) is the connection's own state: Connections shows it; the other connections go on.
     if (stop === "reconnect") {
       const conn = connections.find((c) => c.id === r.connectionId);
@@ -138,8 +147,7 @@ export async function syncPostMetrics(ctx: Pick<SyncContext, "source">, now = ne
     }
   }
 
-  const profile = await prisma.brandProfile.findFirst({ where: scope, select: { timeZone: true } });
-  const count = await upsertMetrics(scope, zoneToday(profile?.timeZone ?? "UTC", now), now, rows);
+  const count = await upsertMetrics(scope, zoneToday(await brandTimeZone(scope), now), now, rows);
   await pruneFinal(scope, now);
   return { count, reason: outcomeReason(stops) };
 }

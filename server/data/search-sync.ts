@@ -2,10 +2,9 @@ import type { DataSource, IntegrationConnection, Prisma } from "@prisma/client";
 import { SEARCH_CONSOLE_ZONE, type SearchSitesDto } from "@/shared";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { prisma } from "@/server/db/prisma";
-import { fetchSearchWindow, listSites, SearchConsoleError, type SearchDayResult, type StopReason } from "@/server/data/search-console";
-import {
-  addDays, dailyWindow, enqueueSourceSync, nextBackfillWindow, registerSync, stopReason, type SyncStop, zoneToday,
-} from "@/server/data/sources";
+import { fetchSearchWindow, listSites, SearchConsoleError, type SearchDayResult } from "@/server/data/search-console";
+import { backfillPlan, dailyWindow, enqueueBackfill, registerSync, stopReason, zoneToday } from "@/server/data/sources";
+import type { SyncStop } from "@/server/data/sync-stop";
 import { accessToken, ReconnectNeeded } from "@/server/services/connections";
 
 /**
@@ -14,24 +13,13 @@ import { accessToken, ReconnectNeeded } from "@/server/services/connections";
  * (search-console.ts) only fetches; this module owns every write and every route-facing check.
  */
 
-// ---- adapter over the client ------------------------------------------------------------------------------------
-// The client's stop reasons are being renamed to SyncStop on another branch ("rate_limit" → "rate_limited", plus
-// "capped"). Everything here goes through these two functions, so at merge only `toStop` changes (to `(r) => r`).
-
-const toStop = (r: StopReason): SyncStop => r;
-
-async function readWindow(token: string, siteUrl: string, from: string, to: string): Promise<{ days: SearchDayResult[]; stop?: SyncStop }> {
-  const w = await fetchSearchWindow(token, siteUrl, from, to);
-  return { days: w.days, stop: w.stoppedReason && toStop(w.stoppedReason) };
-}
-
 /** The sites the connection's Google account can read; a client stop comes back as SearchSitesStop. */
 async function readSites(conn: IntegrationConnection) {
   const token = await accessToken(conn);
   try {
     return await listSites(token, conn.scopes);
   } catch (e) {
-    if (e instanceof SearchConsoleError) throw new SearchSitesStop(toStop(e.reason));
+    if (e instanceof SearchConsoleError) throw new SearchSitesStop(e.reason);
     throw e;
   }
 }
@@ -72,21 +60,23 @@ export async function replaceDays(tx: Prisma.TransactionClient, source: SourceKe
 /**
  * Daily and manual runs re-read Google's last 3 days (the newest ~2 are preliminary); backfill reads its window.
  * Every complete day is written in one transaction. A permission stop writes nothing; a rate-limit (or time-cap)
- * stop writes the complete days before it ("rate-limited" or "partial"); the window is incomplete, so the backfill
+ * stop writes the complete days before it ("rate_limited" or "partial"); the window is incomplete, so the backfill
  * chain retries it later.
- * Reconnect and failed stops throw (stopReason), writing nothing.
+ * A failed stop writes the complete days, then throws (retried); a reconnect stop throws, writing nothing.
  */
 registerSync("SEARCH_CONSOLE", async (ctx) => {
   if (!ctx.connection) throw new ReconnectNeeded("Search Console source has no Google connection");
   const { from, to } = ctx.window ?? dailyWindow(zoneToday(SEARCH_CONSOLE_ZONE));
   const token = await accessToken(ctx.connection);
-  const { days, stop } = await readWindow(token, ctx.source.externalId, from, to);
-  const reason = stopReason(stop);
-  if (reason === "permission") return { count: 0, reason };
+  const { days, stoppedReason: stop } = await fetchSearchWindow(token, ctx.source.externalId, from, to);
+  if (stop === "reconnect") stopReason(stop); // throws: nothing written
+  if (stop === "permission") return { count: 0, reason: "permission" };
   const complete = days.filter((d) => d.complete);
   // ponytail: one transaction of up to 30 days × ~500 rows; the timeout is raised for that. If it nears it, split per day.
   const count = complete.length ? await prisma.$transaction((tx) => replaceDays(tx, ctx.source, complete), { timeout: 60_000 }) : 0;
-  return { count, complete: !stop && complete.length === days.length, reason };
+  // After the write: a failed stop throws here (retried) with the finished days already kept.
+  const reason = stopReason(stop);
+  return { count, complete: !stop && complete.length === days.length, reason, ...(ctx.window ? {} : { window: { from, to } }) };
 });
 
 // ---- site picker -------------------------------------------------------------------------------------------------
@@ -149,7 +139,8 @@ export async function chooseSearchSite(scope: Scope, body: { connectionId: strin
   const { conn, sites } = await liveSites(scope, body.connectionId);
   if (!sites.some((s) => s.siteUrl === body.siteUrl)) throw new SearchSiteError(400, "That site isn't one this Google account can read.");
   const where = { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SEARCH_CONSOLE" as const };
-  const fields = { connectionId: conn.id, label: body.siteUrl, settings: { reportsIn: SEARCH_CONSOLE_ZONE }, status: "ACTIVE" as const, syncedThrough: null };
+  const plan = backfillPlan(zoneToday(SEARCH_CONSOLE_ZONE, now), BACKFILL_DAYS, BACKFILL_WINDOW_DAYS);
+  const fields = { connectionId: conn.id, label: body.siteUrl, settings: { reportsIn: SEARCH_CONSOLE_ZONE, backfill: plan }, status: "ACTIVE" as const, syncedThrough: null };
   const source = await prisma.$transaction(async (tx) => {
     await tx.dataSource.updateMany({ where: { ...where, externalId: { not: body.siteUrl }, status: { not: "OFF" } }, data: { status: "OFF" } });
     return tx.dataSource.upsert({
@@ -158,8 +149,6 @@ export async function chooseSearchSite(scope: Scope, body: { connectionId: strin
       update: fields,
     });
   });
-  const end = addDays(zoneToday(SEARCH_CONSOLE_ZONE, now), -1);
-  const window = nextBackfillWindow(null, addDays(end, -(BACKFILL_DAYS - 1)), end, BACKFILL_WINDOW_DAYS)!;
-  await enqueueSourceSync(source, "backfill", { window: { ...window, end } });
+  await enqueueBackfill(source, plan);
   return source;
 }

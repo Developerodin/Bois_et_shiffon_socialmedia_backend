@@ -112,7 +112,7 @@ describe("SEARCH_CONSOLE sync", () => {
     expect((await rows()).map((r) => r.day.toISOString().slice(0, 10))).toEqual(["2026-11-01", "2026-11-01"]);
     const src = await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } });
     expect(src.syncedThrough).toBeNull();
-    expect(src.lastResult).toMatchObject({ reason: "rate-limited" });
+    expect(src.lastResult).toMatchObject({ reason: "rate_limited" });
     const retry = await prisma.job.findMany({ where: { type: DATA_SYNC_JOB } });
     expect(retry).toHaveLength(1);
     expect(retry[0].payload).toMatchObject({ from: "2026-11-01", to: "2026-11-02", retry: 1 });

@@ -71,9 +71,9 @@ export const hasFacebookPostId = (externalId: string) => externalId.includes("_"
 
 export const BATCH_SIZE = 50;
 const TIMEOUT_MS = 15_000;
-const DAY = 86_400_000;
 
 type Fetch = typeof fetch;
+type Stop = () => boolean;
 type GraphError = { code?: number; error_subcode?: number; message?: string };
 type Insight = { name: string; values?: { value?: unknown }[]; total_value?: { value?: unknown } };
 type Answer = { status: number; body: unknown };
@@ -145,11 +145,12 @@ async function send(f: Fetch, url: string, init?: RequestInit): Promise<Answer> 
 }
 
 /** The answers for one chunk, in order: a Graph batch for Facebook, one GET per post for Instagram and Threads. */
-async function readChunk(f: Fetch, c: ConnectionToRead, chunk: PostToRead[], metrics: string[]): Promise<Answer | (Answer | null)[]> {
+async function readChunk(f: Fetch, c: ConnectionToRead, chunk: PostToRead[], metrics: string[], stop: Stop): Promise<Answer | (Answer | null)[]> {
   if (c.provider !== "META") {
     const host = c.provider === "INSTAGRAM" ? IG_GRAPH : THREADS_GRAPH;
     const out: Answer[] = [];
     for (const p of chunk) {
+      if (stop()) break; // the rest stay unread ("capped")
       const a = await send(f, `${host}/${encodeURIComponent(p.postId)}/insights?metric=${metrics.join(",")}`, { headers: { authorization: `Bearer ${c.token}` } });
       out.push(a);
       const r = classify(a.status, a.body);
@@ -173,12 +174,17 @@ async function readChunk(f: Fetch, c: ConnectionToRead, chunk: PostToRead[], met
   });
 }
 
-async function readConnection(f: Fetch, c: ConnectionToRead): Promise<ConnectionRead> {
+async function readConnection(f: Fetch, c: ConnectionToRead, stop: Stop): Promise<ConnectionRead> {
   const out: ConnectionRead = { connectionId: c.connectionId, provider: c.provider, posts: [], unread: [] };
   const metrics = [...METRICS[c.provider]];
   for (let i = 0; i < c.posts.length; i += BATCH_SIZE) {
     const chunk = c.posts.slice(i, i + BATCH_SIZE);
-    const answers = await readChunk(f, c, chunk, metrics);
+    if (stop()) {
+      out.stoppedReason = "capped";
+      out.unread = c.posts.slice(i).map((p) => p.attemptId);
+      break;
+    }
+    const answers = await readChunk(f, c, chunk, metrics, stop);
     if (!Array.isArray(answers)) {
       const r = answers.status === 0 ? "failed" : classify(answers.status, answers.body);
       out.stoppedReason = r === "not_found" || r === null ? "failed" : r;
@@ -193,7 +199,7 @@ async function readConnection(f: Fetch, c: ConnectionToRead): Promise<Connection
         metrics.splice(metrics.indexOf(m), 1);
         console.warn(`[post-metrics] ${c.provider} ${c.connectionId} dropped metric ${m}`);
       }
-      const again = await readChunk(f, c, refused.map((j) => chunk[j]), metrics);
+      const again = await readChunk(f, c, refused.map((j) => chunk[j]), metrics, stop);
       refused.forEach((j, k) => (answers[j] = Array.isArray(again) ? again[k] : again));
     }
     chunk.forEach((p, j) => {
@@ -208,7 +214,8 @@ async function readConnection(f: Fetch, c: ConnectionToRead): Promise<Connection
       }
       out.posts.push({ attemptId: p.attemptId, ok: false, reason: r ?? "failed", code: codeOf(a.body) });
     });
-    if (!out.stoppedReason && out.unread.length) out.stoppedReason = "failed"; // a GET loop stopped on a network failure
+    // A GET loop stopped early: on the run's time cap, or on a network failure.
+    if (!out.stoppedReason && out.unread.length) out.stoppedReason = stop() ? "capped" : "failed";
     if (out.stoppedReason) {
       out.unread.push(...c.posts.slice(i + BATCH_SIZE).map((p) => p.attemptId));
       break;
@@ -220,23 +227,14 @@ async function readConnection(f: Fetch, c: ConnectionToRead): Promise<Connection
   return out;
 }
 
-/** Reads every connection's posts, one connection after another; a stop on one never stops the others. */
-export async function readPostMetrics(connections: ConnectionToRead[], opts: { fetch?: Fetch } = {}): Promise<ConnectionRead[]> {
-  const f = opts.fetch ?? fetch;
-  const out: ConnectionRead[] = [];
-  for (const c of connections) out.push(await readConnection(f, c));
-  return out;
-}
-
 /**
- * Whether a post's numbers should be read again: daily until day 7, every 3 days until day 14, weekly until day 30,
- * never after (the last read is final). A never-read post under 30 days is due. 6 h of slack so a daily job that
- * runs a little earlier than yesterday still counts the day.
+ * Reads every connection's posts, one connection after another; a stop on one never stops the others. `opts.stop`
+ * (the run's deadline or time cap) is checked before each call: once true, what is left is unread with "capped".
  */
-export function refreshDue(publishedAt: Date, lastReadAt: Date | null, now: Date): boolean {
-  const age = (now.getTime() - publishedAt.getTime()) / DAY;
-  if (age < 0 || age >= 30) return false;
-  if (!lastReadAt) return true;
-  const every = age < 7 ? 1 : age < 14 ? 3 : 7;
-  return now.getTime() - lastReadAt.getTime() >= every * DAY - 6 * 3_600_000;
+export async function readPostMetrics(connections: ConnectionToRead[], opts: { fetch?: Fetch; stop?: Stop } = {}): Promise<ConnectionRead[]> {
+  const f = opts.fetch ?? fetch;
+  const stop = opts.stop ?? (() => false);
+  const out: ConnectionRead[] = [];
+  for (const c of connections) out.push(await readConnection(f, c, stop));
+  return out;
 }
