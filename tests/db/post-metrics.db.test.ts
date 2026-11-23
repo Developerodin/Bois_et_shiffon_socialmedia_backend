@@ -96,7 +96,7 @@ describe("syncPostMetrics", () => {
     const a = await post("pm-a", ago(2));
     const b = await post("pm-b", ago(2));
     client.read.mockImplementation(async (conns: ConnectionToRead[]) =>
-      conns.map((c) => ({ connectionId: c.connectionId, provider: c.provider, stopped: null, unread: [], posts: c.posts.map((p) => ({ attemptId: p.attemptId, ok: true, metrics: metrics(5) })) })));
+      conns.map((c) => ({ connectionId: c.connectionId, provider: c.provider, stoppedReason: undefined, unread: [], posts: c.posts.map((p) => ({ attemptId: p.attemptId, ok: true, metrics: metrics(5) })) })));
     const source = { workspaceId: ws, brandId: "pm-a" } as never;
     // 23:30 UTC is the next day in Paris.
     const late = new Date("2026-11-22T23:30:00Z");
@@ -112,14 +112,14 @@ describe("syncPostMetrics", () => {
 
   it("a rate limit on a connection is the run's reason and keeps what was read", async () => {
     const a = await post("pm-a", ago(2));
-    client.read.mockResolvedValue([{ connectionId: "pm-a-ig", provider: "INSTAGRAM", stopped: "rate_limited", unread: [], posts: [{ attemptId: a, ok: true, metrics: metrics(3) }] }]);
+    client.read.mockResolvedValue([{ connectionId: "pm-a-ig", provider: "INSTAGRAM", stoppedReason: "rate_limited", unread: [], posts: [{ attemptId: a, ok: true, metrics: metrics(3) }] }]);
     expect(await syncPostMetrics({ source: { workspaceId: ws, brandId: "pm-a" } as never }, now)).toEqual({ count: 1, reason: "rate-limited" });
   });
 
   it("a refused token marks that connection only, and the run still saves the others", async () => {
     const a = await post("pm-a", ago(2));
     client.read.mockResolvedValue([
-      { connectionId: "pm-a-ig", provider: "INSTAGRAM", stopped: "reconnect", unread: [a], posts: [] },
+      { connectionId: "pm-a-ig", provider: "INSTAGRAM", stoppedReason: "reconnect", unread: [a], posts: [] },
     ]);
     expect(await syncPostMetrics({ source: { workspaceId: ws, brandId: "pm-a" } as never }, now)).toEqual({ count: 0, reason: null });
     expect((await prisma.integrationConnection.findUniqueOrThrow({ where: { id: "pm-a-ig" } })).status).toBe("ERROR");
