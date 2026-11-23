@@ -1,4 +1,7 @@
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+// list.ts also holds the route handlers, whose auth import pulls next-auth (unloadable under vitest). Not used here.
+vi.mock("@/server/auth/request-user", () => ({ requestUserId: vi.fn() }));
 import { prisma } from "@/server/db/prisma";
 import { notifyOverdueTasks, notifyRechecks, pruneNotifications } from "@/server/notifications/daily-tasks";
 import { countUnread, listNotifications } from "@/server/notifications/list";

@@ -14,7 +14,8 @@ import { POST as commentsPost } from "@/app/api/v1/workspaces/[workspaceId]/bran
 
 let perms = new Set<PermissionKey>(["brand.read", "tasks.read", "tasks.manage"]);
 const params = { params: Promise.resolve({ workspaceId: "w1", brandId: "b1", taskId: "t1" }) };
-const post = (route: typeof tasksPost, body: unknown) => route(new Request("http://x/api", { method: "POST", body: JSON.stringify(body) }), params);
+// The three routes take different params; one loose type lets one table drive them all.
+const post = (route: (req: Request, ctx: typeof params) => Promise<Response>, body: unknown) => route(new Request("http://x/api", { method: "POST", body: JSON.stringify(body) }), params);
 const task = { title: "Fix menu", areas: ["WEBSITE"], priority: "NORMAL" };
 const routes = [
   ["create", tasksPost, task],
