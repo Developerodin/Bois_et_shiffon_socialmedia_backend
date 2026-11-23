@@ -189,6 +189,17 @@ describe("patchProject", () => {
     expect(db.workProject.update.mock.calls[0]![0].data).toEqual({ name: "Relaunch" });
   });
 
+  it("without tasks.all: owner set to yourself, as on create; cleared only from yourself", async () => {
+    scope = scopeOf();
+    db.workProject.findFirst.mockResolvedValue(project({ ownerId: "u2" }));
+    await expect(patchProject(scope, v(), "p1", { ownerId: null })).rejects.toMatchObject({ status: 403 });
+    await patchProject(scope, v(), "p1", { ownerId: "u1" });
+    expect(db.workProject.update.mock.calls[0]![0].data).toEqual({ ownerId: "u1" });
+    db.workProject.findFirst.mockResolvedValue(project({ ownerId: "u1" }));
+    await patchProject(scope, v(), "p1", { ownerId: null });
+    expect(db.workProject.update.mock.calls[1]![0].data).toEqual({ ownerId: null });
+  });
+
   it("cannot hide a project a client is reviewing in", async () => {
     db.workProject.findFirst.mockResolvedValue(project({ clientVisible: true }));
     db.brandMember.findMany.mockResolvedValue([{ userId: "u5" }]);
