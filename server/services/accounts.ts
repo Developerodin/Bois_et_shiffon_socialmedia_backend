@@ -162,6 +162,7 @@ async function findOpenInvitation(rawToken: string) {
 
 export async function previewInvitation(rawToken: string) {
   const inv = await findOpenInvitation(rawToken);
+  if (!(await inviterCanStillGive(inv))) throw new AccountFlowError("This invitation is no longer valid. Ask for a new one.", 409);
   const user = await prisma.user.findUnique({ where: { email: inv.email } });
   return {
     email: inv.email,
