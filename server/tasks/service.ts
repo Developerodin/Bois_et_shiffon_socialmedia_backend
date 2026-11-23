@@ -7,13 +7,13 @@ import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { TEAM_MEMBER } from "@/server/content/person-name";
 import { notifyTx } from "@/server/notifications/tasks";
 import { brandOwners, lockRow, TX } from "@/server/services/publishing";
-import { canBeAssigned, clientCanSee, findVisibleTask, isSoleStaff, type TaskViewer } from "@/server/tasks/access";
+import { canBeAssigned, clientCanSee, findVisibleTask, isSoleStaff, lastSubmitter, type TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { TaskError } from "@/server/tasks/errors";
 import { toAttachmentDto } from "@/server/tasks/attachments";
 import { toChecklistDto } from "@/server/tasks/checklist";
 import { checkTaskLinks } from "@/server/tasks/links";
-import { allowedActions, MANAGE_PATCH_FIELDS, pickPatch, safeHttpUrl, TASK_AREAS, TASK_PRIORITIES, WEBSITE_CHANGE_KINDS, type TaskDetailDto, type TaskDto, type TaskPersonDto, type TaskRow } from "@/shared";
+import { allowedActions, MANAGE_PATCH_FIELDS, pickPatch, safeHttpUrl, TASK_AREAS, TASK_PRIORITIES, WEBSITE_CHANGE_KINDS, type ActorRole, type TaskDetailDto, type TaskDto, type TaskPersonDto, type TaskRow } from "@/shared";
 
 /** The route scope the task services take (authorizeBrandRoute's result). */
 export type TaskScope = { userId: string; workspaceId: string; brandId: string; perms: Set<PermissionKey> };
@@ -88,6 +88,15 @@ export const rowOf = (t: Task): TaskRow => ({
 });
 
 /**
+ * The caller's role on one task for the shared rules. `soleStaff` (nobody else on the brand could review) counts only
+ * for the task's owner. Manager is tasks.manage on the route scope, the same key taskViewer reads.
+ */
+export function actorRole(scope: TaskScope, t: Pick<Task, "ownerId" | "reviewerId" | "blockedOnId">, soleStaff: boolean): ActorRole {
+  const isOwner = t.ownerId === scope.userId;
+  return { userId: scope.userId, isOwner, isReviewer: t.reviewerId === scope.userId, canManage: scope.perms.has("tasks.manage"), soleStaff: isOwner && soleStaff, isBlockedOn: t.blockedOnId === scope.userId };
+}
+
+/**
  * A user id → the person on a task, named from the brand's tasks.read people (brandOwners with includeClients, which
  * says who is a client); someone not among them is `gone` (and not a client).
  */
@@ -115,10 +124,8 @@ export async function toTaskDtos(scope: TaskScope, rows: TaskWithLinks[], people
   ]);
   const countOf = new Map(counts.map((c) => [c.taskId, { done: c._count.doneAt, total: c._count._all }]));
   const person = personOf(names);
-  const canManage = scope.perms.has("tasks.manage");
   return rows.map((t) => {
-    const isOwner = t.ownerId === scope.userId;
-    const actor = { userId: scope.userId, isOwner, isReviewer: t.reviewerId === scope.userId, canManage, soleStaff: isOwner && sole, isBlockedOn: t.blockedOnId === scope.userId };
+    const actor = actorRole(scope, t, sole);
     return {
       id: t.id,
       title: t.title,
@@ -172,6 +179,11 @@ export async function getTask(scope: TaskScope, v: TaskViewer, taskId: string): 
     prisma.taskAttachment.findMany({ where: { taskId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], include: { mediaUpload: { select: { key: true } } } }),
     clientCanSee(prisma, scope, row),
   ]);
+  // Same four-eyes rule runTaskAction enforces: the submitter isn't offered Approve unless they're sole staff.
+  // ponytail: detail only; list rows still carry approve (the panel is where people act on it).
+  if (dto!.actions.includes("approve") && (await lastSubmitter(prisma, taskId)) === scope.userId && !(await isSoleStaff(scope.workspaceId, scope.brandId, scope.userId))) {
+    dto!.actions = dto!.actions.filter((a) => a !== "approve");
+  }
   return { ...dto!, clientVisible, viewerIsClient: v.client, checklistItems: items.map(toChecklistDto), attachments: await Promise.all(attachments.map((a) => toAttachmentDto(a, a.mediaUpload.key))) };
 }
 

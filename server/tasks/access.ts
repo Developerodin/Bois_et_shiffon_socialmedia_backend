@@ -146,6 +146,16 @@ export function commentVisibility(v: TaskViewer): Prisma.TaskCommentWhereInput {
 }
 
 /** Nobody else on the brand reads tasks as staff (client reviewers don't count), so no four-eyes rule can apply. */
+/** Who last sent the task for review (from the audit trail), or null if nobody has. */
+export async function lastSubmitter(tx: Db, taskId: string): Promise<string | null> {
+  const sent = await tx.auditEvent.findFirst({
+    where: { entityType: "Task", entityId: taskId, action: "task.submitForReview" },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { actorUserId: true },
+  });
+  return sent?.actorUserId ?? null;
+}
+
 export async function isSoleStaff(workspaceId: string, brandId: string, userId: string) {
   return !(await hasOtherHolder(workspaceId, brandId, userId, "tasks.read"));
 }

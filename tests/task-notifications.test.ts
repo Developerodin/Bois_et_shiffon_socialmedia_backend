@@ -95,12 +95,16 @@ describe("notification API", () => {
   });
 
   it("list and count filter through the same where", async () => {
-    db.$queryRaw.mockResolvedValueOnce([{ count: 0 }]).mockResolvedValueOnce([]);
+    db.$queryRaw.mockResolvedValueOnce([{ count: 0 }]).mockResolvedValueOnce([]).mockResolvedValueOnce([]);
     await countUnread("u1", "w1");
     const res = await listGet(req(""));
     expect(await res.json()).toEqual({ notifications: [], nextCursor: null });
-    const [count, list] = db.$queryRaw.mock.calls.map(sqlOf);
+    const [count, groups, list] = db.$queryRaw.mock.calls.map(sqlOf);
+    // Unread come as one row per kind and business with its count; the page itself is read ones only.
     const where = /FROM "Notification" n JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/;
+    expect(groups).toMatch(where);
+    expect(groups).toMatch(/DISTINCT ON \(n\.kind, n\."brandId"\)[\s\S]*count\(\*\) OVER \(PARTITION BY n\.kind, n\."brandId"\)[\s\S]*n\."readAt" IS NULL/);
+    expect(list).toMatch(/n\."readAt" IS NOT NULL/);
     // The count reads the unread rows through a fenced subquery aliased n, then applies the same where.
     expect(count).toMatch(/\) n JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/);
     expect(list).toMatch(where);
@@ -110,8 +114,10 @@ describe("notification API", () => {
   it("the actor says whether they are a client on the notification's brand", async () => {
     const at = new Date("2026-11-23T10:00:00Z");
     const base = { id: "n1", kind: "REVIEW_REQUESTED", brandId: "b1", taskId: "t1", taskTitle: "Fix", actorId: "u5", actorName: "Cli", actorEmail: "c@x.com", actorGone: false, readAt: null, createdAt: at };
-    db.$queryRaw.mockResolvedValueOnce([{ ...base, actorClient: true }, { ...base, id: "n2", actorId: "u2", actorName: "Bob", actorClient: false }]);
+    db.$queryRaw.mockResolvedValueOnce([{ ...base, actorClient: true, count: 3 }]).mockResolvedValueOnce([{ ...base, id: "n2", actorId: "u2", actorName: "Bob", actorClient: false, readAt: at }]);
     const body = await (await listGet(req(""))).json();
+    // The unread group comes first with its count; a read row counts as one.
+    expect(body.notifications.map((n: { count: number }) => n.count)).toEqual([3, 1]);
     expect(body.notifications.map((n: { actor: unknown }) => n.actor)).toEqual([
       { id: "u5", name: "Cli", gone: false, client: true },
       { id: "u2", name: "Bob", gone: false, client: false },

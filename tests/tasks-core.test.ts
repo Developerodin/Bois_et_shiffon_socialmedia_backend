@@ -31,7 +31,8 @@ vi.mock("@/server/auth/rate-limit", async (orig) => ({ ...(await orig<object>())
 
 import { AccessDeniedError } from "@/server/auth/errors";
 import { brandOwners } from "@/server/services/publishing";
-import { createTask, getTask, patchTask, toTaskDtos } from "@/server/tasks/service";
+import { createTask, getTask, patchTask, TaskInput, toTaskDtos } from "@/server/tasks/service";
+import { MANAGE_PATCH_FIELDS } from "@/shared";
 import { TaskError } from "@/server/tasks/errors";
 import { notifyTx } from "@/server/notifications/tasks";
 import { taskViewer } from "@/server/tasks/access";
@@ -97,6 +98,12 @@ beforeEach(() => {
   m.authorize.mockImplementation(async (_r: Request, _p: unknown, key: PermissionKey) => {
     if (!scope.perms.has(key)) throw new AccessDeniedError(`Missing permission ${key}`);
     return scope;
+  });
+});
+
+describe("TaskInput", () => {
+  it("has exactly the manager's PATCH fields, plus requestId", () => {
+    expect(Object.keys(TaskInput.shape).filter((k) => k !== "requestId").sort()).toEqual([...MANAGE_PATCH_FIELDS].sort());
   });
 });
 

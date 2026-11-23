@@ -113,7 +113,7 @@ describe("review", () => {
   });
 
   it("the owner can't review their own task while someone else could", async () => {
-    await expect(runTaskAction(scope, v, "t1", { action: "submitForReview", reviewerId: "u1" })).rejects.toMatchObject({ status: 409, message: "The reviewer can't be the owner." });
+    await expect(runTaskAction(scope, v, "t1", { action: "submitForReview", reviewerId: "u1" })).rejects.toMatchObject({ status: 409, message: "The reviewer can't be the owner.", code: "task.reviewerIsOwner" });
     staff = new Set(["u1"]);
     await runTaskAction(scope, v, "t1", { action: "submitForReview", reviewerId: "u1" });
     expect(updated()).toEqual({ status: "IN_REVIEW", reviewerId: "u1" });
@@ -125,15 +125,36 @@ describe("review", () => {
     expect(updated()).toMatchObject({ status: "DONE", blockedReason: null, blockedOnId: null });
     expect(updated().completedAt).toBeInstanceOf(Date);
     expect(db.taskComment.create).toHaveBeenCalledWith({
-      data: { workspaceId: "w1", brandId: "b1", taskId: "t1", authorId: "u1", kind: "APPROVED", body: "Looks good", byClient: false, internal: false },
+      data: { workspaceId: "w1", brandId: "b1", taskId: "t1", authorId: "u1", kind: "APPROVED", body: "Looks good", byClient: false, internal: true },
     });
+  });
+
+  it("a staff reviewer's note reaches the client only with shareWithClient; a client's always does", async () => {
+    db.task.findUnique.mockResolvedValue(row({ status: "IN_REVIEW", ownerId: "u2", reviewerId: "u1" }));
+    await runTaskAction(scope, v, "t1", { action: "approve", note: "Fine", shareWithClient: true });
+    expect(db.taskComment.create.mock.calls[0]![0].data).toMatchObject({ kind: "APPROVED", byClient: false, internal: false });
+    await runTaskAction(scope, { ...v, client: true }, "t1", { action: "requestChanges", reason: "Wrong photo" });
+    expect(db.taskComment.create.mock.calls[1]![0].data).toMatchObject({ kind: "CHANGES_REQUESTED", byClient: true, internal: false });
   });
 
   it("requestChanges writes CHANGES_REQUESTED with the reason", async () => {
     db.task.findUnique.mockResolvedValue(row({ status: "IN_REVIEW", ownerId: "u2", reviewerId: "u1" }));
     await runTaskAction(scope, v, "t1", { action: "requestChanges", reason: "Wrong photo" });
     expect(updated()).toEqual({ status: "IN_PROGRESS" });
-    expect(db.taskComment.create.mock.calls[0]![0].data).toMatchObject({ kind: "CHANGES_REQUESTED", body: "Wrong photo", internal: false });
+    expect(db.taskComment.create.mock.calls[0]![0].data).toMatchObject({ kind: "CHANGES_REQUESTED", body: "Wrong photo", internal: true });
+  });
+
+  it("approve and requestChanges tell whoever sent it for review, else the owner", async () => {
+    db.task.findUnique.mockResolvedValue(row({ status: "IN_REVIEW", ownerId: "u2", reviewerId: "u1" }));
+    db.auditEvent.findFirst.mockResolvedValueOnce({ actorUserId: "u3" });
+    await runTaskAction(scope, v, "t1", { action: "approve" });
+    db.auditEvent.findFirst.mockResolvedValueOnce(null);
+    db.auditEvent.create.mockResolvedValue({ id: "a2" });
+    await runTaskAction(scope, v, "t1", { action: "requestChanges", reason: "Wrong photo" });
+    expect(notices()).toEqual([
+      expect.objectContaining({ userId: "u3", kind: "TASK_APPROVED", actorId: "u1", dedupeKey: "TASK_APPROVED:u3:a1" }),
+      expect.objectContaining({ userId: "u2", kind: "TASK_CHANGES_REQUESTED", actorId: "u1", dedupeKey: "TASK_CHANGES_REQUESTED:u2:a2" }),
+    ]);
   });
 
   it("reviewer who lost access cannot approve", async () => {

@@ -1,5 +1,5 @@
 import "server-only";
-import { Prisma } from "@prisma/client";
+import { type NotificationKind, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { requireWorkspaceMember } from "@/server/auth/access";
@@ -7,7 +7,8 @@ import { requestUserId } from "@/server/auth/request-user";
 import { TEAM_MEMBER, personName } from "@/server/content/person-name";
 import { prisma } from "@/server/db/prisma";
 import { clientMemberSql, visibleTasksAcrossSql } from "@/server/tasks/access";
-import { TaskError, taskProblem } from "@/server/tasks/errors";
+import { fromCursor, toCursor } from "@/server/tasks/cursor";
+import { taskProblem } from "@/server/tasks/errors";
 import type { NotificationDto, NotificationPageDto } from "@/shared";
 
 const PAGE = 20; // the query reads PAGE + 1 (LIMIT 21) to know if there is more
@@ -26,41 +27,50 @@ export async function notificationWhereSql(userId: string, workspaceId: string):
 
 const Cursor = z.object({ createdAt: z.iso.datetime(), id: z.string().min(1).max(100) });
 
-function decodeCursor(s: string) {
-  let raw: unknown = null;
-  try {
-    raw = JSON.parse(Buffer.from(s, "base64url").toString("utf8"));
-  } catch {
-    // fall through to the 400 below
-  }
-  const key = Cursor.safeParse(raw);
-  if (!key.success) throw new TaskError("Invalid cursor", 400);
-  return key.data;
-}
-
 type Row = {
   id: string; kind: string; brandId: string; taskId: string | null; taskTitle: string | null; actorId: string | null;
   actorName: string | null; actorEmail: string | null; actorGone: boolean | null; actorClient: boolean | null; readAt: Date | null; createdAt: Date;
+  count?: number;
 };
 
-/** Newest first, 20 a page; `nextCursor` is null on the last page. */
-export async function listNotifications(userId: string, workspaceId: string, cursor?: string): Promise<NotificationPageDto> {
-  const after = cursor ? decodeCursor(cursor) : null;
-  const where = [await notificationWhereSql(userId, workspaceId)];
-  if (after) where.push(Prisma.sql`(n."createdAt", n.id) < (${after.createdAt}::timestamp, ${after.id})`);
-  const rows = await prisma.$queryRaw<Row[]>(Prisma.sql`
-    SELECT n.id, n.kind::text AS kind, n."brandId", n."taskId", t.title AS "taskTitle", n."actorId", a.name AS "actorName",
+const COLUMNS = (n: Prisma.Sql) => Prisma.sql`n.id, n.kind::text AS kind, n."brandId", n."taskId", t.title AS "taskTitle", n."actorId", a.name AS "actorName",
            a.email AS "actorEmail", (a."deletedAt" IS NOT NULL OR a.status <> 'ACTIVE') AS "actorGone",
-           ${clientMemberSql(Prisma.sql`n."actorId"`, Prisma.sql`n."brandId"`, Prisma.sql`n."workspaceId"`)} AS "actorClient", n."readAt", n."createdAt"
+           ${n} AS "actorClient", n."readAt", n."createdAt"`;
+
+/**
+ * Unread notices come first, one row per kind and business (the newest, with `count`), so a morning of overdue tasks
+ * or a burst of assignments is one line; then read ones newest first, 20 a page (`nextCursor` pages the read ones).
+ * ponytail: groups are recounted on every open; at most kinds × businesses rows, so no paging for them.
+ */
+export async function listNotifications(userId: string, workspaceId: string, cursor?: string): Promise<NotificationPageDto> {
+  const after = cursor ? fromCursor(Cursor, cursor) : null;
+  const base = await notificationWhereSql(userId, workspaceId);
+  const actorClient = clientMemberSql(Prisma.sql`n."actorId"`, Prisma.sql`n."brandId"`, Prisma.sql`n."workspaceId"`);
+  const where = [base, Prisma.sql`n."readAt" IS NOT NULL`];
+  if (after) where.push(Prisma.sql`(n."createdAt", n.id) < (${after.createdAt}::timestamp, ${after.id})`);
+  const [groups, rows] = await Promise.all([
+    after
+      ? Promise.resolve([] as Row[])
+      : prisma.$queryRaw<Row[]>(Prisma.sql`
+    SELECT * FROM (
+      SELECT DISTINCT ON (n.kind, n."brandId") ${COLUMNS(actorClient)},
+             (count(*) OVER (PARTITION BY n.kind, n."brandId"))::int AS count
+      ${FROM} LEFT JOIN "User" a ON a.id = n."actorId"
+      WHERE ${base} AND n."readAt" IS NULL
+      ORDER BY n.kind, n."brandId", n."createdAt" DESC, n.id DESC
+    ) g ORDER BY "createdAt" DESC, id DESC`),
+    prisma.$queryRaw<Row[]>(Prisma.sql`
+    SELECT ${COLUMNS(actorClient)}
     ${FROM} LEFT JOIN "User" a ON a.id = n."actorId"
     WHERE ${Prisma.join(where, " AND ")}
     ORDER BY n."createdAt" DESC, n.id DESC
-    LIMIT 21`);
+    LIMIT 21`),
+  ]);
   const page = rows.slice(0, PAGE);
   const last = page.at(-1);
   return {
-    notifications: page.map(toDto),
-    nextCursor: rows.length > PAGE && last ? Buffer.from(JSON.stringify({ createdAt: last.createdAt.toISOString(), id: last.id })).toString("base64url") : null,
+    notifications: [...groups, ...page].map(toDto),
+    nextCursor: rows.length > PAGE && last ? toCursor({ createdAt: last.createdAt.toISOString(), id: last.id }) : null,
   };
 }
 
@@ -70,7 +80,7 @@ function toDto(r: Row): NotificationDto {
       ? { id: r.actorId, name: TEAM_MEMBER, gone: true, client: !!r.actorClient }
       : { id: r.actorId, name: personName({ name: r.actorName, email: r.actorEmail }, { reveal: false }), gone: !!r.actorGone, client: !!r.actorClient }
     : null;
-  return { id: r.id, kind: r.kind, brandId: r.brandId, taskId: r.taskId, taskTitle: r.taskTitle, actor, readAt: r.readAt?.toISOString() ?? null, createdAt: r.createdAt.toISOString() };
+  return { id: r.id, kind: r.kind, count: r.count ?? 1, brandId: r.brandId, taskId: r.taskId, taskTitle: r.taskTitle, actor, readAt: r.readAt?.toISOString() ?? null, createdAt: r.createdAt.toISOString() };
 }
 
 /** Unread notifications, counted up to 100. */
@@ -88,9 +98,13 @@ export async function countUnread(userId: string, workspaceId: string): Promise<
 }
 
 /** Mark the person's own notifications read in this workspace; ids of anyone else's match nothing. */
-export async function markRead(userId: string, workspaceId: string, ids: string[] | "all") {
+export type ReadWhich = string[] | "all" | { kind: NotificationKind; brandId: string; upTo: string };
+
+/** Mark the person's own unread notices read: by id, all, or a bell group (one kind on one business, up to its newest). */
+export async function markRead(userId: string, workspaceId: string, which: ReadWhich) {
+  const filter = which === "all" ? {} : Array.isArray(which) ? { id: { in: which } } : { kind: which.kind, brandId: which.brandId, createdAt: { lte: new Date(which.upTo) } };
   const { count } = await prisma.notification.updateMany({
-    where: { userId, workspaceId, readAt: null, ...(ids === "all" ? {} : { id: { in: ids } }) },
+    where: { userId, workspaceId, readAt: null, ...filter },
     data: { readAt: new Date() },
   });
   return count;

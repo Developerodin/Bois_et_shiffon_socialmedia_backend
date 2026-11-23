@@ -4,7 +4,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/server/auth/request-user", () => ({ requestUserId: vi.fn() }));
 import { prisma } from "@/server/db/prisma";
 import { notifyOverdueTasks, notifyRechecks, pruneNotifications } from "@/server/notifications/daily-tasks";
-import { countUnread, listNotifications } from "@/server/notifications/list";
+import { countUnread, listNotifications, markRead } from "@/server/notifications/list";
 
 /**
  * One workspace, two brands: `east` in Pacific/Auckland (UTC+13 in November), `utc` with no profile (DEFAULT_TIME_ZONE).
@@ -67,7 +67,7 @@ describe("daily task notifications", () => {
     await task({ brandId: east, dueOn: day("2026-11-01") }); // nobody owns it
     await task({ brandId: east, ownerId: staff, status: "CANCELLED", dueOn: day("2026-11-01") }); // closed
     await notifyOverdueTasks(NOW);
-    expect(await keys()).toEqual([`TASK_OVERDUE:${staff}:${a.id}:2026-11-24`]);
+    expect(await keys()).toEqual([`TASK_OVERDUE:${staff}:${a.id}:2026-11-23:w0`]);
     const n = await prisma.notification.findFirstOrThrow();
     expect(n).toMatchObject({ userId: staff, workspaceId: ws, brandId: east, kind: "TASK_OVERDUE", taskId: a.id, readAt: null });
   });
@@ -82,17 +82,27 @@ describe("daily task notifications", () => {
     await notifyOverdueTasks(NOW);
     await notifyRechecks(NOW);
     expect(await keys()).toEqual(first);
-    // The next brand-local day is a new notice for the still-overdue task.
-    await notifyOverdueTasks(new Date("2026-11-24T12:00:00Z"));
+    // Still overdue: nothing more the rest of the week, one reminder a week later, and a new due date starts over.
+    await notifyOverdueTasks(new Date("2026-11-27T12:00:00Z"));
+    expect(await keys()).toHaveLength(2);
+    await notifyOverdueTasks(new Date("2026-11-28T12:00:00Z"));
     expect(await keys()).toHaveLength(3);
+    await prisma.task.updateMany({ where: { dueOn: day("2026-11-20") }, data: { dueOn: day("2026-11-25") } });
+    await notifyOverdueTasks(new Date("2026-11-26T12:00:00Z"));
+    expect((await keys()).filter((k) => k.endsWith(":2026-11-25:w0"))).toHaveLength(1);
   });
 
-  it("recheck only for DONE", async () => {
+  it("recheck only for DONE, catching up a missed week keyed by its own day", async () => {
     const done = await task({ brandId: east, ownerId: staff, status: "DONE", recheckOn: day("2026-11-24") });
     await task({ brandId: east, ownerId: staff, status: "TODO", recheckOn: day("2026-11-24") });
-    await task({ brandId: east, ownerId: staff, status: "DONE", recheckOn: day("2026-11-23") }); // yesterday in Auckland
+    const missed = await task({ brandId: east, ownerId: staff, status: "DONE", recheckOn: day("2026-11-18") }); // 6 days ago in Auckland
+    await task({ brandId: east, ownerId: staff, status: "DONE", recheckOn: day("2026-11-17") }); // a week ago: too old
+    await task({ brandId: east, ownerId: staff, status: "DONE", recheckOn: day("2026-11-25") }); // tomorrow
     await notifyRechecks(NOW);
-    expect(await keys()).toEqual([`TASK_RECHECK:${staff}:${done.id}:2026-11-24`]);
+    expect(await keys()).toEqual([`TASK_RECHECK:${staff}:${missed.id}:2026-11-18`, `TASK_RECHECK:${staff}:${done.id}:2026-11-24`].sort());
+    // The next day's sweep resends neither; only the one due that day (the 25th in Auckland) is new.
+    await notifyRechecks(new Date("2026-11-24T12:00:00Z"));
+    expect(await keys()).toHaveLength(3);
   });
 
   it("prunes notices older than 90 days", async () => {
@@ -133,17 +143,31 @@ describe("notification list and count", () => {
     expect((await listNotifications(creator, ws)).notifications).toHaveLength(0);
   });
 
-  it("pages 20 at a time, newest first, and counts at most 100", async () => {
+  it("groups unread by kind and business, pages read ones 20 at a time, and counts at most 100", async () => {
     const t = await task({ brandId: utc, ownerId: staff });
     const base = NOW.getTime();
+    // 105 unread assignments on one business, 1 unread review request, 30 read assignments (older).
     await prisma.notification.createMany({
-      data: Array.from({ length: 105 }, (_, i) => ({ userId: staff, workspaceId: ws, brandId: utc, kind: "TASK_ASSIGNED" as const, taskId: t.id, dedupeKey: `p${i}`, createdAt: new Date(base + i * 1000) })),
+      data: [
+        ...Array.from({ length: 105 }, (_, i) => ({ userId: staff, workspaceId: ws, brandId: utc, kind: "TASK_ASSIGNED" as const, taskId: t.id, dedupeKey: `p${i}`, createdAt: new Date(base + i * 1000) })),
+        { userId: staff, workspaceId: ws, brandId: utc, kind: "REVIEW_REQUESTED" as const, taskId: t.id, dedupeKey: "r", createdAt: new Date(base - 1000) },
+        ...Array.from({ length: 30 }, (_, i) => ({ userId: staff, workspaceId: ws, brandId: utc, kind: "TASK_ASSIGNED" as const, taskId: t.id, dedupeKey: `old${i}`, readAt: NOW, createdAt: new Date(base - 100_000 + i * 1000) })),
+      ],
     });
     const first = await listNotifications(staff, ws);
-    expect(first.notifications).toHaveLength(20);
-    expect(first.nextCursor).not.toBeNull();
+    const [assigned, review, ...read] = first.notifications;
+    expect([assigned!.kind, assigned!.count, assigned!.readAt]).toEqual(["TASK_ASSIGNED", 105, null]);
+    expect(assigned!.createdAt).toBe(new Date(base + 104_000).toISOString());
+    expect([review!.kind, review!.count]).toEqual(["REVIEW_REQUESTED", 1]);
+    expect(read).toHaveLength(20);
+    expect(read.every((n) => n.readAt && n.count === 1)).toBe(true);
     const second = await listNotifications(staff, ws, first.nextCursor!);
-    expect(second.notifications[0]!.createdAt < first.notifications.at(-1)!.createdAt).toBe(true);
+    expect(second.notifications).toHaveLength(10);
+    expect(second.notifications[0]!.createdAt < read.at(-1)!.createdAt).toBe(true);
     expect(await countUnread(staff, ws)).toBe(100);
+    // Opening the group marks it read up to the newest it showed; a newer one stays unread.
+    await prisma.notification.create({ data: { userId: staff, workspaceId: ws, brandId: utc, kind: "TASK_ASSIGNED", taskId: t.id, dedupeKey: "late", createdAt: new Date(base + 200_000) } });
+    expect(await markRead(staff, ws, { kind: "TASK_ASSIGNED", brandId: utc, upTo: assigned!.createdAt })).toBe(105);
+    expect(await countUnread(staff, ws)).toBe(2);
   });
 });

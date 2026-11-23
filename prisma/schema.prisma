@@ -1358,6 +1358,8 @@ enum NotificationKind {
   REVIEW_REQUESTED
   TASK_OVERDUE
   TASK_RECHECK
+  TASK_APPROVED
+  TASK_CHANGES_REQUESTED
 }
 
 enum TaskAttachmentRole {
@@ -1542,4 +1544,7 @@ model Notification {
 
   @@index([userId, workspaceId, readAt, createdAt])
   @@index([createdAt])
+  @@index([userId, workspaceId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([taskId])
+  @@index([brandId, workspaceId])
 }

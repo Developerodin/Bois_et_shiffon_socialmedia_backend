@@ -3,7 +3,8 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { taskViewer } from "@/server/tasks/access";
-import { listTasks, todayTasks, type TaskView } from "@/server/tasks/list";
+import { listTasks, todayTasks } from "@/server/tasks/list";
+import type { TaskView } from "@/shared";
 
 /**
  * Lists and Today against Postgres: keyset pages, the Done order, brand-local "today", and a client's page built on the

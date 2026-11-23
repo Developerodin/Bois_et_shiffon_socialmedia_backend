@@ -4,13 +4,11 @@ import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import { brandOwners } from "@/server/services/publishing";
 import { visibleTaskSql, type TaskViewer } from "@/server/tasks/access";
+import { fromCursor, toCursor } from "@/server/tasks/cursor";
 import { TaskError } from "@/server/tasks/errors";
 import { TASK_DTO_INCLUDE, toTaskDtos, type TaskScope } from "@/server/tasks/service";
 import { brandLocalDay, openTaskSql } from "@/server/tasks/sql";
-import { isBlocked, isOverdue, OPEN_STATUSES, TASK_AREAS, type PostRow, type TaskDto, type TodayDto } from "@/shared";
-
-export const TASK_VIEWS = ["mine", "approvals", "due-today", "overdue", "blocked", "open", "done"] as const;
-export type TaskView = (typeof TASK_VIEWS)[number];
+import { DONE_DAYS, isBlocked, isOverdue, OPEN_STATUSES, TASK_AREAS, TASK_VIEWS, type PostRow, type TaskDto, type TaskView, type TodayDto } from "@/shared";
 
 /** GET tasks query (every view but today). `area` may come lower-case from a link (`?area=website`). */
 export const ListQuery = z.object({
@@ -25,10 +23,11 @@ export type ListQuery = z.infer<typeof ListQuery>;
 const PAGE = 50;
 const TODAY_ROWS = 5;
 const POSTS = 20;
-const DONE_DAYS = 30;
 
 const OPEN = openTaskSql;
 const DUE = Prisma.sql`COALESCE(t."dueOn", 'infinity'::date)`;
+/** In review with this person as reviewer: the Approvals view and Today's approvals group. */
+const toReview = (userId: string) => Prisma.sql`t.status = 'IN_REVIEW' AND t."reviewerId" = ${userId}`;
 
 /** The brand's local day at `now` (brandLocalDay). */
 const localToday = (brandId: string, now: Date) =>
@@ -36,25 +35,21 @@ const localToday = (brandId: string, now: Date) =>
 
 const OpenKey = z.object({ due: z.union([z.literal("infinity"), z.iso.date()]), id: z.string().min(1).max(100) });
 const DoneKey = z.object({ completedAt: z.iso.datetime(), id: z.string().min(1).max(100) });
+const OpenCursor = OpenKey.extend({ view: z.enum(TASK_VIEWS) });
+const DoneCursor = DoneKey.extend({ view: z.literal("done") });
 type OpenKey = z.infer<typeof OpenKey>;
 type DoneKey = z.infer<typeof DoneKey>;
 type KeyOf<V extends TaskView> = V extends "done" ? DoneKey : OpenKey;
 
 /** base64url JSON of the view and the last row's sort key; a cursor only works on the view that made it. */
 export function encodeCursor<V extends TaskView>(view: V, key: KeyOf<V>): string {
-  return Buffer.from(JSON.stringify({ view, ...key })).toString("base64url");
+  return toCursor({ view, ...key });
 }
 
 export function decodeCursor<V extends TaskView>(view: V, s: string): KeyOf<V> {
-  let raw: unknown;
-  try {
-    raw = JSON.parse(Buffer.from(s, "base64url").toString("utf8"));
-  } catch {
-    raw = null;
-  }
-  const key = (view === "done" ? DoneKey : OpenKey).safeParse(raw);
-  if (!key.success || (raw as { view?: unknown }).view !== view) throw new TaskError("Invalid cursor", 400);
-  return key.data as KeyOf<V>;
+  const { view: made, ...key } = fromCursor<{ view: TaskView } & (OpenKey | DoneKey)>(view === "done" ? DoneCursor : OpenCursor, s);
+  if (made !== view) throw new TaskError("Invalid cursor", 400);
+  return key as KeyOf<V>;
 }
 
 /**
@@ -67,10 +62,11 @@ export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.S
   if (done) where.push(Prisma.sql`t.status = 'DONE' AND t."completedAt" > ${new Date(now.getTime() - DONE_DAYS * 86_400_000).toISOString()}::timestamp`);
   else where.push(OPEN);
   if (q.view === "mine") where.push(Prisma.sql`t."ownerId" = ${v.userId}`);
-  if (q.view === "approvals") where.push(Prisma.sql`t.status = 'IN_REVIEW' AND t."reviewerId" = ${v.userId}`);
+  if (q.view === "approvals") where.push(toReview(v.userId));
   // The same expression as the ORDER BY and cursor, so the (brand, due, id) index serves the filter too.
+  // Overdue too, so the index scan stops before the undated rows (DUE is infinity there, never before today).
   if (q.view === "due-today") where.push(Prisma.sql`${DUE} = ${localToday(v.brandId, now)}`);
-  if (q.view === "overdue") where.push(Prisma.sql`t."dueOn" < ${localToday(v.brandId, now)}`);
+  if (q.view === "overdue") where.push(Prisma.sql`${DUE} < ${localToday(v.brandId, now)}`);
   if (q.view === "blocked") where.push(Prisma.sql`t."blockedReason" IS NOT NULL`);
   if (q.area) where.push(Prisma.sql`${q.area}::"TaskArea" = ANY(t.areas)`);
   if (q.workProjectId) where.push(Prisma.sql`t."workProjectId" = ${q.workProjectId}`);
@@ -150,8 +146,9 @@ export async function listTasks(scope: TaskScope, v: TaskViewer, q: ListQuery, n
 export async function todayTasks(scope: TaskScope, v: TaskViewer, now = new Date()): Promise<TodayDto> {
   const base = Prisma.sql`FROM "Task" t WHERE ${visibleTaskSql(v)} AND ${OPEN}`;
   const groups = {
-    mine: Prisma.sql`t."ownerId" = ${v.userId} AND t."dueOn" <= ${localToday(v.brandId, now)}`,
-    approvals: Prisma.sql`t.status = 'IN_REVIEW' AND t."reviewerId" = ${v.userId}`,
+    // DUE as the (brand, owner, due, id) index has it, so the scan stops before the undated rows (DUE infinity).
+    mine: Prisma.sql`t."ownerId" = ${v.userId} AND ${DUE} <= ${localToday(v.brandId, now)}`,
+    approvals: toReview(v.userId),
     blockers: Prisma.sql`t."blockedReason" IS NOT NULL AND (t."ownerId" = ${v.userId} OR t."blockedOnId" = ${v.userId})`,
   };
   const names = Object.keys(groups) as (keyof typeof groups)[];
