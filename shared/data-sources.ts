@@ -82,3 +82,18 @@ export type PostInsightDto = {
   final: boolean;
 };
 export type PostInsightsDto = { posts: PostInsightDto[] };
+
+/** PUT data-sources/shopify-orders: turn on the orders sync for one of the brand's Shopify connections. Never a token. */
+export type TurnOnShopifyOrdersBody = { connectionId: string };
+
+/**
+ * Order totals over a range, excluding test and cancelled orders. Money is a decimal string in the entry's currency
+ * (never added across currencies). gross = netSales + discounts; netSales is after discounts, refunds and edits;
+ * refunded is display only (already in netSales and total). Unadjusted: VAT is not taken out.
+ */
+export type SalesTotals = { orders: number; gross: string; discounts: string; netSales: string; total: string; refunded: string };
+export type SalesDay = SalesTotals & { day: string };
+/** One currency: totals for from..to, the same-length period just before it, and its days that had orders. */
+export type SalesCurrency = { currency: string; totals: SalesTotals; previous: SalesTotals; days: SalesDay[] };
+/** GET sales/summary?from&to (brand-local "YYYY-MM-DD", inclusive). Needs crm.read. */
+export type SalesSummaryDto = { currencies: SalesCurrency[] };

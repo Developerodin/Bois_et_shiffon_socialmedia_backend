@@ -9,6 +9,8 @@ import { ReconnectNeeded } from "@/server/services/connections";
  */
 export const SHOPIFY_API_VERSION = "2025-07";
 export const SHOPIFY_SCOPES = ["read_products", "read_inventory"];
+/** Needed on top of SHOPIFY_SCOPES for the Sales tab (orders sync). */
+export const SHOPIFY_ORDER_SCOPES = ["read_orders"];
 export const SHOPIFY_REFUSED = "Shopify refused the access token. Reconnect with a new token.";
 
 const SHOP_DOMAIN = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
@@ -70,6 +72,19 @@ export async function shopifyQuery<T>(
     if (!res.ok || !body?.data || codes.length) throw new Error(`Shopify ${res.status}${codes.length ? `: ${codes.join(", ").slice(0, 300)}` : ""}`);
     return { data: body.data, cost };
   }
+}
+
+/** The shop's name and the scopes its app holds now (a write_ scope includes its read_ one). Throws like shopifyQuery. */
+export async function grantedScopes(shop: string, accessToken: string, signal?: AbortSignal): Promise<{ name: string; scopes: string[] }> {
+  const { data } = await shopifyQuery<{ shop: { name: string }; currentAppInstallation: { accessScopes: { handle: string }[] } }>(
+    shop,
+    accessToken,
+    "{ shop { name } currentAppInstallation { accessScopes { handle } } }",
+    {},
+    signal,
+  );
+  const scopes = new Set(data.currentAppInstallation.accessScopes.map((s) => s.handle.replace(/^write_/, "read_")));
+  return { name: data.shop.name.slice(0, 200), scopes: [...scopes].sort() };
 }
 
 export type ShopifyVariant = {
