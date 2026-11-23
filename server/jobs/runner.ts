@@ -12,6 +12,7 @@ import { AiProviderError } from "@/server/ai/provider";
 import { CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
 import { prisma } from "@/server/db/prisma";
 import { EMAIL_SEND_JOB, sendOutboxEmail } from "@/server/email/outbox";
+import { notifyOverdueTasks, notifyRechecks, pruneNotifications } from "@/server/notifications/daily-tasks";
 import type { Job } from "@prisma/client";
 import { claimNextJob, completeJob, deadLetterJob, enqueueJob, failJob, holdLease, type Lease, releaseJob } from "@/server/jobs/queue";
 import { onShootFailure, PHOTOSHOOT_JOB, runShoot } from "@/server/photoshoot/shoot";
@@ -160,6 +161,20 @@ async function dailySweep() {
   await purgeOldRecordings();
   await purgeStaleUploads();
   await reclaimAbandonedClones();
+  await startDailyAgents();
+  // Last, and each on its own: a failing task step is logged and never blocks the steps above (billing renewals).
+  const now = new Date();
+  for (const [name, step] of [["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications]] as const) {
+    try {
+      await step(now);
+    } catch (e) {
+      console.error(`[jobs] daily sweep: task notifications (${name}) failed`, e);
+    }
+  }
+}
+
+/** Start each daily agent once per brand per UTC day. */
+async function startDailyAgents() {
   const scheduled = AGENTS.filter((a) => a.schedule === "daily");
   if (scheduled.length === 0) return;
   const startOfDay = new Date(new Date().toISOString().slice(0, 10));
