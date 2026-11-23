@@ -127,11 +127,13 @@ export type ProductPageQuery = z.infer<typeof ProductPageQuery>;
 /** stockLabel's "Unknown": the source said nothing about stock. */
 export const STOCK_UNKNOWN = { stockQuantity: null, inStock: null } satisfies Prisma.ProductWhereInput;
 
+/** `q` as a literal inside ILIKE: escaped, a typed %, _ or \ is a character, not a wildcard (Postgres' default ILIKE escape is the backslash). */
+export const likeLiteral = (q: string) => q.replace(/[\\%_]/g, (c) => `\\${c}`);
+
 export function productPageWhere({ q, stock }: Pick<ProductPageQuery, "q" | "stock">): Prisma.ProductWhereInput {
   const and: Prisma.ProductWhereInput[] = [];
-  // Prisma passes `contains` into ILIKE as is: escaped, a typed % or _ is a character, not a wildcard (Postgres'
-  // default ILIKE escape is the backslash).
-  const literal = q.replace(/[\\%_]/g, (c) => `\\${c}`);
+  // Prisma passes `contains` into ILIKE as is, so it gets the escaped literal.
+  const literal = likeLiteral(q);
   if (q) and.push({ OR: [{ title: { contains: literal, mode: "insensitive" } }, { sku: { contains: literal, mode: "insensitive" } }] });
   if (stock === "in") and.push({ OR: [{ stockQuantity: { gt: 0 } }, { inStock: true }] });
   if (stock === "out") and.push({ OR: [{ stockQuantity: { lte: 0 } }, { stockQuantity: null }] }, { OR: [{ inStock: false }, { inStock: null }] });
