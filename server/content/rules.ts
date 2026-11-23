@@ -73,6 +73,8 @@ export function checkDraft(channel: ContentChannel, body: DraftBody): CheckResul
   if (channel === "PINTEREST_PIN") {
     if (!body.pinTitle?.trim()) add("Pin title", "blocker", "Pins need a title.");
     else if (body.pinTitle.length > LIMITS.pinTitleMax) add("Pin title", "warn", `${body.pinTitle.length} characters; keep it under ${LIMITS.pinTitleMax}.`);
+    // Pinterest itself takes 800; 500 keeps the description readable in the feed (the web editor's cap). Not checked at publish.
+    if (caption.length > LIMITS.pinDescriptionMax) add("Pin description", "blocker", `${caption.length} characters; keep it to ${LIMITS.pinDescriptionMax}.`);
   }
   if (channel === "THREADS_POST" && caption.length > CHANNEL_TEXT_MAX.THREADS_POST) add("Threads length", "blocker", `${caption.length} characters; Threads allows ${CHANNEL_TEXT_MAX.THREADS_POST}.`);
   // LinkedIn and X count the whole post, hashtags included (as posted: caption, blank line, hashtags).

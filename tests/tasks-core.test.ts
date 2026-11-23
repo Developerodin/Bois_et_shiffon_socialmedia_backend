@@ -10,11 +10,11 @@ const db = vi.hoisted(() => {
     auditReport: { findFirst: vi.fn() },
     taskChecklistItem: { groupBy: vi.fn(), findMany: vi.fn() },
     taskAttachment: { findMany: vi.fn() },
-    auditEvent: { create: vi.fn() },
+    auditEvent: { create: vi.fn(), findMany: vi.fn(async (): Promise<unknown[]> => []) },
     notification: { createMany: vi.fn() },
     workspaceMember: { findFirst: vi.fn(), findMany: vi.fn() },
-    brandMember: { findFirst: vi.fn(), findMany: vi.fn(async () => []) },
-    role: { findMany: vi.fn(async () => []) },
+    brandMember: { findFirst: vi.fn(), findMany: vi.fn(async (): Promise<unknown[]> => []) },
+    role: { findMany: vi.fn(async (): Promise<unknown[]> => []) },
     $queryRaw: vi.fn(),
     $executeRaw: vi.fn(async () => 0),
     $transaction: vi.fn(),
@@ -167,6 +167,15 @@ describe("getTask", () => {
     expect(dto.checklist).toEqual({ done: 1, total: 3 });
     expect(dto.dueOn).toBe("2026-11-30");
     expect(dto.actions).toContain("cancel");
+  });
+
+  it("whoever sent it for review isn't offered Approve, in the panel or a list row", async () => {
+    // u1 (the viewer) reviews u2's task; u2 and u3 are also staff, so u1 is not sole staff.
+    db.task.findUnique.mockResolvedValue(row({ status: "IN_REVIEW", ownerId: "u2", reviewerId: "u1" }));
+    db.auditEvent.findMany.mockResolvedValueOnce([{ entityId: "t1", actorUserId: "u1" }]);
+    expect((await getTask(scope, v, "t1")).actions).not.toContain("approve");
+    db.auditEvent.findMany.mockResolvedValueOnce([{ entityId: "t1", actorUserId: "u2" }]);
+    expect((await getTask(scope, v, "t1")).actions).toContain("approve");
   });
 
   it("the single-task read returns checklist lines in (position, id) order and attachments with a signed URL", async () => {

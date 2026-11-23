@@ -7,7 +7,7 @@ import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { TEAM_MEMBER } from "@/server/content/person-name";
 import { notifyTx } from "@/server/notifications/tasks";
 import { brandOwners, lockRow, TX } from "@/server/services/publishing";
-import { canBeAssigned, clientCanSee, findVisibleTask, isSoleStaff, lastSubmitter, type TaskViewer } from "@/server/tasks/access";
+import { canBeAssigned, clientCanSee, findVisibleTask, isSoleStaff, lastSubmitters, type TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { TaskError } from "@/server/tasks/errors";
 import { toAttachmentDto } from "@/server/tasks/attachments";
@@ -124,8 +124,14 @@ export async function toTaskDtos(scope: TaskScope, rows: TaskWithLinks[], people
   ]);
   const countOf = new Map(counts.map((c) => [c.taskId, { done: c._count.doneAt, total: c._count._all }]));
   const person = personOf(names);
+  // Four eyes, as runTaskAction enforces it: whoever sent a task for review isn't offered Approve, unless sole staff.
+  const reviewing = rows.filter((r) => r.status === "IN_REVIEW" && r.reviewerId === scope.userId).map((r) => r.id);
+  const sentBy = await lastSubmitters(prisma, reviewing);
+  const selfSent = new Set(reviewing.filter((id) => sentBy.get(id) === scope.userId));
+  const mayApproveOwn = selfSent.size > 0 && (owns ? sole : await isSoleStaff(scope.workspaceId, scope.brandId, scope.userId));
   return rows.map((t) => {
     const actor = actorRole(scope, t, sole);
+    const actions = allowedActions(rowOf(t), actor);
     return {
       id: t.id,
       title: t.title,
@@ -156,7 +162,7 @@ export async function toTaskDtos(scope: TaskScope, rows: TaskWithLinks[], people
       project: t.workProject,
       post: t.contentItem,
       checklist: countOf.get(t.id) ?? { done: 0, total: 0 },
-      actions: allowedActions(rowOf(t), actor),
+      actions: selfSent.has(t.id) && !mayApproveOwn ? actions.filter((x) => x !== "approve") : actions,
     };
   });
 }
@@ -179,11 +185,6 @@ export async function getTask(scope: TaskScope, v: TaskViewer, taskId: string): 
     prisma.taskAttachment.findMany({ where: { taskId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], include: { mediaUpload: { select: { key: true } } } }),
     clientCanSee(prisma, scope, row),
   ]);
-  // Same four-eyes rule runTaskAction enforces: the submitter isn't offered Approve unless they're sole staff.
-  // ponytail: detail only; list rows still carry approve (the panel is where people act on it).
-  if (dto!.actions.includes("approve") && (await lastSubmitter(prisma, taskId)) === scope.userId && !(await isSoleStaff(scope.workspaceId, scope.brandId, scope.userId))) {
-    dto!.actions = dto!.actions.filter((a) => a !== "approve");
-  }
   return { ...dto!, clientVisible, viewerIsClient: v.client, checklistItems: items.map(toChecklistDto), attachments: await Promise.all(attachments.map((a) => toAttachmentDto(a, a.mediaUpload.key))) };
 }
 

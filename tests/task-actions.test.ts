@@ -10,11 +10,11 @@ const db = vi.hoisted(() => {
     taskChecklistItem: { groupBy: vi.fn(), findMany: vi.fn() },
     taskAttachment: { findMany: vi.fn() },
     taskComment: { create: vi.fn() },
-    auditEvent: { create: vi.fn(), findFirst: vi.fn() },
+    auditEvent: { create: vi.fn(), findMany: vi.fn(async (): Promise<unknown[]> => []) },
     notification: { createMany: vi.fn() },
     workspaceMember: { findFirst: vi.fn(), findMany: vi.fn() },
-    brandMember: { findFirst: vi.fn(), findMany: vi.fn(async () => []) },
-    role: { findMany: vi.fn(async () => []) },
+    brandMember: { findFirst: vi.fn(), findMany: vi.fn(async (): Promise<unknown[]> => []) },
+    role: { findMany: vi.fn(async (): Promise<unknown[]> => []) },
     $queryRaw: vi.fn(),
     $executeRaw: vi.fn(async () => 0),
     $transaction: vi.fn(),
@@ -146,9 +146,9 @@ describe("review", () => {
 
   it("approve and requestChanges tell whoever sent it for review, else the owner", async () => {
     db.task.findUnique.mockResolvedValue(row({ status: "IN_REVIEW", ownerId: "u2", reviewerId: "u1" }));
-    db.auditEvent.findFirst.mockResolvedValueOnce({ actorUserId: "u3" });
+    db.auditEvent.findMany.mockResolvedValueOnce([{ entityId: "t1", actorUserId: "u3" }]);
     await runTaskAction(scope, v, "t1", { action: "approve" });
-    db.auditEvent.findFirst.mockResolvedValueOnce(null);
+    db.auditEvent.findMany.mockResolvedValueOnce([]);
     db.auditEvent.create.mockResolvedValue({ id: "a2" });
     await runTaskAction(scope, v, "t1", { action: "requestChanges", reason: "Wrong photo" });
     expect(notices()).toEqual([

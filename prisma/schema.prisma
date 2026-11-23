@@ -1432,6 +1432,10 @@ model Task {
   @@unique([brandId, requestId])
   @@index([workProjectId, status])
   @@index([contentItemId])
+  @@index([ownerId])
+  @@index([reviewerId])
+  @@index([blockedOnId])
+  @@index([createdById])
 }
 
 model TaskChecklistItem {

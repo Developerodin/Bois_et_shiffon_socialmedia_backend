@@ -146,14 +146,21 @@ export function commentVisibility(v: TaskViewer): Prisma.TaskCommentWhereInput {
 }
 
 /** Nobody else on the brand reads tasks as staff (client reviewers don't count), so no four-eyes rule can apply. */
-/** Who last sent the task for review (from the audit trail), or null if nobody has. */
-export async function lastSubmitter(tx: Db, taskId: string): Promise<string | null> {
-  const sent = await tx.auditEvent.findFirst({
-    where: { entityType: "Task", entityId: taskId, action: "task.submitForReview" },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { actorUserId: true },
+/** Who last sent each task for review (from the audit trail); tasks nobody sent are missing. */
+export async function lastSubmitters(tx: Db, taskIds: string[]): Promise<Map<string, string | null>> {
+  if (!taskIds.length) return new Map();
+  const sent = await tx.auditEvent.findMany({
+    where: { entityType: "Task", entityId: { in: taskIds }, action: "task.submitForReview" },
+    orderBy: [{ entityId: "asc" }, { createdAt: "desc" }, { id: "desc" }],
+    distinct: ["entityId"],
+    select: { entityId: true, actorUserId: true },
   });
-  return sent?.actorUserId ?? null;
+  return new Map(sent.map((s) => [s.entityId, s.actorUserId]));
+}
+
+/** Who last sent the task for review, or null if nobody has. */
+export async function lastSubmitter(tx: Db, taskId: string): Promise<string | null> {
+  return (await lastSubmitters(tx, [taskId])).get(taskId) ?? null;
 }
 
 export async function isSoleStaff(workspaceId: string, brandId: string, userId: string) {

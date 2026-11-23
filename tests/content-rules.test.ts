@@ -24,6 +24,9 @@ describe("content rules", () => {
     expect(overallOf(checkDraft("FACEBOOK_POST", { ...good, caption: "" }))).toBe("BLOCKER");
     expect(overallOf(checkDraft("INSTAGRAM_CAROUSEL", { ...good, slides: ["a"] }))).toBe("BLOCKER");
     expect(checkDraft("PINTEREST_PIN", good).map((x) => x.check)).toContain("Pin title");
+    const pin = { ...good, pinTitle: "Oak table", caption: `${"Oak, oiled by hand. ".repeat(30)}Save it.` };
+    expect(checkDraft("PINTEREST_PIN", pin).find((x) => x.check === "Pin description")?.status).toBe("blocker");
+    expect(checkDraft("PINTEREST_PIN", { ...pin, caption: "Oak, oiled by hand. Save it." }).map((x) => x.check)).not.toContain("Pin description");
   });
 
   it("X caption over 280 flagged", () => {
