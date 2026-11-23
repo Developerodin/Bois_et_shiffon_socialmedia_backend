@@ -113,6 +113,25 @@ describe("taskFromFinding", () => {
     expect({ id: task.id, existed }).toEqual({ id: "t8", existed: true });
   });
 
+  it("a positional finding only reuses an open task made from the same report", async () => {
+    db.auditReport.findFirst.mockResolvedValue(report({ kind: "GEO", findings: [finding({ id: "content-1" })] }));
+    await taskFromFinding(scope, v(), "r1", "content-1");
+    expect(db.task.findFirst.mock.calls[0]![0].where).toMatchObject({ findingKind: "GEO", findingId: "content-1", auditReportId: "r1" });
+    expect(db.task.create).toHaveBeenCalled();
+  });
+
+  it("a stable finding reuses an open task from any report", async () => {
+    await taskFromFinding(scope, v(), "r1", "title-missing");
+    expect(db.task.findFirst.mock.calls[0]![0].where).not.toHaveProperty("auditReportId");
+  });
+
+  it("a positional finding held by an older report's open task → 409", async () => {
+    db.auditReport.findFirst.mockResolvedValue(report({ kind: "GEO", findings: [finding({ id: "content-1" })] }));
+    db.task.create.mockRejectedValue(new Prisma.PrismaClientKnownRequestError("Unique", { code: "P2002", clientVersion: "x" }));
+    const err = await taskFromFinding(scope, v(), "r1", "content-1").catch((e) => e);
+    expect(err).toMatchObject({ status: 409 });
+  });
+
   it("another brand's report → 404", async () => {
     db.auditReport.findFirst.mockResolvedValue(null);
     const err = await taskFromFinding(scope, v(), "r9", "title-missing").catch((e) => e);
@@ -195,6 +214,20 @@ describe("clearFindings", () => {
     await clearFindings(payload);
     expect(updateIds()).toBeUndefined();
     expect(db.taskComment.createMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps PageSpeed tasks when PageSpeed didn't run", async () => {
+    db.auditReport.findFirst.mockResolvedValue(report({ findings: [], metrics: { pagesChecked: ["https://x.com/"], pageSpeed: null, pageSpeedError: "quota" } }));
+    db.task.findMany.mockResolvedValue([candidate({ findingId: "pagespeed-performance" }), candidate({ id: "t2", findingId: "sitemap-missing" })]);
+    await clearFindings(payload);
+    expect(updateIds()).toEqual(["t2"]);
+  });
+
+  it("closes PageSpeed tasks when PageSpeed ran and no longer finds them", async () => {
+    db.auditReport.findFirst.mockResolvedValue(report({ findings: [], metrics: { pagesChecked: ["https://x.com/"], pageSpeed: { performance: 95, seo: 100 } } }));
+    db.task.findMany.mockResolvedValue([candidate({ findingId: "pagespeed-performance" })]);
+    await clearFindings(payload);
+    expect(updateIds()).toEqual(["t1"]);
   });
 
   it("a report that is gone does nothing", async () => {

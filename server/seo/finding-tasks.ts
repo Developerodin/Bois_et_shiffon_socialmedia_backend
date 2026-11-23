@@ -10,6 +10,12 @@ import { isUniqueViolation, TaskError } from "@/server/tasks/errors";
 import { getTask, type TaskScope } from "@/server/tasks/service";
 import { OPEN_TASK_STATUSES, safeHttpUrl, type TaskDto } from "@/shared";
 
+/**
+ * PageSpeed findings (`pagespeed-*`) exist only when PageSpeed ran; a report saved without it (metrics.pageSpeed null)
+ * says nothing about them, so their tasks stay open.
+ */
+const notMeasured = (metrics: Prisma.JsonValue, findingId: string) => findingId.startsWith("pagespeed-") && (metrics as { pageSpeed?: unknown } | null)?.pageSpeed == null;
+
 /** Runs after each SEO report is saved: closes the tasks of findings that audit no longer reports. */
 export const FINDING_CLEAR_JOB = "tasks.clear-findings";
 
@@ -48,8 +54,10 @@ export async function taskFromFinding(scope: TaskScope, v: TaskViewer, reportId:
   if (!report) throw new TaskError("Report not found", 404);
   const finding = findingsOf(report.findings).find((f) => f.id === findingId);
   if (!finding) throw new TaskError("Finding not found", 404);
+  // A positional id names another finding in each report: only a task made from this same report is that finding's.
+  const sameReport = isStableFindingId(report.kind, findingId) ? {} : { auditReportId: report.id };
   const openTask = () =>
-    prisma.task.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, findingKind: report.kind, findingId, status: { in: OPEN } }, select: { id: true } });
+    prisma.task.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, findingKind: report.kind, findingId, status: { in: OPEN }, ...sameReport }, select: { id: true } });
   const found = await openTask();
   if (found) return { task: await getTask(scope, v, found.id), existed: true };
   try {
@@ -65,7 +73,8 @@ export async function taskFromFinding(scope: TaskScope, v: TaskViewer, reportId:
   } catch (e) {
     if (!isUniqueViolation(e)) throw e;
     const winner = await openTask();
-    if (!winner) throw e;
+    // The index is per (kind, id), so an older report's open task with the same positional id blocks a new one.
+    if (!winner) throw new TaskError("An open task from an earlier audit already uses this finding's number. Close it first.", 409, "task.findingTaken");
     return { task: await getTask(scope, v, winner.id), existed: true };
   }
 }
@@ -91,7 +100,7 @@ export async function clearFindings(payload: unknown): Promise<void> {
     where: { workspaceId, brandId, findingKind: report.kind, findingId: { not: null }, status: { in: OPEN } },
     select: { id: true, title: true, status: true, findingId: true, findingUrls: true },
   });
-  const cleared = open.filter((t) => isStableFindingId(report.kind, t.findingId!) && !present.has(t.findingId!) && t.findingUrls.every((u) => pages.has(u)));
+  const cleared = open.filter((t) => isStableFindingId(report.kind, t.findingId!) && !notMeasured(report.metrics, t.findingId!) && !present.has(t.findingId!) && t.findingUrls.every((u) => pages.has(u)));
   if (!cleared.length) return;
   const toClose = cleared.filter((t) => t.status !== "IN_REVIEW").map((t) => t.id);
   const inReview = cleared.filter((t) => t.status === "IN_REVIEW").map((t) => t.id);
