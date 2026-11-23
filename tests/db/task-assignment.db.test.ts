@@ -11,7 +11,8 @@ import { SYSTEM_ROLES } from "@/server/auth/permissions.catalog";
 import { countUnread, listNotifications } from "@/server/notifications/list";
 import { changeProjectRole } from "@/server/services/project-members";
 import { hashToken } from "@/server/auth/tokens";
-import { acceptInvitation } from "@/server/services/accounts";
+import { acceptInvitation, previewInvitation } from "@/server/services/accounts";
+import { provisionGoogleUser } from "@/server/services/google-signup";
 import { changeMemberRole, createRole, deleteRole, updateRole } from "@/server/services/workspace-admin";
 import { taskViewer, visibleTaskSql, visibleTasksAcrossSql } from "@/server/tasks/access";
 import { runTaskAction } from "@/server/tasks/actions";
@@ -218,10 +219,25 @@ describe("roles", () => {
     const refused = { status: 409, message: "This invitation is no longer valid. Ask for a new one." };
     await invite("raised@task-assignment.test", role.admin!, user.cus!);
     await expect(acceptInvitation({ token: "raised@task-assignment.test", password: "a-long-password-1" })).rejects.toMatchObject(refused);
+    // The invite page says so before the person picks a password.
+    await expect(previewInvitation("raised@task-assignment.test")).rejects.toMatchObject(refused);
     await invite("left@task-assignment.test", role.member!, gone);
     await expect(acceptInvitation({ token: "left@task-assignment.test", password: "a-long-password-1" })).rejects.toMatchObject(refused);
     await invite("fine@task-assignment.test", role.member!, user.admin!);
     expect(await acceptInvitation({ token: "fine@task-assignment.test", password: "a-long-password-1" })).toMatchObject({ workspaceId: ws });
+  });
+
+  it("Google sign-up accepts only the invitations whose inviter could still give the role", async () => {
+    const gone = (await prisma.user.create({ data: { email: "gone-g@task-assignment.test" } })).id;
+    const email = "google@task-assignment.test";
+    const invite = (roleId: string, invitedByUserId: string, tokenHash: string) =>
+      prisma.invitation.create({ data: { workspaceId: ws, email, roleId, invitedByUserId, tokenHash, expiresAt: new Date(Date.now() + 86_400_000) } });
+    const stale = await invite(role.member!, gone, "h-g-stale");
+    const fine = await invite(role.member!, user.admin!, "h-g-fine");
+    const g = await prisma.user.create({ data: { email, name: "G" } });
+    expect((await provisionGoogleUser(g)).joined).toBe(1);
+    expect((await prisma.invitation.findUniqueOrThrow({ where: { id: fine.id } })).acceptedAt).not.toBeNull();
+    expect((await prisma.invitation.findUniqueOrThrow({ where: { id: stale.id } })).acceptedAt).toBeNull();
   });
 
   it("the migration moves Commercial owner holders, invitations and tasks to Manager and drops the role", async () => {

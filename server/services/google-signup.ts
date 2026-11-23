@@ -11,14 +11,17 @@ import { ensurePersonalWorkspace, inviterCanStillGive, joinFromInvitation } from
  */
 export async function provisionGoogleUser(user: { id: string; email: string; name?: string | null }) {
   const email = user.email.trim().toLowerCase();
+  // Inviter checks read outside the transaction (they hit the DB through the shared client); the claim below
+  // still only takes an invitation nobody else accepted or revoked in the meantime.
+  const open = await prisma.invitation.findMany({
+    where: { email, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
+    include: { role: true },
+  });
+  const invites: typeof open = [];
+  for (const inv of open) if (await inviterCanStillGive(inv)) invites.push(inv);
   return prisma.$transaction(async (tx) => {
-    const invites = await tx.invitation.findMany({
-      where: { email, acceptedAt: null, revokedAt: null, expiresAt: { gt: new Date() } },
-      include: { role: true },
-    });
     let joined = 0;
     for (const inv of invites) {
-      if (!(await inviterCanStillGive(inv))) continue;
       const claimed = await tx.invitation.updateMany({
         where: { id: inv.id, acceptedAt: null, revokedAt: null },
         data: { acceptedAt: new Date() },

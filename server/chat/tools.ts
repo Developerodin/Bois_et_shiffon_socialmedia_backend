@@ -1,10 +1,12 @@
-import type { Prisma } from "@prisma/client";
+import { ContentChannel, type Prisma } from "@prisma/client";
 import { tool } from "ai";
 import { z } from "zod";
 import { ProductPageQuery, productPageWhere, STOCK_UNKNOWN } from "@/server/catalog/products";
-import { stockLabel, type CatalogSync } from "@/shared";
+import { OPEN_STATUSES, STATUS_GROUPS, stockLabel, type CatalogSync } from "@/shared";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
+import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
+import { isTimeZone, wallTime } from "@/server/content/offer-checks";
 import { prisma } from "@/server/db/prisma";
 import { latestAuditReports } from "@/server/services/audit-reports";
 import { CONTEXT_DOC_KINDS, listContextDocs } from "@/server/services/context-docs";
@@ -12,10 +14,23 @@ import { CONTEXT_DOC_KINDS, listContextDocs } from "@/server/services/context-do
 export type ChatScope = { workspaceId: string; brandId: string; userId: string };
 
 const KINDS = CONTEXT_DOC_KINDS.map((k) => k.kind) as [string, ...string[]];
+/** listPosts' filters → the statuses each reads (the shared groups, so chat counts match the apps). */
+const POST_FILTERS = {
+  upcoming: [...OPEN_STATUSES],
+  "awaiting-approval": [...STATUS_GROUPS.awaiting],
+  published: [...STATUS_GROUPS.published],
+} as const;
+// Titles are data written by agents and people: one line, no control characters, short.
+// Zero-width and bidi characters go too, so a title can't hide or reorder text.
+const cleanTitle = (t: string) =>
+  t.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+/g, " ").trim().slice(0, 100) || "(untitled)";
+// A post whose time passed this recently may still be publishing: not overdue yet.
+const OVERDUE_GRACE_MS = 15 * 60_000;
+
 const RUNNABLE = AGENTS.filter((a) => a.key !== "systems-check" && !a.internal).map((a) => a.key) as [string, ...string[]];
 
 /**
- * What the CMO chat may do. Read-only access to this brand's documents, reports, products and agents, and
+ * What the CMO chat may do. Read-only access to this brand's documents, reports, products, posts and agents, and
  * offering an agent run (the person starts it with a button; same permission check as the Run button). Deliberately no tool that
  * publishes, posts, replies, spends or approves: drafts only, people decide (design §4.4).
  */
@@ -181,12 +196,65 @@ export function chatTools(scope: ChatScope) {
       },
     }),
 
+    // ponytail: filters by [workspaceId, brandId, status] and sorts the brand's matching posts in memory; add an index on (brandId, status, scheduledFor) if a brand
+    // reaches ~100k posts.
+    listPosts: tool({
+      description:
+        "List this brand's posts (titles, channel, status, date in the brand's time zone): upcoming = every open post, overdue ones included and flagged; awaiting-approval; or published. Use before saying what is planned or scheduled.",
+      // Saved threads are validated against this schema: it may only widen (new optional fields, higher caps), never narrow.
+      inputSchema: z.object({
+        channel: z.nativeEnum(ContentChannel).optional(),
+        status: z.enum(["upcoming", "awaiting-approval", "published"]).default("upcoming"),
+        limit: z.number().int().min(1).max(20).default(10),
+      }),
+      execute: async ({ channel, status, limit }) => {
+        if (!(await can("brand.read"))) return denied("the posts");
+        // Scope from the session (never the model); CANCELLED is in no filter.
+        const where: Prisma.ContentItemWhereInput = {
+          workspaceId: scope.workspaceId,
+          brandId: scope.brandId,
+          status: { in: [...POST_FILTERS[status]] },
+          ...(channel ? { channel } : {}),
+        };
+        const dir = status === "published" ? "desc" : "asc";
+        const [rows, counts, profile] = await Promise.all([
+          prisma.contentItem.findMany({
+            where,
+            orderBy: [{ scheduledFor: { sort: dir, nulls: "last" } }, { id: dir }],
+            take: limit + 1,
+            select: { title: true, channel: true, status: true, scheduledFor: true },
+          }),
+          prisma.contentItem.groupBy({ by: ["status"], where, _count: { _all: true } }),
+          prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { timeZone: true } }),
+        ]);
+        const timeZone = profile?.timeZone && isTimeZone(profile.timeZone) ? profile.timeZone : DEFAULT_TIME_ZONE;
+        const now = new Date();
+        // REVIEWED is a published post the team has looked back on: shown as Published.
+        const shown = (s: string) => ((STATUS_GROUPS.published as readonly string[]).includes(s) ? "PUBLISHED" : s);
+        const byStatus: Record<string, number> = {};
+        for (const c of counts) byStatus[shown(c.status)] = (byStatus[shown(c.status)] ?? 0) + c._count._all;
+        return {
+          now: wallTime(now, timeZone),
+          timeZone,
+          posts: rows.slice(0, limit).map((p) => ({
+            title: cleanTitle(p.title),
+            channel: p.channel,
+            status: shown(p.status),
+            when: p.scheduledFor ? wallTime(p.scheduledFor, timeZone) : null,
+            ...(status !== "published" && p.scheduledFor && p.scheduledFor.getTime() < now.getTime() - OVERDUE_GRACE_MS ? { overdue: true } : {}),
+          })),
+          byStatus,
+          more: rows.length > limit,
+        };
+      },
+    }),
+
     // Proposes, never starts: the chat shows a Start button and the person presses it (the Run button's own route).
     // Text injected into a web page or document can steer the model into calling a tool; it can't press a button.
     // (Named startAgent still, so conversations saved before this change keep validating.)
     startAgent: tool({
       description:
-        "Offer to start an agent run for this brand (research = re-read the website and redraft the documents; seo = website audit; geo = AI-visibility check). The person sees a Start button and starts it themselves; nothing runs until they press it. Only when the person asks for it.",
+        "Offer to start an agent run for this brand (research = re-read the website and redraft the documents; seo = website audit; geo = AI-visibility check; scout = find post ideas; planner = turn the ideas the team shortlisted on the Content calendar into dated post slots, and does nothing without shortlisted ideas; the Brief writer and Creator that draft them are separate runs). The person sees a Start button and starts it themselves; nothing runs until they press it. Only when the person asks for it.",
       inputSchema: z.object({ agentKey: z.enum(RUNNABLE) }),
       execute: async ({ agentKey }) => {
         if (!(await can("agents.run"))) return { proposed: false, reason: "Your role can't run agents. Ask an owner or admin." };

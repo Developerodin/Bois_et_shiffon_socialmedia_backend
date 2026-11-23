@@ -162,12 +162,15 @@ export async function getProject(scope: TaskScope, v: TaskViewer, projectId: str
   };
 }
 
-/** A new project (tasks.manage). With a requestId, a repeat returns the project the first request made. */
-/** Sharing a project with clients, archiving it or giving it to someone else needs tasks.all (403 otherwise). */
+/**
+ * Sharing a project with clients, archiving it or giving it to someone else needs tasks.all (403 otherwise). Without
+ * it, the owner may be set to yourself only (and, on an edit, cleared only from yourself).
+ */
 function adminOnlyUnless(scope: TaskScope, allowed: boolean) {
   if (!allowed && !seesAllTasks(scope)) throw new TaskError("Only an admin can share, archive or hand over a project.", 403);
 }
 
+/** A new project (tasks.manage). With a requestId, a repeat returns the project the first request made. */
 export async function createProject(scope: TaskScope, v: TaskViewer, input: WorkProjectInput): Promise<WorkProjectDetailDto> {
   adminOnlyUnless(scope, !input.clientVisible && input.status !== "ARCHIVED" && (!input.ownerId || input.ownerId === scope.userId));
   const projectId = await prisma.$transaction(async (tx) => {
@@ -195,7 +198,7 @@ export async function createProject(scope: TaskScope, v: TaskViewer, input: Work
 
 /**
  * Edit a project (tasks.manage); status ARCHIVED archives it (no hard delete). Only changed fields are written and
- * checked. Sharing it with clients, archiving it or changing its owner needs tasks.all (else 403). Unsharing it (clientVisible off) is refused while a client reviews, owns or unblocks an open task in it,
+ * checked. Sharing it with clients, archiving it or changing its owner needs tasks.all (else 403; adminOnlyUnless). Unsharing it (clientVisible off) is refused while a client reviews, owns or unblocks an open task in it,
  * since they would lose sight of that task.
  * ponytail: the check reads the project's tasks under the project lock, not each task's lock; a client made reviewer in
  * the same instant can slip through (they then keep the task through reviewerId anyway).
@@ -211,7 +214,8 @@ export async function patchProject(scope: TaskScope, v: TaskViewer, projectId: s
     const changed = Object.keys(data).filter((k) => !same(k));
     if (!changed.length) return;
     const write = Object.fromEntries(changed.map((k) => [k, data[k]]));
-    adminOnlyUnless(scope, !("clientVisible" in write || "ownerId" in write || write.status === "ARCHIVED"));
+    const ownerOk = !("ownerId" in write) || write.ownerId === scope.userId || (write.ownerId === null && current.ownerId === scope.userId);
+    adminOnlyUnless(scope, ownerOk && !("clientVisible" in write) && write.status !== "ARCHIVED");
     await checkProjectLinks(tx, scope, write as { campaignId?: string | null; ownerId?: string | null });
     if (write.clientVisible === false) {
       const clients = await tx.brandMember.findMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, role: CLIENT_GRANT_WHERE }, select: { userId: true } });
