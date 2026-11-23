@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
+import { Prisma } from "@prisma/client";
 
 vi.hoisted(() => {
   process.env.STORAGE_ACCESS_KEY_ID = "test";
@@ -208,5 +209,27 @@ describe("purging stale uploads", () => {
     expect(m.findMany.mock.calls[2][0].where).toMatchObject({ status: "VERIFIED", productId: null });
     // the key goes in as a parameter, with LIKE wildcards escaped
     expect(m.raw.mock.calls[0].slice(1)).toContain("%w1/b1/used\\_1.jpg%");
+  });
+
+  it("purge skips uploads a task uses", async () => {
+    m.findMany.mockResolvedValue([]);
+    await purgeStaleUploads(now);
+    expect(m.findMany.mock.calls[1][0].where).toMatchObject({ status: "VERIFIED", productId: null, taskAttachments: { none: {} } });
+  });
+
+  it("purge survives a row attached mid-run", async () => {
+    m.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { id: "v1", brandId: "b1", key: "w1/b1/attached.jpg" },
+        { id: "v2", brandId: "b1", key: "w1/b1/unused.jpg" },
+      ])
+      .mockResolvedValueOnce([]);
+    m.raw.mockResolvedValue([]);
+    // v1 got a task attachment after the read: the Restrict FK refuses its delete.
+    m.del.mockRejectedValueOnce(new Prisma.PrismaClientKnownRequestError("FK", { code: "P2003", clientVersion: "x" })).mockResolvedValue({});
+    expect(await purgeStaleUploads(now)).toBe(1);
+    // The attached upload's file is kept; only the unused one's file goes.
+    expect(m.delMedia.mock.calls.map((c) => c[0])).toEqual(["w1/b1/unused.jpg"]);
   });
 });

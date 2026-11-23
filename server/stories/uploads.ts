@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import sharp from "sharp";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { PublishingError } from "@/server/services/publishing";
@@ -143,16 +144,23 @@ async function checkVideo(bytes: Uint8Array, ext: string): Promise<Checked> {
 const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 /**
- * Daily: unfinished or rejected uploads, and verified files nothing uses (no product, no story version naming them),
- * after 7 days. Files go first; a failed delete leaves an orphaned file, never a dangling row.
+ * Daily: unfinished or rejected uploads, and verified files nothing uses (no product, no task attachment, no story
+ * version naming them), after 7 days. The row goes first, then the file: a failed file delete leaves an orphaned file,
+ * never a dangling row, and a row a task attached after the read (the Restrict FK refuses it, P2003) is skipped with
+ * its file kept, so the sweep never stops on it.
  * ponytail: the "used" check scans the brand's version bodies per candidate; fine at today's volume.
  */
 export async function purgeStaleUploads(now = Date.now()) {
   const before = new Date(now - STALE_DAYS * 86_400_000);
   let removed = 0;
   const drop = async (r: { id: string; key: string }) => {
+    try {
+      await prisma.mediaUpload.delete({ where: { id: r.id } });
+    } catch (e) {
+      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2003") return;
+      throw e;
+    }
     await deleteMedia(r.key).catch(() => {});
-    await prisma.mediaUpload.delete({ where: { id: r.id } });
     removed++;
   };
   for (let after: string | undefined; ; ) {
@@ -167,7 +175,7 @@ export async function purgeStaleUploads(now = Date.now()) {
   }
   for (let after: string | undefined; ; ) {
     const rows = await prisma.mediaUpload.findMany({
-      where: { status: "VERIFIED", productId: null, createdAt: { lt: before }, ...(after ? { id: { gt: after } } : {}) },
+      where: { status: "VERIFIED", productId: null, taskAttachments: { none: {} }, createdAt: { lt: before }, ...(after ? { id: { gt: after } } : {}) },
       orderBy: { id: "asc" },
       take: 500,
     });
