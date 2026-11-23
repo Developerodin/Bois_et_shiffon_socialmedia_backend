@@ -38,6 +38,12 @@ export async function accessToken(conn: IntegrationConnection): Promise<string> 
   // Shopify Admin tokens don't expire and have no refresh.
   if (!expiresAt || expiresAt - Date.now() > ahead || conn.provider === "SHOPIFY") return creds.accessToken;
   const adapter = PROVIDERS[conn.provider];
+  // Can't be refreshed (Meta Ads): used until it actually expires, then only a person reconnecting brings it back.
+  if (adapter.noRefresh) {
+    if (expiresAt > Date.now()) return creds.accessToken;
+    await markReconnect(conn.id, `Access expired. Reconnect ${conn.displayName}.`);
+    throw new ReconnectNeeded(`${conn.displayName}'s access expired`);
+  }
   const cfg = providerConfig(conn.provider);
   const expired = expiresAt <= Date.now();
   try {
@@ -63,12 +69,29 @@ export async function accessToken(conn: IntegrationConnection): Promise<string> 
   }
 }
 
-/** Daily: refresh every token that expires within 3 days, so posts never meet an expired one. */
+const WARN_AHEAD_MS = 7 * 86_400_000;
+
+/**
+ * Daily: refresh every token that expires within 3 days, so posts never meet an expired one. Tokens that can't be
+ * refreshed (noRefresh: Meta Ads) get a "Reconnect … before <date>" note from 7 days ahead, status unchanged; once
+ * expired, accessToken marks them Needs reconnect (so an ad sync then stops with reason "reconnect", as expected).
+ */
 export async function refreshExpiringTokens() {
+  const now = Date.now();
   const soon = await prisma.integrationConnection.findMany({
-    where: { status: "ACTIVE", tokenExpiresAt: { lt: new Date(Date.now() + REFRESH_AHEAD_MS) } },
+    where: { status: "ACTIVE", tokenExpiresAt: { lt: new Date(now + REFRESH_AHEAD_MS) } },
   });
   for (const c of soon) await accessToken(c).catch(() => {});
+  const noRefresh = (Object.keys(PROVIDERS) as OAuthProvider[]).filter((p) => PROVIDERS[p].noRefresh);
+  const ending = await prisma.integrationConnection.findMany({
+    where: { status: "ACTIVE", provider: { in: noRefresh }, tokenExpiresAt: { gt: new Date(now), lt: new Date(now + WARN_AHEAD_MS) } },
+    select: { id: true, provider: true, tokenExpiresAt: true },
+  });
+  for (const c of ending) {
+    // Fixed text: the label and a UTC date, nothing from the provider.
+    const lastError = `Reconnect ${PROVIDERS[c.provider as OAuthProvider].label} before ${c.tokenExpiresAt!.toISOString().slice(0, 10)}.`;
+    await prisma.integrationConnection.updateMany({ where: { id: c.id, status: "ACTIVE" }, data: { lastError } });
+  }
 }
 
 /** OAuth providers sign in through the platform; Shopify is connected with a pasted Admin API token ("token"). */
