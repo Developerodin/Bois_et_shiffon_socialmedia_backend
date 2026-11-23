@@ -22,7 +22,7 @@ export async function PATCH(request: Request, context: { params: Promise<BrandRo
     if (websiteUrl) await assertPublicUrl(websiteUrl);
     const before = await prisma.brand.findFirstOrThrow({ where: { id: scope.brandId, workspaceId: scope.workspaceId }, include: { profile: true } });
     await prisma.$transaction([
-      prisma.brand.update({ where: { id: before.id }, data: { displayName } }),
+      prisma.brand.update({ where: { id: before.id }, data: { displayName, ...(displayName !== before.displayName ? { nameGuessed: false } : {}) } }),
       ...(websiteUrl
         ? [prisma.brandProfile.upsert({ where: { brandId: before.id }, create: { brandId: before.id, workspaceId: scope.workspaceId, websiteUrl }, update: { websiteUrl } })]
         : []),

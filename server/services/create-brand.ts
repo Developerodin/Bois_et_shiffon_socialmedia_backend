@@ -76,6 +76,7 @@ export async function createBrandWithResearch(
           workspaceId,
           slug: i === 0 ? base : `${base}-${i + 1}`,
           displayName,
+          nameGuessed: !input.displayName && !place?.name,
           profile: { create: { websiteUrl, goal: input.goal, about, location: location?.slice(0, 120), place: place ?? undefined } },
           // Every business starts with one project named after it. requestId marks it (client ids are UUIDs, so they
           // never collide); migration 20261124100000_brand_default_project gave existing businesses the same one.

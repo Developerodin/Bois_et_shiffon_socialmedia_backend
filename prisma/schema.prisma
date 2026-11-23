@@ -180,6 +180,9 @@ model Brand {
   workspaceId String
   slug        String
   displayName String
+  /// The name was guessed from the web address, not typed or picked by a person: Research may replace it with the
+  /// name the site itself uses. Any rename by a person clears it.
+  nameGuessed Boolean     @default(false)
   status      BrandStatus @default(ACTIVE)
   archivedAt  DateTime?
   createdAt   DateTime    @default(now())
