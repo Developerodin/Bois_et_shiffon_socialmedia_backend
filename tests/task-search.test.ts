@@ -119,6 +119,15 @@ describe("searchBrand", () => {
     expect(text(sqlFor("Campaign")!)).toContain(`"archivedAt" IS NULL`);
   });
 
+  it("kind=post reads posts only, on its own limit", async () => {
+    db.$queryRaw.mockResolvedValue([{ id: "c1", title: "Menu launch" }]);
+    const res = await searchGet(new Request("http://x/api/search?q=menu&kind=post"), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) });
+    expect(await res.json()).toEqual({ tasks: [], projects: [], posts: [{ kind: "post", id: "c1", title: "Menu launch" }], products: [], campaigns: [] });
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(text(sqlFor("ContentItem")!)).toContain(`<> 'CANCELLED'`);
+    expect(m.hit).toHaveBeenCalledWith("search.posts:u1", 30, 60_000);
+  });
+
   it("no brand.read → 403", async () => {
     scope = scopeOf([]);
     expect((await get("menu")).status).toBe(403);
