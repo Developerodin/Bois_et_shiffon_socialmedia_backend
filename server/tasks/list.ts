@@ -7,7 +7,7 @@ import { brandOwners } from "@/server/services/publishing";
 import { visibleTaskSql, type TaskViewer } from "@/server/tasks/access";
 import { TaskError } from "@/server/tasks/errors";
 import { TASK_DTO_INCLUDE, toTaskDtos, type TaskScope } from "@/server/tasks/service";
-import { isBlocked, isOverdue, OPEN_STATUSES, OPEN_TASK_STATUSES, TASK_AREAS, type TaskDto, type TodayDto } from "@/shared";
+import { isBlocked, isOverdue, OPEN_STATUSES, OPEN_TASK_STATUSES, TASK_AREAS, type PostRow, type TaskDto, type TodayDto } from "@/shared";
 
 export const TASK_VIEWS = ["mine", "approvals", "due-today", "overdue", "blocked", "open", "done"] as const;
 export type TaskView = (typeof TASK_VIEWS)[number];
@@ -21,9 +21,6 @@ export const ListQuery = z.object({
   cursor: z.string().min(1).max(500).optional(),
 });
 export type ListQuery = z.infer<typeof ListQuery>;
-
-/** A post of yours that needs action, listed with view=mine (first page). */
-export type PostRow = { id: string; title: string; channel: string; status: string; scheduledFor: string | null };
 
 const PAGE = 50;
 const TODAY_ROWS = 5;
@@ -130,13 +127,13 @@ async function postsNeedingAction(scope: TaskScope, now: Date): Promise<PostRow[
 
 type PageRow = { id: string; due: string; completedAt: Date | null };
 
-/** A page of a view. `posts` only on the first page of view=mine. */
+/** A page of a view. `posts` only on the first page of view=mine, and only for content work (no area, or CONTENT). */
 export async function listTasks(scope: TaskScope, v: TaskViewer, q: ListQuery, now = new Date()): Promise<{ tasks: TaskDto[]; posts?: PostRow[]; nextCursor: string | null }> {
   const sql = listSql(v, q, now);
   const [page, people, posts] = await Promise.all([
     prisma.$queryRaw<PageRow[]>(sql),
     brandOwners(scope, { key: "tasks.read", includeClients: true }),
-    q.view === "mine" && !q.cursor ? postsNeedingAction(scope, now) : undefined,
+    q.view === "mine" && !q.cursor && (!q.area || q.area === "CONTENT") ? postsNeedingAction(scope, now) : undefined,
   ]);
   const shown = page.slice(0, PAGE);
   const tasks = await toTaskDtos(scope, await rowsFor(shown.map((r) => r.id)), people);
@@ -170,15 +167,17 @@ export async function todayTasks(scope: TaskScope, v: TaskViewer, now = new Date
       count(*) FILTER (WHERE ${groups.approvals})::int AS approvals,
       count(*) FILTER (WHERE ${groups.blockers})::int AS blockers
       ${base}`),
-    // ponytail: UNION ALL output keeps each part's order in practice (Append, no parallel plan for 15 rows).
     prisma.$queryRaw<{ grp: keyof typeof groups; id: string }[]>(Prisma.join(names.map(first), " UNION ALL ", "", "")),
     brandOwners(scope, { key: "tasks.read", includeClients: true }),
   ]);
   const dtos = await toTaskDtos(scope, await rowsFor([...new Set(picked.map((r) => r.id))]), people);
   const byId = new Map(dtos.map((d) => [d.id, d]));
+  // Sorted here by (due, id) as each part's SQL did, since UNION ALL doesn't promise to keep each part's order.
+  const key = (t: TaskDto) => t.dueOn ?? "infinity";
+  const byDue = (a: TaskDto, b: TaskDto) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const group = (g: keyof typeof groups) => ({
     count: counts?.[g] ?? 0,
-    tasks: picked.filter((r) => r.grp === g).flatMap((r) => byId.get(r.id) ?? []),
+    tasks: picked.filter((r) => r.grp === g).flatMap((r) => byId.get(r.id) ?? []).sort(byDue),
   });
   return { mine: group("mine"), approvals: group("approvals"), blockers: group("blockers") };
 }

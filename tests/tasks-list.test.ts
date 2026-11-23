@@ -112,6 +112,15 @@ describe("listTasks", () => {
     expect(db.contentItem.findMany).not.toHaveBeenCalled();
   });
 
+  it("view=mine posts only with no area or area CONTENT", async () => {
+    db.contentItem.findMany.mockResolvedValue([post({ id: "late", scheduledFor: new Date("2026-11-20T10:00:00Z") })]);
+    expect((await listTasks(scope, v, { view: "mine", area: "CONTENT" }, NOW)).posts?.map((p) => p.id)).toEqual(["late"]);
+    for (const area of ["WEBSITE", "SEO", "GENERAL"] as const) {
+      expect((await listTasks(scope, v, { view: "mine", area }, NOW)).posts).toBeUndefined();
+    }
+    expect(db.contentItem.findMany).toHaveBeenCalledTimes(1);
+  });
+
   it("51 rows → 50 tasks in SQL order and a cursor from the 50th", async () => {
     const page = Array.from({ length: 51 }, (_, i) => ({ id: `t${i}`, due: i < 49 ? "2026-11-30" : "infinity", completedAt: null }));
     db.$queryRaw.mockResolvedValue(page);
@@ -145,6 +154,21 @@ describe("todayTasks", () => {
       expect(sql.values).toEqual(expect.arrayContaining(["UTC", NOW.toISOString()]));
     }
     expect(text(rows!).match(/UNION ALL/g)).toHaveLength(2);
+  });
+});
+
+describe("todayTasks order", () => {
+  it("each group is in (due, id) order whatever order the UNION ALL rows come back in", async () => {
+    const due: Record<string, Date | null> = { a: null, b: new Date("2026-11-20T00:00:00Z"), c: new Date("2026-11-22T00:00:00Z"), d: new Date("2026-11-20T00:00:00Z") };
+    db.$queryRaw.mockImplementation(async (sql: Prisma.Sql) =>
+      text(sql).includes("count(*)")
+        ? [{ mine: 4, approvals: 2, blockers: 0 }]
+        : [{ grp: "approvals", id: "c" }, { grp: "mine", id: "a" }, { grp: "mine", id: "c" }, { grp: "approvals", id: "a" }, { grp: "mine", id: "d" }, { grp: "mine", id: "b" }],
+    );
+    db.task.findMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) => where.id.in.map((id) => ({ ...taskRow(id), dueOn: due[id] })));
+    const out = await todayTasks(scope, v, NOW);
+    expect(out.mine.tasks.map((t) => t.id)).toEqual(["b", "d", "c", "a"]);
+    expect(out.approvals.tasks.map((t) => t.id)).toEqual(["c", "a"]);
   });
 });
 
