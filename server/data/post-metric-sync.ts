@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
-import { accessToken, ReconnectNeeded } from "@/server/services/connections";
+import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { readPostMetrics, type ConnectionRead, type ConnectionToRead, type MetricsProvider, type PostMetrics } from "./post-metrics";
 import { registerSync, zoneToday, type SyncContext, type SyncOutcome, type SyncStop } from "./sources";
 
@@ -127,7 +127,11 @@ export async function syncPostMetrics(ctx: Pick<SyncContext, "source">, now = ne
   const rows: { attemptId: string; metrics: PostMetrics }[] = [];
   for (const r of results) {
     const stop = stopOf(r);
-    if (stop && stop !== "reconnect") stops.push(stop);
+    // A refused token (190 / 401) is the connection's own state: Connections shows it; the other connections go on.
+    if (stop === "reconnect") {
+      const conn = connections.find((c) => c.id === r.connectionId);
+      if (conn) await markReconnect(conn.id, `Access expired. Reconnect ${conn.displayName}.`);
+    } else if (stop) stops.push(stop);
     for (const p of r.posts) {
       if (p.ok) rows.push({ attemptId: p.attemptId, metrics: p.metrics });
       else if (p.reason === "permission") stops.push("permission");
