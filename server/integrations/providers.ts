@@ -29,7 +29,10 @@ export class ProviderError extends Error {}
 /** Shopify is connected with a pasted Admin API token (server/catalog/shopify.ts), so it has no OAuth adapter. */
 export type OAuthProvider = Exclude<IntegrationProvider, "SHOPIFY">;
 
-const GRAPH = "https://graph.facebook.com/v23.0";
+export const GRAPH = "https://graph.facebook.com/v23.0";
+/** Instagram Login accounts and Threads have their own Graph hosts (same versions as the calls below). */
+export const IG_GRAPH = "https://graph.instagram.com/v23.0";
+export const THREADS_GRAPH = "https://graph.threads.net/v1.0";
 const REDDIT_UA = "web:ai-cmo-platform:0.1";
 const qs = (o: Record<string, string>) => new URLSearchParams(o).toString();
 const expiry = (seconds?: number) => (seconds ? new Date(Date.now() + seconds * 1000) : null);
