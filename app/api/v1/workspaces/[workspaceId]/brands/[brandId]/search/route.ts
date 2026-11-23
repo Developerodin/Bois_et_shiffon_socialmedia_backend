@@ -4,7 +4,7 @@ import { taskViewer } from "@/server/tasks/access";
 import { taskProblem } from "@/server/tasks/errors";
 import { searchBrand } from "@/server/tasks/search";
 
-/** Top-bar search: `?q=` (2–100 characters), up to 5 tasks, projects, posts, products and campaigns the caller can see. */
+/** Top-bar search: `?q=` (3–100 characters; shorter answers empty), up to 5 tasks, projects, posts, products and campaigns the caller can see. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");

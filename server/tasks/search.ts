@@ -9,6 +9,7 @@ import type { TaskScope } from "@/server/tasks/service";
 import type { SearchResultDto, SearchResultsDto } from "@/shared";
 
 const PER_KIND = 5;
+const SEARCH_MIN = 3;
 export const SEARCH_MAX = 100;
 const none = (): SearchResultsDto => ({ tasks: [], projects: [], posts: [], products: [], campaigns: [] });
 
@@ -19,12 +20,13 @@ const none = (): SearchResultsDto => ({ tasks: [], projects: [], posts: [], prod
  * - projects: tasks.read, and a client only `clientVisible` ones (projects.ts projectWhere);
  * - posts, products, campaigns: brand.read, the key of their own list routes (content, products, campaigns), client
  *   reviewers included; the route already holds it, so these three always run.
- * Under 2 characters (after trimming) answers empty without counting against the limit; over 100 is a 400.
+ * Under SEARCH_MIN (3) characters (after trimming) answers empty without counting against the limit (trigrams need 3);
+ * over 100 is a 400.
  * ponytail: title trigram indexes aren't brand-scoped; add btree_gin (brandId, title gin_trgm_ops) if search slows on large catalogues.
  */
 export async function searchBrand(scope: TaskScope, v: TaskViewer, raw: string): Promise<SearchResultsDto> {
   const q = raw.trim();
-  if (q.length < 2) return none();
+  if (q.length < SEARCH_MIN) return none();
   if (q.length > SEARCH_MAX) throw new TaskError(`Search for at most ${SEARCH_MAX} characters`, 400);
   if (!(await hitRateLimit(`search:${scope.userId}`, 30, 60_000)).allowed) throw new TaskError("Too many searches. Wait a minute.", 429);
 

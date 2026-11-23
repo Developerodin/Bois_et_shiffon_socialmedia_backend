@@ -55,9 +55,10 @@ describe("searchBrand", () => {
     expect((await get("menu")).status).toBe(429);
   });
 
-  it("under 2 chars → empty", async () => {
+  it("under 3 chars → empty, no rate-limit hit", async () => {
     const empty = { tasks: [], projects: [], posts: [], products: [], campaigns: [] };
     expect(await searchBrand(STAFF, taskViewer(STAFF), " a ")).toEqual(empty);
+    expect(await searchBrand(STAFF, taskViewer(STAFF), " ab ")).toEqual(empty);
     const res = await get("");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(empty);
