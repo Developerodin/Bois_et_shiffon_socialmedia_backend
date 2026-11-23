@@ -212,6 +212,7 @@ model Brand {
   taskComments  TaskComment[]
   notifications Notification[]
   dataSources   DataSource[]
+  shopOrders    ShopOrder[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1608,4 +1609,43 @@ model DataSource {
 
   @@unique([brandId, kind, externalId])
   @@index([status])
+}
+
+/// One Shopify order's totals (Sales tab), upserted on (brandId, shopifyId) so an edit or refund overwrites the row.
+/// No customer data: the client's field list is an allow-list. Summed per brand-local day on read.
+/// ponytail: no rollup table; past ~100k orders in a range, add a per-day rollup written by the sync.
+model ShopOrder {
+  id               String    @id @default(cuid())
+  workspaceId      String
+  brandId          String
+  connectionId     String
+  /// gid://shopify/Order/…
+  shopifyId        String
+  /// "#1001"
+  name             String
+  processedAt      DateTime
+  cancelledAt      DateTime?
+  test             Boolean
+  /// shopMoney currency
+  currency         String
+  /// currentSubtotalPriceSet (after discounts, refunds, edits); gross = netSales + discounts
+  netSales         Decimal   @db.Decimal(14, 2)
+  discounts        Decimal   @db.Decimal(14, 2)
+  shipping         Decimal   @db.Decimal(14, 2)
+  /// sum of currentTaxLines, not totalTaxSet
+  taxes            Decimal   @db.Decimal(14, 2)
+  taxesIncluded    Boolean
+  /// currentTotalPriceSet
+  total            Decimal   @db.Decimal(14, 2)
+  /// display only; already in netSales and total
+  refunded         Decimal   @db.Decimal(14, 2)
+  sourceName       String?
+  shopifyUpdatedAt DateTime
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([brandId, shopifyId])
+  @@index([brandId, processedAt])
 }
