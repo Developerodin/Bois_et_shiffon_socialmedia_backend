@@ -24,33 +24,30 @@ async function readOrders(conn: { shop: string; accessToken: string }, since: Da
   return { orders: r.orders, cursorEnd: r.cursorEnd, stop: r.stoppedReason && STOP[r.stoppedReason] };
 }
 
-/** Amounts arrive as decimal strings or Prisma.Decimal; both print as the exact decimal. */
-const dec = (v: unknown) => String(v);
-const iso = (d: Date | null) => (d ? d.toISOString() : null);
-
 /**
- * One `INSERT … ON CONFLICT (brandId, shopifyId) DO UPDATE` for up to a page of orders. Timestamps go in as UTC
- * instants and are stored as the UTC wall time (Prisma's convention for `timestamp(3)`). An older read never
- * overwrites a newer one (two overlapping runs), so the row always holds the latest `shopifyUpdatedAt`.
+ * One `INSERT … ON CONFLICT (brandId, shopifyId) DO UPDATE` for up to a page of orders, the page sent as one JSON
+ * parameter and unpacked by `jsonb_to_recordset` (typed columns: Prisma can't type an array param holding nulls, so
+ * `unnest` of per-column arrays fails on cancelledAt/sourceName). Amounts go as exact decimal strings (string or
+ * Prisma.Decimal in); timestamps as UTC instants, stored as the UTC wall time (Prisma's `timestamp(3)` convention).
+ * An older read never overwrites a newer one (two overlapping runs), so a row always holds its latest update.
  */
 export async function upsertOrders(scope: { workspaceId: string; brandId: string; connectionId: string }, rows: ShopOrderRow[]) {
   if (!rows.length) return 0;
-  const col = <T>(f: (r: ShopOrderRow) => T) => rows.map(f);
+  const page = JSON.stringify(rows.map((r) => ({
+    id: randomUUID(), shopify_id: r.shopifyId, name: r.name, processed_at: r.processedAt.toISOString(), cancelled_at: r.cancelledAt?.toISOString() ?? null,
+    test: r.test, currency: r.currency, net_sales: String(r.netSales), discounts: String(r.discounts), shipping: String(r.shipping),
+    taxes: String(r.taxes), taxes_included: r.taxesIncluded, total: String(r.total), refunded: String(r.refunded),
+    source_name: r.sourceName, shopify_updated_at: r.shopifyUpdatedAt.toISOString(),
+  })));
   return prisma.$executeRaw`
     INSERT INTO "ShopOrder" ("id", "workspaceId", "brandId", "connectionId", "shopifyId", "name", "processedAt", "cancelledAt", "test",
       "currency", "netSales", "discounts", "shipping", "taxes", "taxesIncluded", "total", "refunded", "sourceName", "shopifyUpdatedAt", "updatedAt")
     SELECT u.id, ${scope.workspaceId}, ${scope.brandId}, ${scope.connectionId}, u.shopify_id, u.name,
       u.processed_at AT TIME ZONE 'UTC', u.cancelled_at AT TIME ZONE 'UTC', u.test, u.currency, u.net_sales, u.discounts,
       u.shipping, u.taxes, u.taxes_included, u.total, u.refunded, u.source_name, u.shopify_updated_at AT TIME ZONE 'UTC', now()
-    FROM unnest(
-      ${col(() => randomUUID())}::text[], ${col((r) => r.shopifyId)}::text[], ${col((r) => r.name)}::text[],
-      ${col((r) => iso(r.processedAt))}::timestamptz[], ${col((r) => iso(r.cancelledAt))}::timestamptz[], ${col((r) => r.test)}::boolean[],
-      ${col((r) => r.currency)}::text[], ${col((r) => dec(r.netSales))}::numeric[], ${col((r) => dec(r.discounts))}::numeric[],
-      ${col((r) => dec(r.shipping))}::numeric[], ${col((r) => dec(r.taxes))}::numeric[], ${col((r) => r.taxesIncluded)}::boolean[],
-      ${col((r) => dec(r.total))}::numeric[], ${col((r) => dec(r.refunded))}::numeric[], ${col((r) => r.sourceName)}::text[],
-      ${col((r) => iso(r.shopifyUpdatedAt))}::timestamptz[]
-    ) AS u(id, shopify_id, name, processed_at, cancelled_at, test, currency, net_sales, discounts, shipping, taxes, taxes_included,
-      total, refunded, source_name, shopify_updated_at)
+    FROM jsonb_to_recordset(${page}::jsonb) AS u(id text, shopify_id text, name text, processed_at timestamptz, cancelled_at timestamptz,
+      test boolean, currency text, net_sales numeric, discounts numeric, shipping numeric, taxes numeric, taxes_included boolean,
+      total numeric, refunded numeric, source_name text, shopify_updated_at timestamptz)
     ON CONFLICT ("brandId", "shopifyId") DO UPDATE SET
       "connectionId" = EXCLUDED."connectionId", "name" = EXCLUDED."name", "processedAt" = EXCLUDED."processedAt",
       "cancelledAt" = EXCLUDED."cancelledAt", "test" = EXCLUDED."test", "currency" = EXCLUDED."currency",
