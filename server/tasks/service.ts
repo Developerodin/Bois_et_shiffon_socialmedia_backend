@@ -1,5 +1,5 @@
 import "server-only";
-import type { Prisma } from "@prisma/client";
+import type { Prisma, Task } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
@@ -64,7 +64,8 @@ function columns(input: Partial<TaskInput>): Record<string, unknown> {
 }
 const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
-const rowOf = (t: TaskWithLinks): TaskRow => ({
+/** The fields the shared status rules read, from a stored task. */
+export const rowOf = (t: Task): TaskRow => ({
   status: t.status,
   reviewerId: t.reviewerId,
   ownerId: t.ownerId,
