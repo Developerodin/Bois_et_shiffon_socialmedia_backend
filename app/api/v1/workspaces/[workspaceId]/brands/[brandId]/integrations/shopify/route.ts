@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
-import { SHOPIFY_SCOPES, shopDomain, shopifyQuery } from "@/server/catalog/shopify";
+import { grantedScopes, SHOPIFY_SCOPES, shopDomain } from "@/server/catalog/shopify";
 import { enqueueCatalogSync } from "@/server/catalog/sync";
 import { kickRunner } from "@/server/jobs/runner";
 import { ReconnectNeeded, saveConnections, toConnectionDto } from "@/server/services/connections";
@@ -28,16 +28,10 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     const { accessToken } = body.data;
 
     let name: string;
+    let scopes: string[];
     try {
-      const { data } = await shopifyQuery<{ shop: { name: string }; currentAppInstallation: { accessScopes: { handle: string }[] } }>(
-        shop,
-        accessToken,
-        "{ shop { name } currentAppInstallation { accessScopes { handle } } }",
-      );
-      // A write_ scope includes its read_ scope.
-      const granted = new Set(data.currentAppInstallation.accessScopes.map((s) => s.handle.replace(/^write_/, "read_")));
-      if (!SHOPIFY_SCOPES.every((s) => granted.has(s))) return invalid(MISSING_SCOPES);
-      name = data.shop.name.slice(0, 200);
+      ({ name, scopes } = await grantedScopes(shop, accessToken));
+      if (!SHOPIFY_SCOPES.every((s) => scopes.includes(s))) return invalid(MISSING_SCOPES);
     } catch (e) {
       console.warn("[shopify] connect check failed", shop, e instanceof Error ? e.message : e);
       return e instanceof ReconnectNeeded
@@ -50,8 +44,9 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
       brandId: scope.brandId,
       provider: "SHOPIFY",
       userId: scope.userId,
-      // The shop is the account id; the sync reads it from there.
-      accounts: [{ externalAccountId: shop, displayName: name, credentials: { accessToken }, tokenExpiresAt: null, scopes: SHOPIFY_SCOPES }],
+      // The shop is the account id; the sync reads it from there. Scopes are what Shopify granted, not what we
+      // asked for.
+      accounts: [{ externalAccountId: shop, displayName: name, credentials: { accessToken }, tokenExpiresAt: null, scopes }],
     });
     await enqueueCatalogSync(scope, `connect:${conn.updatedAt.toISOString()}`);
     kickRunner();

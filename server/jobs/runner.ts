@@ -11,6 +11,7 @@ import { AGENTS } from "@/server/agents/registry";
 import { AiProviderError } from "@/server/ai/provider";
 import { CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
 import { DATA_SYNC_JOB, enqueueDailyDataSyncs, runDataSync } from "@/server/data/sources";
+import "@/server/data/shopify-orders-sync"; // registers the SHOPIFY_ORDERS runner
 import { prisma } from "@/server/db/prisma";
 import { EMAIL_SEND_JOB, sendOutboxEmail } from "@/server/email/outbox";
 import { notifyOverdueTasks, notifyRechecks, pruneNotifications } from "@/server/notifications/daily-tasks";
