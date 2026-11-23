@@ -97,14 +97,20 @@ unflagged but permission-checked, so it is harmless with the web flag off.
   task away, name yourself reviewer, submit, approve), and the bell count no longer seq-scans Notification (measured
   38 ms → 0.08 ms at 1M rows). Known: the panel still shows Approve to the submitter (allowedActions doesn't know who
   submitted); the click answers with the refusal.
+- Fourth four-lens review 2026-11-24 on main (server 1367941..69672c7, web fefbe27..a3b0252, mobile 1d113f1; not
+  pushed). Owner decisions: the submitter hears approve / changes (TASK_APPROVED, TASK_CHANGES_REQUESTED, bell only:
+  phone push exists only for reels); rechecks catch up a missed week, keyed by recheckOn; overdue fires once, then
+  weekly, keyed by dueOn + week; unread bell notices group per kind and business (count, opens /tasks?view=…, marks
+  the group read up to its newest); a staff reviewer's note is staff-only unless "Share with client"; both New project
+  forms stay. Fixes: clearFindings locks each task and re-reads under the lock; post picker searches posts only under
+  its own limit; Notification indexes (userId, workspaceId, createdAt desc, id desc), (taskId), (brandId, workspaceId);
+  Approve hidden from the submitter in the panel (list rows still carry it); Send for review uses the unsaved reviewer;
+  task list re-reads loaded pages on poll; caption limits in one shared map; editor blocks >5 hashtags only on
+  Instagram (was every channel). Migration 20261124090000_phase1_review_fixes. Not browser-checked.
+  Known: mobile doesn't send shareWithClient, so phone approvals by staff are always staff-only notes; the web editor's
+  Pinterest 500 limit isn't enforced at publish; Task user-FK indexes (ownerId etc.) skipped, no user hard-delete.
 - Storage bucket CORS must allow browser PUT for screenshot uploads.
 - Set `PLANNER_HAND_CHANNELS=on` only after the phone build with the LinkedIn and X labels is released.
-- Tell the owner about the extra name-only "New project" form.
-- For the owner: nobody is notified when their task is approved or sent back (no such notification kind); in the panel,
-  "Send for review" asks for a reviewer even when the unsaved form already shows one.
-- Owner decision: recheck notices match the brand-local day exactly, so a missed daily sweep (or a DST skip) loses that
-  day's rechecks. Catch-up (`recheckOn <= today`, keyed by recheckOn, bounded to a week so the 90-day prune can't replay
-  it) is a one-query change; `task-notifications.db.test.ts` currently pins "yesterday's recheck is not sent".
 
 ### Deferred minors
 Task rules
