@@ -17,7 +17,7 @@ import { allowedActions, MANAGE_PATCH_FIELDS, pickPatch, safeHttpUrl, TASK_AREAS
 /** The route scope the task services take (authorizeBrandRoute's result). */
 export type TaskScope = { userId: string; workspaceId: string; brandId: string; perms: Set<PermissionKey> };
 
-const day = z
+export const day = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Use a YYYY-MM-DD date")
   .refine((s) => new Date(`${s}T00:00:00Z`).toISOString().startsWith(s), "Not a real date");
@@ -51,8 +51,8 @@ const TaskPatch = TaskInput.omit({ requestId: true }).partial();
 export const TASK_DTO_INCLUDE = { workProject: { select: { id: true, name: true } }, contentItem: { select: { id: true, title: true } } } as const;
 export type TaskWithLinks = Prisma.TaskGetPayload<{ include: typeof TASK_DTO_INCLUDE }>;
 
-const dateOf = (s: string | null) => (s === null ? null : new Date(`${s}T00:00:00Z`));
-const dayOf = (d: Date | null) => d?.toISOString().slice(0, 10) ?? null;
+export const dateOf = (s: string | null) => (s === null ? null : new Date(`${s}T00:00:00Z`));
+export const dayOf = (d: Date | null) => d?.toISOString().slice(0, 10) ?? null;
 const isoOf = (d: Date | null) => d?.toISOString() ?? null;
 
 /** The manage-editable fields present in `input`, as column values. */

@@ -6,7 +6,7 @@ import { notifyTx } from "@/server/notifications/tasks";
 import { lockRow, TX } from "@/server/services/publishing";
 import { canBeAssigned, findVisibleTask, isSoleStaff, type TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
-import { TaskError } from "@/server/tasks/errors";
+import { isUniqueViolation, TaskError } from "@/server/tasks/errors";
 import { checkTaskLinks } from "@/server/tasks/links";
 import { getTask, rowOf, type TaskScope } from "@/server/tasks/service";
 import { applyAction, TASK_ACTIONS, type TaskDetailDto } from "@/shared";
@@ -24,9 +24,6 @@ export type TaskActionInput = z.infer<typeof TaskActionInput>;
 
 /** The rules hand dates back as ISO strings; these columns store Dates (recheckOn is only ever cleared here). */
 const DATE_FIELDS = new Set(["completedAt", "checkedLiveAt", "findingClearedAt", "recheckOn"]);
-
-const isUniqueViolation = (e: unknown) =>
-  (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") || (e as { meta?: { code?: string } } | null)?.meta?.code === "23505";
 
 /**
  * Move a task through its status rules (shared applyAction) as the caller: owner, reviewer or manager per action. In one

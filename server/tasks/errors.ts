@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { problemResponse } from "@/server/api/http-error";
 
 /** A refusal from the task services; routes answer it with taskProblem (like PublishingError). */
@@ -16,3 +17,7 @@ export function taskProblem(error: unknown) {
   if (!(error instanceof TaskError)) return null;
   return problemResponse({ type: "https://api.brandpilot/errors/tasks", title: error.message, status: error.status, detail: error.message, code: error.code });
 }
+
+/** A unique index refused the write (Prisma's P2002, or the raw Postgres 23505). */
+export const isUniqueViolation = (e: unknown) =>
+  (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") || (e as { meta?: { code?: string } } | null)?.meta?.code === "23505";
