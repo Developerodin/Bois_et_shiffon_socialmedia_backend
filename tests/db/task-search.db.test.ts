@@ -64,8 +64,9 @@ describe("search", () => {
     expect(titles(out.tasks)).toEqual(["Menu in shared one", "Menu reviewed one"]);
     expect(titles(out.projects)).toEqual(["Menu shared one"]);
     expect(titles(out.posts)).toEqual(["Menu post one"]);
-    expect(out.products).toEqual([]);
-    expect(out.campaigns).toEqual([]);
+    // Products and campaigns follow their lists (brand.read), which client reviewers read today.
+    expect(titles(out.products)).toEqual(["Menu board one"]);
+    expect(titles(out.campaigns)).toEqual(["Menu sale one"]);
   });
 
   it("search never returns another brand's rows", async () => {

@@ -25,12 +25,15 @@ vi.mock("@/server/ai/provider", async (orig) => ({ ...(await orig<object>()), ge
 vi.mock("@/server/services/publishing", async (orig) => ({ ...(await orig<object>()), brandOwners: m.owners }));
 
 import { Prisma } from "@prisma/client";
+import { ModelNotConfiguredError } from "@/server/ai/models";
+import { AiProviderError } from "@/server/ai/provider";
 import { AccessDeniedError } from "@/server/auth/errors";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { taskViewer } from "@/server/tasks/access";
 import { createTaskBatch, proposeTasks } from "@/server/tasks/from-note";
 import { POST as fromNotePost } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/tasks/from-note/route";
 import { POST as batchPost } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/tasks/batch/route";
+import { POST as tasksPost } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/tasks/route";
 
 const MANAGER: PermissionKey[] = ["brand.read", "tasks.read", "tasks.manage"];
 const scopeOf = (perms: PermissionKey[]) => ({ workspaceId: "w1", brandId: "b1", userId: "u1", perms: new Set(perms), clientReviewer: false });
@@ -137,6 +140,20 @@ describe("proposeTasks", () => {
 });
 
 describe("routes", () => {
+  it("an AI failure → 502, no model set → 503, not a 500", async () => {
+    m.ai.mockRejectedValueOnce(new AiProviderError("Model output failed schema", true, "schema"));
+    const res = await post(fromNotePost, { text: "note" });
+    expect(res.status).toBe(502);
+    expect((await res.json()).detail).toBe("Couldn't read the note right now, try again.");
+    m.ai.mockRejectedValueOnce(new ModelNotConfiguredError("light"));
+    expect((await post(fromNotePost, { text: "note" })).status).toBe(503);
+  });
+
+  it("single POST tasks refuses a requestId with ':' (a batch's row key)", async () => {
+    const res = await post(tasksPost, { ...input(), requestId: `${RID}:0` });
+    expect(res.status).toBe(400);
+  });
+
   it("reader gets 403 on from-note and batch", async () => {
     scope = scopeOf(["brand.read", "tasks.read"]);
     expect((await post(fromNotePost, { text: "note" })).status).toBe(403);

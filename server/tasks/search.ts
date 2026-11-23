@@ -17,11 +17,12 @@ const none = (): SearchResultsDto => ({ tasks: [], projects: [], posts: [], prod
  * similarity, the five kinds read at once. Who sees what, each kind by its own list's rule:
  * - tasks: visibleTaskSql (tasks.read; a client only what they review or what sits in a shared project);
  * - projects: tasks.read, and a client only `clientVisible` ones (projects.ts projectWhere);
- * - posts, products, campaigns: brand.read like their lists; a client reviewer gets posts only.
+ * - posts, products, campaigns: brand.read, the key of their own list routes (content, products, campaigns), client
+ *   reviewers included; the route already holds it, so these three always run.
  * Under 2 characters (after trimming) answers empty without counting against the limit; over 100 is a 400.
  * ponytail: title trigram indexes aren't brand-scoped; add btree_gin (brandId, title gin_trgm_ops) if search slows on large catalogues.
  */
-export async function searchBrand(scope: TaskScope & { clientReviewer: boolean }, v: TaskViewer, raw: string): Promise<SearchResultsDto> {
+export async function searchBrand(scope: TaskScope, v: TaskViewer, raw: string): Promise<SearchResultsDto> {
   const q = raw.trim();
   if (q.length < 2) return none();
   if (q.length > SEARCH_MAX) throw new TaskError(`Search for at most ${SEARCH_MAX} characters`, 400);
@@ -40,13 +41,12 @@ export async function searchBrand(scope: TaskScope & { clientReviewer: boolean }
       .then((rows) => rows.map((r) => ({ kind, id: r.id, title: r.title })));
   };
   const skip = Promise.resolve<SearchResultDto[]>([]);
-  const staff = !scope.clientReviewer;
   const [tasks, projects, posts, products, campaigns] = await Promise.all([
     v.canRead ? find("task", "Task", "title", "t", visibleTaskSql(v)) : skip,
     v.canRead ? find("project", "WorkProject", "name", "p", v.client ? Prisma.sql`${brand("p")} AND p."clientVisible"` : brand("p")) : skip,
     find("post", "ContentItem", "title", "c", Prisma.sql`${brand("c")} AND c.status <> 'CANCELLED'`),
-    staff ? find("product", "Product", "title", "pr", Prisma.sql`${brand("pr")} AND pr."archivedAt" IS NULL`) : skip,
-    staff ? find("campaign", "Campaign", "name", "ca", Prisma.sql`${brand("ca")} AND ca."archivedAt" IS NULL`) : skip,
+    find("product", "Product", "title", "pr", Prisma.sql`${brand("pr")} AND pr."archivedAt" IS NULL`),
+    find("campaign", "Campaign", "name", "ca", Prisma.sql`${brand("ca")} AND ca."archivedAt" IS NULL`),
   ]);
   return { tasks, projects, posts, products, campaigns };
 }

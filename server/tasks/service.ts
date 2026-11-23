@@ -41,6 +41,7 @@ export const TaskInput = z.object({
   changeKind: opt(z.enum(WEBSITE_CHANGE_KINDS)),
   acceptanceCriteria: opt(z.string().max(4_000)),
   recheckOn: opt(day),
+  /** A uuid, so never a batch row's `<uuid>:<i>` key (no ":"); tasks/batch relies on that. */
   requestId: z.string().uuid().optional(),
 });
 export type TaskInput = z.infer<typeof TaskInput>;

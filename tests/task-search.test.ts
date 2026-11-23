@@ -77,15 +77,34 @@ describe("searchBrand", () => {
     expect(out.tasks).toEqual([]);
   });
 
-  it("tasks go through the visibility rule; a client gets shared projects and posts, no products or campaigns", async () => {
+  it("tasks go through the visibility rule; a client gets shared projects, and posts, products and campaigns like their lists", async () => {
     const client = scopeOf(["brand.read", "tasks.read"], true);
     await searchBrand(client, taskViewer(client), "menu");
-    expect(db.$queryRaw).toHaveBeenCalledTimes(3);
+    expect(db.$queryRaw).toHaveBeenCalledTimes(5);
     expect(text(sqlFor("Task")!)).toContain(`t."reviewerId" =`);
     expect(text(sqlFor("WorkProject")!)).toContain(`p."clientVisible"`);
     expect(text(sqlFor("ContentItem")!)).toContain(`<> 'CANCELLED'`);
-    expect(sqlFor("Product")).toBeUndefined();
-    expect(sqlFor("Campaign")).toBeUndefined();
+    expect(text(sqlFor("Product")!)).toContain(`"archivedAt" IS NULL`);
+    expect(text(sqlFor("Campaign")!)).toContain(`"archivedAt" IS NULL`);
+  });
+
+  it("each kind needs its own list route's key", async () => {
+    const keys: Record<string, PermissionKey> = {};
+    // Record the key each list asks for, then stop before its body runs.
+    m.authorize.mockImplementation(async () => {
+      throw new AccessDeniedError("stop");
+    });
+    const list = (path: string) => import(`@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/${path}/route`);
+    for (const [kind, path] of [["posts", "content"], ["products", "products"], ["campaigns", "campaigns"], ["projects", "work-projects"], ["tasks", "tasks"]] as const) {
+      m.authorize.mockClear();
+      await (await list(path)).GET(new Request("http://x/api"), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) }).catch(() => null);
+      keys[kind] = m.authorize.mock.calls[0]![2];
+    }
+    expect(keys).toEqual({ posts: "brand.read", products: "brand.read", campaigns: "brand.read", projects: "tasks.read", tasks: "tasks.read" });
+    // Search asks brand.read at the route and tasks.read (through the viewer) for tasks and projects.
+    const reader = scopeOf(["brand.read"]);
+    await searchBrand(reader, taskViewer(reader), "menu");
+    expect(sqls().map((s) => text(s).match(/FROM "(\w+)"/)![1]).sort()).toEqual(["Campaign", "ContentItem", "Product"]);
   });
 
   it("without tasks.read: no task or project query", async () => {
