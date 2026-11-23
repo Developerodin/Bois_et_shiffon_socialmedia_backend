@@ -211,6 +211,7 @@ model Brand {
   workProjects  WorkProject[]
   taskComments  TaskComment[]
   notifications Notification[]
+  dataSources   DataSource[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1563,4 +1564,48 @@ model Notification {
   @@index([userId, workspaceId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([taskId])
   @@index([brandId, workspaceId])
+}
+
+enum DataSourceKind {
+  SEARCH_CONSOLE
+  POST_METRICS
+  SHOPIFY_ORDERS
+  META_ADS
+}
+
+enum DataSourceStatus {
+  ACTIVE
+  ERROR
+  OFF
+}
+
+/// One outside source of daily numbers for a brand (a Search Console site, an ad account, a shop's orders, its post
+/// metrics), filled by `data.sync` jobs (server/data/sources.ts). Rows stay when the connection goes; purged with the brand.
+model DataSource {
+  id            String           @id @default(cuid())
+  workspaceId   String
+  brandId       String
+  kind          DataSourceKind
+  /// null for POST_METRICS (each post uses its own connection)
+  connectionId  String?
+  /// siteUrl | "act_123" | shop domain | "" for POST_METRICS
+  externalId    String
+  /// shop domain, ad account name: shown only to people who manage integrations
+  label         String?
+  /// { timeZone, currency } of an ad account; { reportsIn: "America/Los_Angeles" } for Google
+  settings      Json?
+  status        DataSourceStatus @default(ACTIVE)
+  /// last provider day held contiguously; null = the daily window only
+  syncedThrough DateTime?        @db.Date
+  /// Shopify updated_at high-water mark
+  cursor        String?
+  /// DataSyncResult { at, okAt, reason, count, error } like BrandProfile.catalogSync; error is a fixed string
+  lastResult    Json?
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([brandId, kind, externalId])
+  @@index([status])
 }

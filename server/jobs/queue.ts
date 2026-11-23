@@ -39,6 +39,13 @@ export async function enqueueJob(input: EnqueueInput, db: Db = prisma) {
   });
 }
 
+/**
+ * How many data.% jobs (provider syncs, up to 4 minutes each) may run at once across all runners.
+ * ponytail: the count is read without a lock, so two runners claiming in the same instant can start a third; the cap
+ * is about fairness, not correctness. The count uses the (status, runAt) index's RUNNING rows, a handful at most.
+ */
+export const DATA_RUNNING_MAX = 2;
+
 export async function claimNextJob(workerId: string): Promise<Job | null> {
   const rows = await prisma.$queryRaw<Job[]>`
     UPDATE "Job" SET
@@ -49,8 +56,13 @@ export async function claimNextJob(workerId: string): Promise<Job | null> {
       "updatedAt" = now()
     WHERE id = (
       SELECT id FROM "Job"
-      WHERE (status = 'PENDING' AND "runAt" <= now())
-         OR (status = 'RUNNING' AND "leasedUntil" < now())
+      WHERE ((status = 'PENDING' AND "runAt" <= now())
+         OR (status = 'RUNNING' AND "leasedUntil" < now()))
+        -- Data syncs take at most DATA_RUNNING_MAX runners, so publishing and the rest are never starved by them.
+        AND (type NOT LIKE 'data.%' OR (
+          SELECT count(*) FROM "Job" r
+          WHERE r.type LIKE 'data.%' AND r.status = 'RUNNING' AND r."leasedUntil" >= now()
+        ) < ${DATA_RUNNING_MAX})
       ORDER BY "runAt"
       FOR UPDATE SKIP LOCKED
       LIMIT 1

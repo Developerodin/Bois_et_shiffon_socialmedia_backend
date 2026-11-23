@@ -10,6 +10,7 @@ import {
 import { AGENTS } from "@/server/agents/registry";
 import { AiProviderError } from "@/server/ai/provider";
 import { CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
+import { DATA_SYNC_JOB, enqueueDailyDataSyncs, runDataSync } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { EMAIL_SEND_JOB, sendOutboxEmail } from "@/server/email/outbox";
 import { notifyOverdueTasks, notifyRechecks, pruneNotifications } from "@/server/notifications/daily-tasks";
@@ -41,6 +42,7 @@ const HANDLERS: Record<string, Handler> = {
   [AGENT_RUN_JOB]: { run: executeAgentRun, onFailure: onAgentRunFailure },
   [CATALOG_SYNC_JOB]: { run: runCatalogSync },
   [DAILY_SWEEP_JOB]: { run: dailySweep },
+  [DATA_SYNC_JOB]: { run: runDataSync },
   [EMAIL_SEND_JOB]: { run: sendOutboxEmail },
   [FINDING_CLEAR_JOB]: { run: clearFindings },
   [FINDING_TASKS_JOB]: { run: tasksFromReport },
@@ -90,9 +92,9 @@ export async function runDueJobs({ budgetMs = 45_000, signal }: { budgetMs?: num
       await handler.run(job.payload, { jobId: job.id, leasedBy: job.leasedBy });
       await completeJob(job);
     } catch (error) {
-      // A catalogue sync whose Shopify token was refused waits for a person to reconnect; a story render refused
+      // A catalogue or data sync whose token was refused waits for a person to reconnect; a story render refused
       // (stale, approved meanwhile, text or clip window) would be refused again. Retrying can't help either.
-      const refused = (job.type === CATALOG_SYNC_JOB && error instanceof ReconnectNeeded) || (job.type === STORY_RENDER_JOB && error instanceof PublishingError);
+      const refused = ((job.type === CATALOG_SYNC_JOB || job.type === DATA_SYNC_JOB) && error instanceof ReconnectNeeded) || (job.type === STORY_RENDER_JOB && error instanceof PublishingError);
       const retryable = error instanceof AiProviderError ? error.retryable : !(error instanceof NothingToDoError || refused);
       const exhausted = await failJob(job, error, retryable);
       // A runner that lost its lease leaves the job to whoever holds it: its failure hooks (mark failed, refund) would
@@ -163,13 +165,14 @@ async function dailySweep() {
   await purgeStaleUploads();
   await reclaimAbandonedClones();
   await startScheduledAgents();
-  // Last, and each on its own: a failing task step is logged and never blocks the steps above (billing renewals).
+  // Last, and each on its own: a failing step is logged and never blocks the steps above (billing renewals).
   const now = new Date();
-  for (const [name, step] of [["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications]] as const) {
+  // "data" only queues each data source's sync (no provider calls), spread over the next two hours.
+  for (const [name, step] of [["data", enqueueDailyDataSyncs], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications]] as const) {
     try {
       await step(now);
     } catch (e) {
-      console.error(`[jobs] daily sweep: task notifications (${name}) failed`, e);
+      console.error(`[jobs] daily sweep: ${name} failed`, e);
     }
   }
 }
