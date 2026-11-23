@@ -79,11 +79,11 @@ export const isClientGrant = (role: { isSystem: boolean; slug: string }) => role
 export const CLIENT_GRANT_WHERE = { isSystem: true, slug: CLIENT_REVIEWER } as const;
 
 /**
- * Can someone other than `userId` approve this brand's content? A one-person business can't follow a four-eyes rule.
- * A client reviewer's approval doesn't count here: staff can still approve their own post when only the client could.
- * Three queries, computed in memory. ponytail: reads every member of the workspace; a joined query if workspaces get large.
+ * Does someone other than `userId` hold `key` on this brand? A client reviewer's grant doesn't count: clients are never
+ * the "other" staff member. Three queries, computed in memory.
+ * ponytail: reads every member of the workspace; a joined query if workspaces get large.
  */
-export async function hasOtherApprover(workspaceId: string, brandId: string, userId: string) {
+export async function hasOtherHolder(workspaceId: string, brandId: string, userId: string, key: PermissionKey) {
   const [members, legacy, grants] = await Promise.all([
     prisma.workspaceMember.findMany({ where: { workspaceId, userId: { not: userId } }, select: { userId: true, role: true, roleRef: { select: { permissions: true } } } }),
     prisma.role.findMany({ where: { workspaceId, slug: { in: Object.values(LEGACY_ROLE_SLUG) } }, select: { slug: true, permissions: true } }),
@@ -91,10 +91,31 @@ export async function hasOtherApprover(workspaceId: string, brandId: string, use
   ]);
   const legacyPerms = new Map(legacy.map((r) => [r.slug, r.permissions]));
   const roleOf = (m: (typeof members)[number]) => m.roleRef?.permissions ?? legacyPerms.get(LEGACY_ROLE_SLUG[m.role]);
-  if (members.some((m) => roleOf(m)?.includes("content.approve"))) return true;
+  if (members.some((m) => roleOf(m)?.includes(key))) return true;
   // As in effectivePermissions: a grant counts only for someone with a workspace role.
   const withRole = new Set(members.filter((m) => roleOf(m)).map((m) => m.userId));
-  return grants.some((g) => withRole.has(g.userId) && !isClientGrant(g.role) && g.role.permissions.includes("content.approve"));
+  return grants.some((g) => withRole.has(g.userId) && !isClientGrant(g.role) && g.role.permissions.includes(key));
+}
+
+/**
+ * Can someone other than `userId` approve this brand's content? A one-person business can't follow a four-eyes rule.
+ * A client reviewer's approval doesn't count here: staff can still approve their own post when only the client could.
+ */
+export const hasOtherApprover = (workspaceId: string, brandId: string, userId: string) =>
+  hasOtherHolder(workspaceId, brandId, userId, "content.approve");
+
+/**
+ * Does an active `userId` hold `key` on the brand as staff: through their workspace role or a project grant that is not
+ * the client-reviewer role? Two indexed lookups (the same rule as brandOwners, for one person). Unlike
+ * effectivePermissions it reads only DB roles (roleRef), not the legacy enum, as the owner pickers do.
+ */
+export async function brandMemberPerms(db: Db, scope: { workspaceId: string; brandId: string }, userId: string, key: PermissionKey) {
+  const user = { status: "ACTIVE" as const, deletedAt: null };
+  const [viaWorkspace, viaGrant] = await Promise.all([
+    db.workspaceMember.findFirst({ where: { workspaceId: scope.workspaceId, userId, roleRef: { permissions: { has: key } }, user }, select: { id: true } }),
+    db.brandMember.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId, role: { permissions: { has: key }, NOT: CLIENT_GRANT_WHERE }, user }, select: { id: true } }),
+  ]);
+  return !!viaWorkspace || !!viaGrant;
 }
 
 export async function requirePermission(

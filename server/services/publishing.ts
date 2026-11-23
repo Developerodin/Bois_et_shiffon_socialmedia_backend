@@ -6,7 +6,7 @@ import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefuse
 import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { CAPTION_LIMITS, safeHttpUrl } from "@/shared";
-import { CLIENT_GRANT_WHERE, hasOtherApprover, requirePermission } from "@/server/auth/permissions";
+import { brandMemberPerms, hasOtherApprover, requirePermission } from "@/server/auth/permissions";
 import { linkedProducts } from "@/server/catalog/linked";
 import { gateIssues, linkedIds, ProductOverride, snapshotOf } from "@/server/content/product-checks";
 import { campaignsById } from "@/server/catalog/campaigns";
@@ -244,15 +244,9 @@ export async function brandOwners(scope: { workspaceId: string; brandId: string 
 /** Give a post to someone with access to the brand, or to nobody (null). An unknown user and one without access get the same 400. */
 export async function setOwner(scope: { workspaceId: string; brandId: string; userId: string }, itemId: string, userId: string | null) {
   // ponytail: checked outside the transaction, so removing the member in the same instant can still let one assignment through; a lock on membership if that matters.
-  // Two indexed lookups (the same rule as brandOwners, for one person): brand.read through the workspace role or a project
-  // grant that is not the client-reviewer role, and the person is active.
-  if (userId) {
-    const user = { status: "ACTIVE" as const, deletedAt: null };
-    const [viaWorkspace, viaGrant] = await Promise.all([
-      prisma.workspaceMember.findFirst({ where: { workspaceId: scope.workspaceId, userId, roleRef: { permissions: { has: "brand.read" } }, user }, select: { id: true } }),
-      prisma.brandMember.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, userId, role: { permissions: { has: "brand.read" }, NOT: CLIENT_GRANT_WHERE }, user }, select: { id: true } }),
-    ]);
-    if (!viaWorkspace && !viaGrant) throw new PublishingError("Pick someone who works on this brand.", 400, "owner.invalid");
+  // brand.read through the workspace role or a project grant that is not the client-reviewer role, and the person is active.
+  if (userId && !(await brandMemberPerms(prisma, scope, userId, "brand.read"))) {
+    throw new PublishingError("Pick someone who works on this brand.", 400, "owner.invalid");
   }
   await prisma.$transaction(async (tx) => {
     await lock(tx, itemId);
