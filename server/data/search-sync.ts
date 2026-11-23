@@ -72,7 +72,8 @@ export async function replaceDays(tx: Prisma.TransactionClient, source: SourceKe
 /**
  * Daily and manual runs re-read Google's last 3 days (the newest ~2 are preliminary); backfill reads its window.
  * Every complete day is written in one transaction. A permission stop writes nothing; a rate-limit (or time-cap)
- * stop writes the complete days before it and reports "partial", so the backfill chain retries the window.
+ * stop writes the complete days before it ("rate-limited" or "partial"); the window is incomplete, so the backfill
+ * chain retries it later.
  * Reconnect and failed stops throw (stopReason), writing nothing.
  */
 registerSync("SEARCH_CONSOLE", async (ctx) => {
