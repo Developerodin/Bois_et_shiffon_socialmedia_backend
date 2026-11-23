@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { IntegrationConnection } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
-import { SHOPIFY_REFUSED } from "@/server/catalog/shopify";
-import { accessToken, markReconnect } from "@/server/services/connections";
+import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
+import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { fetchOrders, type ShopOrderRow, type StoppedReason } from "./shopify-orders";
-import { registerSync, stopReason, type SyncOutcome, type SyncStop } from "./sources";
+import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome, type SyncStop } from "./sources";
 
 /**
  * SHOPIFY_ORDERS runner: reads every order updated since `DataSource.cursor` (Shopify's updated_at high-water mark;
@@ -82,3 +82,42 @@ export async function syncShopifyOrders(
 }
 
 registerSync("SHOPIFY_ORDERS", (ctx) => syncShopifyOrders(ctx));
+
+export type TurnOn =
+  | { ok: true; sourceId: string }
+  | { ok: false; problem: "not-connected" | "missing-scope" | "refused" | "unreachable" };
+
+/**
+ * Turn the orders sync on for one of the brand's Shopify connections: its stored token only (a token never comes in a
+ * request),
+ * its scopes asked of Shopify now (the stored list may be what we requested, not what was granted) and saved back.
+ * Without read_orders nothing is created. Upserts the source (switching an OFF one back on) and queues its first run,
+ * which reads the last 60 days. Re-running it queues another run; the upserts make that harmless.
+ */
+export async function turnOnShopifyOrders(scope: { workspaceId: string; brandId: string }, connectionId: string): Promise<TurnOn> {
+  // Loaded with the route's brand and workspace: another brand's connection id finds nothing (404).
+  const conn = await prisma.integrationConnection.findFirst({
+    where: { id: connectionId, workspaceId: scope.workspaceId, brandId: scope.brandId, provider: "SHOPIFY", status: "ACTIVE" },
+  });
+  if (!conn) return { ok: false, problem: "not-connected" };
+  const shop = conn.externalAccountId;
+  let scopes: string[];
+  try {
+    ({ scopes } = await grantedScopes(shop, await accessToken(conn)));
+  } catch (e) {
+    console.warn("[shopify] orders scope check failed", scope.brandId, e instanceof Error ? e.message : e);
+    if (!(e instanceof ReconnectNeeded)) return { ok: false, problem: "unreachable" };
+    await markReconnect(conn.id, SHOPIFY_REFUSED);
+    return { ok: false, problem: "refused" };
+  }
+  await prisma.integrationConnection.updateMany({ where: { id: conn.id, workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { scopes } });
+  if (!SHOPIFY_ORDER_SCOPES.every((s) => scopes.includes(s))) return { ok: false, problem: "missing-scope" };
+
+  const source = await prisma.dataSource.upsert({
+    where: { brandId_kind_externalId: { brandId: scope.brandId, kind: "SHOPIFY_ORDERS", externalId: shop } },
+    create: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SHOPIFY_ORDERS", externalId: shop, connectionId: conn.id, label: shop },
+    update: { connectionId: conn.id, label: shop, status: "ACTIVE" },
+  });
+  await enqueueSourceSync(source, "manual", { key: `data:${source.id}:turn-on:${source.updatedAt.getTime()}` });
+  return { ok: true, sourceId: source.id };
+}
