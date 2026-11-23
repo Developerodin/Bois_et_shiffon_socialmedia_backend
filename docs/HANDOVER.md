@@ -97,7 +97,7 @@ unflagged but permission-checked, so it is harmless with the web flag off.
   task away, name yourself reviewer, submit, approve), and the bell count no longer seq-scans Notification (measured
   38 ms → 0.08 ms at 1M rows). Known: the panel still shows Approve to the submitter (allowedActions doesn't know who
   submitted); the click answers with the refusal.
-- Fourth four-lens review 2026-11-24 on main (server 1367941..69672c7, web fefbe27..a3b0252, mobile 1d113f1; not
+- Fourth four-lens review 2026-11-23 (evening) on main (server 1367941..69672c7, web fefbe27..a3b0252, mobile 1d113f1; not
   pushed). Owner decisions: the submitter hears approve / changes (TASK_APPROVED, TASK_CHANGES_REQUESTED, bell only:
   phone push exists only for reels); rechecks catch up a missed week, keyed by recheckOn; overdue fires once, then
   weekly, keyed by dueOn + week; unread bell notices group per kind and business (count, opens /tasks?view=…, marks
