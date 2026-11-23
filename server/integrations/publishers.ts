@@ -54,7 +54,7 @@ async function call<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 const post = (url: string, params: Record<string, string>) =>
-  call<{ id: string }>(url, { method: "POST", body: new URLSearchParams(params) });
+  call<{ id: string; post_id?: string }>(url, { method: "POST", body: new URLSearchParams(params) }); // post_id: Page /photos
 
 /** Containers (Instagram, Threads) process asynchronously; publish only once they are FINISHED. */
 async function waitForContainer(url: string, field: "status_code" | "status", tries = 10) {
@@ -76,10 +76,12 @@ export const PUBLISHERS: Partial<
 > = {
   async META(p, { id, token }) {
     await p.beforePublish?.();
+    // A photo post answers with the photo id and the post id; keep the post id, which insights need (the link
+    // still opens the photo). Posts published before this kept the photo id and get no insights.
     const res = p.imageUrl
       ? await post(`${GRAPH}/${id}/photos`, { url: p.imageUrl, caption: p.text, access_token: token })
       : await post(`${GRAPH}/${id}/feed`, { message: p.text, access_token: token });
-    return { externalId: res.id, externalUrl: `https://www.facebook.com/${res.id}` };
+    return { externalId: res.post_id ?? res.id, externalUrl: `https://www.facebook.com/${res.id}` };
   },
 
   async INSTAGRAM(p, { id, token }) {
