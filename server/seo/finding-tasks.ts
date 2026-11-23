@@ -6,6 +6,7 @@ import type { Finding } from "@/server/seo/checks";
 import { TX } from "@/server/services/publishing";
 import type { TaskViewer } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
+import { taskStatusInSql } from "@/server/tasks/sql";
 import { isUniqueViolation, TaskError } from "@/server/tasks/errors";
 import { getTask, type TaskScope } from "@/server/tasks/service";
 import { OPEN_TASK_STATUSES, safeHttpUrl, type TaskDto } from "@/shared";
@@ -28,6 +29,8 @@ export function isStableFindingId(_kind: AuditKind, id: string): boolean {
 }
 
 const OPEN = [...OPEN_TASK_STATUSES];
+/** What the audit may close by itself: to do or in progress, never in review (a reviewer decides). */
+const CLOSABLE_BY_AUDIT = taskStatusInSql(["TODO", "IN_PROGRESS"]);
 const findingsOf = (json: Prisma.JsonValue) => (Array.isArray(json) ? (json as unknown as Finding[]) : []);
 
 /** The finding as a task: detail, fix and its pages, within the task's text limits. */
@@ -111,7 +114,7 @@ export async function clearFindings(payload: unknown): Promise<void> {
   const now = new Date();
   await prisma.$transaction(async (tx) => {
     const closed = toClose.length
-      ? await tx.$queryRaw<{ id: string }[]>`UPDATE "Task" SET status = 'DONE', "completedAt" = ${now}, "findingClearedAt" = ${now}, "blockedReason" = NULL, "blockedOnId" = NULL, "updatedAt" = ${now} WHERE id = ANY(${toClose}) AND status IN ('TODO', 'IN_PROGRESS') AND "reviewerId" IS NULL RETURNING id`
+      ? await tx.$queryRaw<{ id: string }[]>`UPDATE "Task" t SET status = 'DONE', "completedAt" = ${now}, "findingClearedAt" = ${now}, "blockedReason" = NULL, "blockedOnId" = NULL, "updatedAt" = ${now} WHERE t.id = ANY(${toClose}) AND ${CLOSABLE_BY_AUDIT} AND t."reviewerId" IS NULL RETURNING t.id`
       : [];
     const ids = closed.map((r) => r.id);
     const comment = (taskId: string, body: string) => ({ workspaceId, brandId, taskId, authorId: null, kind: "SYSTEM" as const, body, byClient: false, internal: false });

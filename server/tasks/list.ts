@@ -2,12 +2,12 @@ import "server-only";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
-import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
 import { brandOwners } from "@/server/services/publishing";
 import { visibleTaskSql, type TaskViewer } from "@/server/tasks/access";
 import { TaskError } from "@/server/tasks/errors";
 import { TASK_DTO_INCLUDE, toTaskDtos, type TaskScope } from "@/server/tasks/service";
-import { isBlocked, isOverdue, OPEN_STATUSES, OPEN_TASK_STATUSES, TASK_AREAS, type PostRow, type TaskDto, type TodayDto } from "@/shared";
+import { brandLocalDay, openTaskSql } from "@/server/tasks/sql";
+import { isBlocked, isOverdue, OPEN_STATUSES, TASK_AREAS, type PostRow, type TaskDto, type TodayDto } from "@/shared";
 
 export const TASK_VIEWS = ["mine", "approvals", "due-today", "overdue", "blocked", "open", "done"] as const;
 export type TaskView = (typeof TASK_VIEWS)[number];
@@ -27,17 +27,12 @@ const TODAY_ROWS = 5;
 const POSTS = 20;
 const DONE_DAYS = 30;
 
-// The open-status filter as a literal, so the planner matches the partial indexes (WHERE status IN (...)); the only
-// Prisma.raw here, built from a code constant.
-const OPEN = Prisma.raw(`t.status IN (${OPEN_TASK_STATUSES.map((s) => `'${s}'`).join(",")})`);
+const OPEN = openTaskSql;
 const DUE = Prisma.sql`COALESCE(t."dueOn", 'infinity'::date)`;
 
-/**
- * The brand's local day at `now`: its profile's time zone, else DEFAULT_TIME_ZONE (passed as a value).
- * ponytail: an invalid stored time zone makes the query fail; the profile writers are where to validate it.
- */
+/** The brand's local day at `now` (brandLocalDay). */
 const localToday = (brandId: string, now: Date) =>
-  Prisma.sql`(SELECT (${now.toISOString()}::timestamptz AT TIME ZONE COALESCE(bp."timeZone", ${DEFAULT_TIME_ZONE}))::date FROM "Brand" b LEFT JOIN "BrandProfile" bp ON bp."brandId" = b.id WHERE b.id = ${brandId})`;
+  Prisma.sql`(SELECT ${brandLocalDay(now)} FROM "Brand" b LEFT JOIN "BrandProfile" bp ON bp."brandId" = b.id WHERE b.id = ${brandId})`;
 
 const OpenKey = z.object({ due: z.union([z.literal("infinity"), z.iso.date()]), id: z.string().min(1).max(100) });
 const DoneKey = z.object({ completedAt: z.iso.datetime(), id: z.string().min(1).max(100) });
@@ -73,7 +68,8 @@ export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.S
   else where.push(OPEN);
   if (q.view === "mine") where.push(Prisma.sql`t."ownerId" = ${v.userId}`);
   if (q.view === "approvals") where.push(Prisma.sql`t.status = 'IN_REVIEW' AND t."reviewerId" = ${v.userId}`);
-  if (q.view === "due-today") where.push(Prisma.sql`t."dueOn" = ${localToday(v.brandId, now)}`);
+  // The same expression as the ORDER BY and cursor, so the (brand, due, id) index serves the filter too.
+  if (q.view === "due-today") where.push(Prisma.sql`${DUE} = ${localToday(v.brandId, now)}`);
   if (q.view === "overdue") where.push(Prisma.sql`t."dueOn" < ${localToday(v.brandId, now)}`);
   if (q.view === "blocked") where.push(Prisma.sql`t."blockedReason" IS NOT NULL`);
   if (q.area) where.push(Prisma.sql`${q.area}::"TaskArea" = ANY(t.areas)`);

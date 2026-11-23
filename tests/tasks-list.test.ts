@@ -78,6 +78,11 @@ describe("listSql", () => {
     expect(done).toMatch(/ORDER BY t\."completedAt" DESC, t\.id LIMIT \?$/);
   });
 
+  it("due-today compares the indexed due expression with the brand-local day", () => {
+    const sql = text(listSql(v, { view: "due-today" }, NOW));
+    expect(sql).toContain(`COALESCE(t."dueOn", 'infinity'::date) = (SELECT (?::timestamptz AT TIME ZONE COALESCE(bp."timeZone", ?))::date FROM "Brand" b`);
+  });
+
   it("filters and the keyset sit in the query as parameters", () => {
     const sql = listSql(v, { view: "mine", area: "WEBSITE", workProjectId: "p1", ownerId: "u2", cursor: encodeCursor("mine", { due: "2026-11-30", id: "t9" }) }, NOW);
     expect(text(sql)).toContain(`= ANY(t.areas)`);

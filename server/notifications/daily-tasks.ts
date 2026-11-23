@@ -1,17 +1,13 @@
 import "server-only";
 import { Prisma } from "@prisma/client";
-import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
 import { prisma } from "@/server/db/prisma";
-import { OPEN_TASK_STATUSES } from "@/shared";
+import { brandLocalDay, openTaskSql } from "@/server/tasks/sql";
 
 // ponytail: runs at 05:00 UTC; brands west of UTC hear a day late. Hourly sweep firing per brand-local day if that matters.
 
-// The open-status filter as a literal (as in server/tasks/list.ts), so the planner matches the partial indexes; the only
-// Prisma.raw here, built from a code constant.
-const OPEN = Prisma.raw(`t.status IN (${OPEN_TASK_STATUSES.map((s) => `'${s}'`).join(",")})`);
-
-/** The task's brand-local day at `now`: its profile's time zone, else DEFAULT_TIME_ZONE (passed as a value). */
-const localDay = (now: Date) => Prisma.sql`(${now.toISOString()}::timestamptz AT TIME ZONE COALESCE(bp."timeZone", ${DEFAULT_TIME_ZONE}))::date`;
+const OPEN = openTaskSql;
+/** The task's brand-local day at `now` (brandLocalDay; the queries join the task's BrandProfile as bp). */
+const localDay = brandLocalDay;
 
 /**
  * One notice per owned task matching `where`, keyed `<kind>:<owner>:<task>:<brand-local yyyy-mm-dd>`, so a second
