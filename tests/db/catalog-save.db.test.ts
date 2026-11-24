@@ -155,3 +155,27 @@ describe("a big change", () => {
     expect(sample.price?.toFixed(2)).toBe("2.00");
   });
 });
+
+describe("moving off the website's product pages", () => {
+  it("new SHOPIFY and WEBSITE rows take the person's facts from the SITE row with the same link, else the same SKU", async () => {
+    await seed("SITE", "url:https://shop.example/p/chair", { url: "https://shop.example/p/chair/", materials: "Oak", dimensions: "80 cm", certifications: "FSC" });
+    await seed("SITE", "sku:T-1", { sku: "T-1", url: "https://shop.example/table.html", materials: "Walnut" });
+    await seed("SITE", "sku:L-1", { sku: "L-1", url: "https://shop.example/lamp", materials: "Brass" }, "cs-b");
+    await saveRows(prisma, scope(), "SHOPIFY", {
+      rows: [
+        row("gid://shopify/ProductVariant/1", { url: "https://shop.example/p/chair#reviews" }),
+        row("gid://shopify/ProductVariant/2", { sku: "T-1", url: "https://shop.example/products/table" }),
+        row("gid://shopify/ProductVariant/3", { sku: "L-1", url: "https://shop.example/lamp", materials: null }),
+      ],
+      complete: true,
+    });
+    const shopify = await prisma.product.findMany({ where: { workspaceId: ws, brandId: "cs-a", source: "SHOPIFY" }, orderBy: { externalId: "asc" } });
+    expect(shopify.map((p) => [p.materials, p.dimensions, p.certifications])).toEqual([["Oak", "80 cm", "FSC"], ["Walnut", null, null], [null, null, null]]);
+    expect(await live()).toHaveLength(3); // the SITE rows are archived by the complete Shopify save
+
+    await prisma.product.deleteMany({});
+    await seed("SITE", "url:https://shop.example/bench", { url: "https://shop.example/bench", materials: "Ash" });
+    await saveRows(prisma, scope(), "WEBSITE", { rows: [row("7", { url: "https://shop.example/bench" })], complete: false });
+    expect((await prisma.product.findFirstOrThrow({ where: { source: "WEBSITE" } })).materials).toBe("Ash");
+  });
+});

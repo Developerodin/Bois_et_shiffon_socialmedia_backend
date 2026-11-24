@@ -299,10 +299,22 @@ type SaveOptions = {
 type KeptField = "price" | "compareAtPrice" | "inStock" | "stockQuantity";
 const kept = (p: Stored, f: KeptField) => (f === "price" || f === "compareAtPrice" ? (p[f]?.toFixed(2) ?? null) : p[f]);
 
+/** A link without its #fragment or trailing slash, so "…/chair/" and "…/chair#reviews" are one product. */
+export function sameLink(url: string) {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    return u.toString().replace(/\/+(\?|$)/, "$1");
+  } catch {
+    return url; // a stored link typed before links were checked
+  }
+}
+
 /**
  * Write what changed, then archive what the source no longer has (complete fetches only, archiveWhere). Returns rows
  * seen and what happened to them. `db` may be a transaction. A row sent without a currency (the website's /cart.js failed) keeps the stored one.
- * New SHOPIFY rows take the person's facts from the same variant's WEBSITE row, so switching to Shopify keeps them.
+ * New SHOPIFY rows take the person's facts from the same variant's WEBSITE row, and new SHOPIFY or WEBSITE rows from
+ * the SITE row with the same link, else SKU (the website's product pages), so switching keeps them.
  * Queries: one read of the source (or of `keys`), changed rows in one UPDATE … FROM unnest per 1,000 (their stock
  * freshness included), createMany per 1,000 new rows, one stockCheckedAt update per 1,000 unchanged rows that report
  * stock, and the archive. Changed rows go first, so a key a matched row gives up is free for a new row.
@@ -378,10 +390,25 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
     });
     for (const { externalId, ...f } of website) if (externalId) facts.set(externalId, f);
   }
+  // From the product pages: only SITE rows carrying a fact are read (few; at most MAX_ROWS), matched here by link, then SKU.
+  const siteFacts = new Map<string, { materials: string | null; dimensions: string | null; certifications: string | null }>();
+  if ((source === "SHOPIFY" || source === "WEBSITE") && created.length) {
+    const site = await db.product.findMany({
+      where: { workspaceId: scope.workspaceId, brandId: scope.brandId, source: "SITE", OR: [{ materials: { not: null } }, { dimensions: { not: null } }, { certifications: { not: null } }] },
+      select: { url: true, sku: true, materials: true, dimensions: true, certifications: true },
+      orderBy: [{ archivedAt: { sort: "desc", nulls: "first" } }, { externalId: "asc" }],
+    });
+    for (const { url, sku, ...f } of site) {
+      if (url && !siteFacts.has(`url:${sameLink(url)}`)) siteFacts.set(`url:${sameLink(url)}`, f);
+      if (sku && !siteFacts.has(`sku:${sku}`)) siteFacts.set(`sku:${sku}`, f);
+    }
+  }
+  const factsOf = (r: SavedRow) =>
+    facts.get(variantNumericId(r.externalId) ?? "") ?? (r.url && siteFacts.get(`url:${sameLink(r.url)}`)) ?? (r.sku && siteFacts.get(`sku:${r.sku}`)) ?? undefined;
   let added = 0;
   for (const part of chunks(created)) {
     added += (await db.product.createMany({
-      data: part.map((r) => ({ ...facts.get(variantNumericId(r.externalId) ?? ""), ...r, ...where, ...(reports(r) && { stockCheckedAt: now }) })),
+      data: part.map((r) => ({ ...factsOf(r), ...r, ...where, ...(reports(r) && { stockCheckedAt: now }) })),
       skipDuplicates: true,
     })).count;
   }
