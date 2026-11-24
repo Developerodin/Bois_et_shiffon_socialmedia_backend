@@ -4,7 +4,8 @@ import { prisma } from "@/server/db/prisma";
 import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
 import { accessToken, markReconnect } from "@/server/services/connections";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
-import { fetchOrders, type ShopOrderRow } from "./shopify-orders";
+import { ASKCART_REFUSED, AskCartError, askCartReason, askCartShop, isAskCart } from "@/server/shopify/askcart";
+import { fetchAskCartOrders, fetchOrders, type ShopOrderRow } from "./shopify-orders";
 import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from "./sources";
 
 /**
@@ -58,10 +59,14 @@ export async function syncShopifyOrders(
   const conn = ctx.connection;
   if (!conn) return { count: 0, reason: stopReason("reconnect") };
   const since = ctx.source.cursor ? new Date(ctx.source.cursor) : new Date(now.getTime() - FIRST_RUN_DAYS * 86_400_000);
-  const read = await fetchOrders({ shop: conn.externalAccountId, accessToken: await accessToken(conn) }, since, ctx.signal);
+  const askCart = isAskCart(conn);
+  const read = askCart
+    ? await fetchAskCartOrders(since, ctx.signal)
+    : await fetchOrders({ shop: conn.externalAccountId, accessToken: await accessToken(conn) }, since, ctx.signal);
   const stop = read.stoppedReason;
   // A refused token is the connection's fault (products stop too); a missing scope or permission is not.
-  if (stop === "reconnect") await markReconnect(conn.id, SHOPIFY_REFUSED);
+  // ponytail: an AskCart refusal is always shown as the store's install; a wrong ASKCART_SECRET shows in the log.
+  if (stop === "reconnect") await markReconnect(conn.id, askCart ? ASKCART_REFUSED : SHOPIFY_REFUSED);
   if (stop === "reconnect" || stop === "failed" || stop === "permission" || stop === "missing_scope") {
     return { count: 0, reason: stopReason(stop) };
   }
@@ -92,6 +97,20 @@ export async function turnOnShopifyOrders(scope: { workspaceId: string; brandId:
   });
   if (!conn) return { ok: false, problem: "not-connected" };
   const shop = conn.externalAccountId;
+  if (isAskCart(conn)) {
+    // AskCart holds the scopes; asking for the shop proves it answers. access_denied on orders shows on the first run.
+    try {
+      await askCartShop();
+    } catch (e) {
+      console.warn("[askcart] orders turn-on check failed", scope.brandId, e instanceof Error ? e.message : e);
+      if (e instanceof ReconnectNeeded) {
+        await markReconnect(conn.id, askCartReason(e));
+        return { ok: false, problem: "refused" };
+      }
+      return { ok: false, problem: e instanceof AskCartError && e.code === "access_denied" ? "missing-scope" : "unreachable" };
+    }
+    return { ok: true, sourceId: await startOrders(scope, conn, shop, conn.displayName) };
+  }
   let scopes: string[];
   try {
     ({ scopes } = await grantedScopes(shop, await accessToken(conn)));
@@ -104,11 +123,16 @@ export async function turnOnShopifyOrders(scope: { workspaceId: string; brandId:
   await prisma.integrationConnection.updateMany({ where: { id: conn.id, workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { scopes } });
   if (!SHOPIFY_ORDER_SCOPES.every((s) => scopes.includes(s))) return { ok: false, problem: "missing-scope" };
 
+  return { ok: true, sourceId: await startOrders(scope, conn, shop, shop) };
+}
+
+/** Upserts the orders source (switching an OFF one back on) and queues its first run. */
+async function startOrders(scope: { workspaceId: string; brandId: string }, conn: IntegrationConnection, shop: string, label: string) {
   const source = await prisma.dataSource.upsert({
     where: { brandId_kind_externalId: { brandId: scope.brandId, kind: "SHOPIFY_ORDERS", externalId: shop } },
-    create: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SHOPIFY_ORDERS", externalId: shop, connectionId: conn.id, label: shop },
-    update: { connectionId: conn.id, label: shop, status: "ACTIVE" },
+    create: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SHOPIFY_ORDERS", externalId: shop, connectionId: conn.id, label },
+    update: { connectionId: conn.id, label, status: "ACTIVE" },
   });
   await enqueueSourceSync(source, "manual", { key: `data:${source.id}:turn-on:${source.updatedAt.getTime()}` });
-  return { ok: true, sourceId: source.id };
+  return source.id;
 }

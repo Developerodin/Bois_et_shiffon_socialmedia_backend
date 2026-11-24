@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { shopifyQuery } from "@/server/catalog/shopify";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
+import { AskCartError, askCartOrders, type AskCartMoney, type AskCartOrder, type AskCartPage } from "@/server/shopify/askcart";
 import type { SyncStop } from "@/server/data/sync-stop";
 
 /**
@@ -164,6 +165,69 @@ export async function fetchOrders(
     orders.push(...data.orders.nodes.map(mapOrder));
     if (!data.orders.pageInfo.hasNextPage) return done();
     after = data.orders.pageInfo.endCursor;
+  }
+  return done("capped");
+}
+
+const shopMoney = (m: AskCartMoney | null | undefined): Money | null => (m ? { shopMoney: m } : null);
+
+/** An AskCart order (the same fields, money without the shopMoney wrapper) as a ShopOrder row, through mapOrder. */
+export const mapAskCartOrder = (o: AskCartOrder): ShopOrderRow =>
+  mapOrder({
+    ...o,
+    currentSubtotalPriceSet: shopMoney(o.currentSubtotalPriceSet)!,
+    currentTotalDiscountsSet: shopMoney(o.currentTotalDiscountsSet),
+    currentShippingPriceSet: shopMoney(o.currentShippingPriceSet),
+    currentTotalPriceSet: shopMoney(o.currentTotalPriceSet)!,
+    totalRefundedSet: shopMoney(o.totalRefundedSet),
+    currentTaxLines: (o.currentTaxLines ?? []).map((t) => ({ priceSet: shopMoney(t.priceSet)! })),
+  });
+
+/**
+ * fetchOrders for a brand reading through AskCart (server/shopify/askcart.ts): AskCart's incremental mode
+ * (`updatedSince`, oldest update first, 100 a page) with the same overlap, caps and stops, so the runner can't tell
+ * them apart. A page AskCart cut short (`rateLimited`), its 429 after the client's retries, or Shopify's throttle →
+ * `rate_limited` with the pages before it (a sorted prefix). 401 / store not connected → `reconnect`; 403 access_denied →
+ * `missing_scope`; anything else → `failed`. Orders seen twice (same updatedAt at a page edge) keep their last read.
+ * AskCart's read_all_orders_pending warning (orders created before visibleSince left out) is logged only: the
+ * pasted-token path has the same 60-day reach.
+ */
+export async function fetchAskCartOrders(sinceUpdatedAt: Date, signal?: AbortSignal): Promise<FetchOrdersResult> {
+  const updatedSince = new Date(sinceUpdatedAt.getTime() - OVERLAP_MS);
+  const started = Date.now();
+  const byId = new Map<string, ShopOrderRow>();
+  let cursor: string | null = null;
+  const done = (stoppedReason?: SyncStop): FetchOrdersResult => {
+    const orders = [...byId.values()];
+    return {
+      orders,
+      cursorEnd: orders.reduce((max, o) => (o.shopifyUpdatedAt > max ? o.shopifyUpdatedAt : max), sinceUpdatedAt),
+      ...(stoppedReason ? { stoppedReason } : {}),
+    };
+  };
+  const none = (stoppedReason: SyncStop): FetchOrdersResult => ({ orders: [], cursorEnd: sinceUpdatedAt, stoppedReason });
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    if (page > 0 && (Date.now() - started > MAX_MS || signal?.aborted)) return done("capped");
+    let res: AskCartPage<AskCartOrder>;
+    try {
+      res = await askCartOrders({ updatedSince }, cursor, signal);
+    } catch (err) {
+      if (err instanceof ReconnectNeeded) return none("reconnect");
+      if (signal?.aborted) return done("capped");
+      if (err instanceof AskCartError && err.rateLimited) return done("rate_limited");
+      if (err instanceof AskCartError && err.code === "access_denied") return none("missing_scope");
+      if (err instanceof AskCartError || err instanceof TypeError || (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError"))) {
+        console.error("[askcart-orders] failed", err.name, err instanceof AskCartError ? err.message : "");
+        return none("failed");
+      }
+      throw err;
+    }
+    if (res.warning?.code === "read_all_orders_pending" && page === 0) console.warn("[askcart-orders] orders created before", res.warning.visibleSince, "aren't visible yet");
+    for (const o of res.items ?? []) byId.set(o.id, mapAskCartOrder(o));
+    if (res.rateLimited) return done("rate_limited");
+    if (res.complete || !res.nextCursor) return done();
+    cursor = res.nextCursor;
   }
   return done("capped");
 }

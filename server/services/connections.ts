@@ -1,4 +1,4 @@
-import type { IntegrationConnection, IntegrationProvider } from "@prisma/client";
+import type { IntegrationConnection, IntegrationProvider, Prisma } from "@prisma/client";
 import { requireBrandAccess } from "@/server/auth/access";
 import { requirePermission } from "@/server/auth/permissions";
 import { hashToken, newToken } from "@/server/auth/tokens";
@@ -6,6 +6,7 @@ import { currentKeyVersion, decryptCredentials, encryptCredentials } from "@/ser
 import { prisma } from "@/server/db/prisma";
 import { PROVIDERS, ProviderError, providerConfig, type ConnectedAccount, type OAuthProvider } from "@/server/integrations/providers";
 import { postedCount, storyTargetOf } from "@/server/services/publishing";
+import { askCartConfig } from "@/server/shopify/askcart";
 
 const STATE_TTL_MS = 10 * 60_000; // DEC-017: ≤10 min
 
@@ -99,7 +100,8 @@ export async function refreshExpiringTokens() {
 export function listProviders() {
   return [
     ...(Object.keys(PROVIDERS) as OAuthProvider[]).map((p) => ({ provider: p, label: PROVIDERS[p].label, configured: providerConfig(p) !== null, kind: "oauth" as const })),
-    { provider: "SHOPIFY" as const, label: "Shopify", configured: true, kind: "token" as const },
+    // askCart: this deployment can read a store through AskCart (env set); only one brand can attach it.
+    { provider: "SHOPIFY" as const, label: "Shopify", configured: true, kind: "token" as const, askCart: askCartConfig() !== null },
   ];
 }
 
@@ -186,9 +188,14 @@ export async function completeConnect(input: {
  * Save connected accounts (tokens encrypted; a reconnect replaces them in place) and the `integration.connected`
  * audit event in one transaction. Used by the OAuth callback and by Shopify's token connect.
  */
-export async function saveConnections(input: { workspaceId: string; brandId: string; provider: IntegrationProvider; userId: string; accounts: ConnectedAccount[] }) {
+export async function saveConnections(input: {
+  workspaceId: string; brandId: string; provider: IntegrationProvider; userId: string; accounts: ConnectedAccount[];
+  /** Runs first in the same transaction; throw to save nothing (AskCart's one-brand rule). */
+  guard?: (tx: Prisma.TransactionClient) => Promise<void>;
+}) {
   const keyVersion = currentKeyVersion();
   return prisma.$transaction(async (tx) => {
+    await input.guard?.(tx);
     const rows = [];
     for (const a of input.accounts) {
       const data = {

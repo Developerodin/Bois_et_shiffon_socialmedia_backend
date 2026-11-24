@@ -8,6 +8,7 @@ import { enqueueJob } from "@/server/jobs/queue";
 import { shopifySized } from "@/server/research/brand-assets";
 import { htmlText, safeFetch, safeFetchBytes } from "@/server/research/crawl";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
+import { askCartCatalog, askCartReason, isAskCart } from "@/server/shopify/askcart";
 
 /**
  * Product catalogue sync (docs/superpowers/specs/2026-11-05-product-catalogue-design.md).
@@ -232,9 +233,14 @@ export async function websiteFeed(websiteUrl: string, signal?: AbortSignal): Pro
   return capRows({ rows, complete: false, note: PARTIAL });
 }
 
-/** The connection's store (its account id is the shop domain), token via accessToken(), which throws ReconnectNeeded. */
+/**
+ * The connection's store (its account id is the shop domain), token via accessToken(), which throws ReconnectNeeded.
+ * An AskCart connection reads through AskCart instead (no token here; it throws ReconnectNeeded the same way).
+ */
 async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal): Promise<Fetched> {
-  const { variants, currency, complete } = await shopifyVariants(conn.externalAccountId, await accessToken(conn), signal);
+  const { variants, currency, complete } = isAskCart(conn)
+    ? await askCartCatalog(signal)
+    : await shopifyVariants(conn.externalAccountId, await accessToken(conn), signal);
   return capRows({ rows: shopifyRows(variants, currency), complete, note: complete ? undefined : PARTIAL });
 }
 
@@ -506,12 +512,13 @@ export async function runCatalogSync(payload: unknown) {
   } catch (error) {
     if (error instanceof CatalogBusy) throw error;
     const refused = error instanceof ReconnectNeeded;
-    if (refused && found.source === "SHOPIFY") await markReconnect(found.shop.id, SHOPIFY_REFUSED);
+    const refusal = refused && found.source === "SHOPIFY" && isAskCart(found.shop) ? askCartReason(error) : SHOPIFY_REFUSED;
+    if (refused && found.source === "SHOPIFY") await markReconnect(found.shop.id, refusal);
     // Messages here carry statuses and Shopify error codes only, never a token.
     console.warn("[catalog] sync failed", scope.brandId, found.source, error instanceof Error ? error.message : error);
     // A SITE brand keeps its reader's progress on screen.
     const kept = found.source === "SITE" ? await siteProgress(scope, found.capped) : { count: 0 };
-    await record(scope, { at, source: found.source, ...kept }, refused ? REFUSED : FAILED);
+    await record(scope, { at, source: found.source, ...kept }, refused ? { ...REFUSED, error: refusal } : FAILED);
     throw error;
   }
 }
