@@ -47,7 +47,9 @@ const FEED_BYTES = 10_000_000;
 export const MAX_ROWS = 5000;
 const DEADLINE_MS = 240_000;
 const NOT_A_FEED: Note = { error: "Your website doesn't publish a product feed we can read (Shopify stores do). Connect Shopify or add products by hand.", reason: "not-a-feed" };
-const PARTIAL: Note = { error: "Only part of the catalogue could be read, so no products were archived.", reason: "partial" };
+// 401/403 on the feed: the site turns automated readers away (bot protection), so we can't tell whether it has a feed.
+const BLOCKED: Note = { error: "Your website blocks our product reader, so we can't read its products. Connect Shopify or add products by hand.", reason: "blocked" };
+const PARTIAL: Note ={ error: "Only part of the catalogue could be read, so no products were archived.", reason: "partial" };
 const FAILED: Note = { error: "The last sync couldn't read the products. Press Sync now to try again.", reason: "failed" };
 const REFUSED: Note = { error: SHOPIFY_REFUSED, reason: "shopify-refused" };
 
@@ -171,6 +173,7 @@ export async function websiteFeed(websiteUrl: string, signal?: AbortSignal): Pro
   const rows: SyncedRow[] = [];
   for (let page = 1; page <= FEED_PAGES; page++) {
     const res = await safeFetchBytes(new URL(`/products.json?limit=${FEED_PAGE_SIZE}&page=${page}`, origin).toString(), "application/json", FEED_BYTES, signal, 30_000);
+    if (page === 1 && (res.status === 401 || res.status === 403)) return { rows: [], complete: false, note: BLOCKED };
     if (res.status === 429 || res.status >= 500 || res.truncated) throw new Error(`Product feed page ${page}: ${res.truncated ? "too large" : res.status}`);
     let list: unknown = null;
     try {
