@@ -438,7 +438,7 @@ export function cleanBrandName(raw: unknown): string | null {
   return name;
 }
 
-const sameSite = (a: string, b: string) => a.replace(/^www\./, "") === b.replace(/^www\./, "");
+export const sameSite = (a: string, b: string) => a.replace(/^www\./, "") === b.replace(/^www\./, "");
 // App and widget sheets (cart drawers, reviews, wallets) say nothing about the brand's type.
 const SKIP_CSS = /component-|vendor|judge|wallet|checkout|shopifycloud|\/apps?\//i;
 const THEME_CSS = /\/assets\/(?:[^/]*[-_.])?(base|theme|custom|main|style|styles|global)[^/]*\.css/i;

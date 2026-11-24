@@ -111,6 +111,63 @@ describe("pageProducts", () => {
     expect(pageProducts(ld({ "@type": "ProductGroup", name: "Rug", hasVariant }), PAGE)).toHaveLength(200);
   });
 
+  it("products nested under reviews, offers or accessories are not this page's; mainEntity is", () => {
+    const real = product({
+      sku: undefined,
+      review: { "@type": "Review", itemReviewed: { "@type": "Product", name: "Oak chair" } },
+      isAccessoryOrSparePartFor: { "@type": "Product", name: "Oak table" },
+      offers: { "@type": "Offer", price: 50, availability: "OutOfStock", itemOffered: { "@type": "Product", name: "Oak chair" } },
+    });
+    const rows = pageProducts(ld({ "@type": "WebPage", mainEntity: real }, { "@type": "ItemList", itemListElement: [{ "@type": "Product", name: "Other" }] }), PAGE);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ title: "Oak chair", price: "50.00", inStock: false });
+  });
+
+  it("a repeated key keeps the first product", () => {
+    const rows = pageProducts(ld(product(), product({ name: "Copy", offers: undefined })), PAGE);
+    expect(rows.map((r) => [r.title, r.price])).toEqual([["Oak chair", "129.90"]]);
+  });
+
+  it("numeric sku, gtin13 and mpn", () => {
+    expect(pageProducts(ld(product({ sku: 12345 })), PAGE)[0]).toMatchObject({ externalId: "sku:12345", sku: "12345" });
+    expect(pageProducts(ld(product({ sku: undefined, gtin13: 3661558163080 })), PAGE)[0].externalId).toBe("sku:3661558163080");
+    expect(pageProducts(ld(product({ sku: Number.NaN, mpn: 7 })), PAGE)[0].externalId).toBe("sku:7");
+  });
+
+  it("a huge description is stripped once and cut", () => {
+    const description = `<p>${"word ".repeat(400_000)}</p>`;
+    const hasVariant = Array.from({ length: 200 }, (_, i) => ({ "@type": "Product", sku: `V${i}` }));
+    const started = performance.now();
+    const rows = pageProducts(ld({ "@type": "ProductGroup", name: "Rug", description, hasVariant }), PAGE);
+    expect(performance.now() - started).toBeLessThan(300);
+    expect(rows).toHaveLength(200);
+    expect(rows[199].description?.length).toBeGreaterThan(4990);
+    expect(rows[199].description?.length).toBeLessThanOrEqual(5000);
+  });
+
+  it("variants without sku key on their own link, so reordering keeps keys", () => {
+    const red = { "@type": "Product", color: "Red", url: "/p/lamp?c=red" };
+    const blue = { "@type": "Product", color: "Blue", offers: { url: "https://shop.test/p/lamp?c=blue" } };
+    const keys = (hasVariant: unknown[]) => pageProducts(ld({ "@type": "ProductGroup", name: "Lamp", url: "/p/lamp", hasVariant }), PAGE).map((r) => r.externalId).sort();
+    expect(keys([red, blue])).toEqual(["url:https://shop.test/p/lamp?c=blue", "url:https://www.shop.test/p/lamp?c=red"]);
+    expect(keys([blue, red])).toEqual(keys([red, blue]));
+  });
+
+  it("variants sharing a link are numbered; variants sharing a sku keep the first", () => {
+    const v = (color: string, extra = {}) => ({ "@type": "Product", color, url: "/p/lamp", ...extra });
+    const group = (hasVariant: unknown[]) => pageProducts(ld({ "@type": "ProductGroup", name: "Lamp", hasVariant }), PAGE);
+    expect(group([v("Red"), v("Blue")]).map((r) => r.externalId)).toEqual(["url:https://www.shop.test/p/lamp#0", "url:https://www.shop.test/p/lamp#1"]);
+    expect(group([v("Red", { sku: "L1" }), v("Blue", { sku: "L1" })]).map((r) => r.title)).toEqual(["Lamp — Red"]);
+  });
+
+  it("written prices and the first non-empty image", () => {
+    const row = (offers: unknown, image: unknown = "") => pageProducts(ld(product({ offers, image })), PAGE)[0];
+    expect(row({ price: "1 299,00" }).price).toBe("1299.00");
+    expect(row({ price: "1.299,00" }).price).toBe("1299.00");
+    expect(row({ price: "about 12" }).price).toBeNull();
+    expect(row({ price: 1 }, ["", { url: " " }, "/img/2.jpg"]).imageUrl).toBe("https://www.shop.test/img/2.jpg");
+  });
+
   it("no Product → []", () => {
     expect(pageProducts(`${ld({ "@type": "WebSite", name: "Shop" })}<script type="application/ld+json">{broken</script>`, PAGE)).toEqual([]);
   });
