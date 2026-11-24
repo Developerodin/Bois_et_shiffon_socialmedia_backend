@@ -771,6 +771,8 @@ model OAuthStateTransaction {
   client       String              @default("web")
   /// PKCE code_verifier for a connect that uses one (AskCart); sent once with the code, never to the browser
   codeVerifier String?
+  /// The store a connect was started for (AskCart): the token answer must name the same one
+  shop         String?
   expiresAt    DateTime
   consumedAt   DateTime?
   createdAt    DateTime            @default(now())

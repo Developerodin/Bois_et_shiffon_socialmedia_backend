@@ -25,7 +25,7 @@ export async function startAskCartConnect(input: { workspaceId: string; brandId:
   const cfg = askCartConfig();
   if (cfg?.mode !== "per-brand") throw new ConnectionError("AskCart isn't set up for per-store connects");
   const codeVerifier = b64url(randomBytes(32));
-  const state = await createConnectState({ workspaceId: input.workspaceId, brandId: input.brandId, userId: input.userId, provider: "SHOPIFY", codeVerifier });
+  const state = await createConnectState({ workspaceId: input.workspaceId, brandId: input.brandId, userId: input.userId, provider: "SHOPIFY", codeVerifier, shop: input.shop });
   const q = new URLSearchParams({
     shop: input.shop,
     state,
@@ -39,8 +39,8 @@ export async function startAskCartConnect(input: { workspaceId: string; brandId:
 
 /**
  * The callback's work. ConnectionError messages are shown to the person; AskCart's answer is never echoed (status and
- * code go to the log). The shop AskCart names in the token answer must be a .myshopify.com domain and match the
- * callback's `shop`, when one is given.
+ * code go to the log). The shop AskCart names in the token answer must be a .myshopify.com domain and match the shop
+ * the connect was started for (kept with the state) and the callback's `shop`, when one is given.
  */
 export async function completeAskCartConnect(input: { state: string; code: string; shop: string | null; userId: string }) {
   const claimed = await claimConnectState({ provider: "SHOPIFY", state: input.state, userId: input.userId });
@@ -57,7 +57,7 @@ export async function completeAskCartConnect(input: { state: string; code: strin
     throw new ConnectionError("Couldn't finish connecting through AskCart. Try again.");
   }
   const domain = shopDomain(String(tok.shop?.domain ?? ""));
-  if (!domain || (input.shop && shopDomain(input.shop) !== domain)) {
+  if (!domain || (st.shop && st.shop !== domain) || (input.shop && shopDomain(input.shop) !== domain)) {
     console.error("[askcart] token answer named another or no shop", st.brandId);
     throw new ConnectionError("AskCart answered for a different store. Try again.");
   }

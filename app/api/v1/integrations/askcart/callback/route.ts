@@ -25,7 +25,12 @@ export async function GET(request: Request) {
   }
 
   const session = await auth();
-  if (!session?.user?.id) return Response.redirect(appUrl(`/login?next=${encodeURIComponent("/settings?tab=connections")}`), 303);
+  // Signed out mid-connect: the code is single-use and bound to the person, so it isn't carried through sign-in; they
+  // land on Connections after signing in with a message to connect again.
+  if (!session?.user?.id) {
+    const next = `/settings?${new URLSearchParams({ tab: "connections", connectError: "You were signed out. Connect Shopify via AskCart again." })}`;
+    return Response.redirect(appUrl(`/login?next=${encodeURIComponent(next)}`), 303);
+  }
 
   try {
     const { connections } = await completeAskCartConnect({ state, code, shop: url.searchParams.get("shop"), userId: session.user.id });

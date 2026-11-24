@@ -61,8 +61,9 @@ export async function syncShopifyOrders(
   if (!conn) return { count: 0, reason: stopReason("reconnect") };
   const since = ctx.source.cursor ? new Date(ctx.source.cursor) : new Date(now.getTime() - FIRST_RUN_DAYS * 86_400_000);
   const read = isAskCart(conn)
-    ? await fetchAskCartOrders(await askCartToken(conn), since, ctx.signal).catch(async (e: unknown) => {
-        // AskCart refused our access or lost the store: the connection's fault, like a refused token.
+    ? await (async () => fetchAskCartOrders(await askCartToken(conn), since, ctx.signal))().catch(async (e: unknown) => {
+        // AskCart refused our access, lost the store, or the connection is from the other mode: the connection's
+        // fault, like a refused token.
         if (e instanceof ReconnectNeeded) await markReconnect(conn.id, askCartReason(e));
         throw e;
       })

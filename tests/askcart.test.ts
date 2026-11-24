@@ -204,6 +204,12 @@ describe("fetchAskCartOrders", () => {
     expect(await fetchAskCartOrders(SECRET, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: reason });
   });
 
+  it("an order without its totals stops the run as failed, nothing written", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch({ body: page([order(1, "2026-11-03T10:00:00Z"), { ...ORDER, currentTotalPriceSet: null }]) });
+    expect(await fetchAskCartOrders(SECRET, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: "failed" });
+  });
+
   it("a network failure is failed, not a crash", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));

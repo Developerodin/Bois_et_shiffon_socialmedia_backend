@@ -169,19 +169,29 @@ export async function fetchOrders(
   return done("capped");
 }
 
-const shopMoney = (m: AskCartMoney | null | undefined): Money | null => (m ? { shopMoney: m } : null);
+const shopMoney = (m: AskCartMoney | null | undefined): Money | null => (m && typeof m.amount === "string" ? { shopMoney: m } : null);
 
-/** An AskCart order (the same fields, money without the shopMoney wrapper) as a ShopOrder row, through mapOrder. */
-export const mapAskCartOrder = (o: AskCartOrder): ShopOrderRow =>
-  mapOrder({
+/**
+ * An AskCart order (the same fields, money without the shopMoney wrapper) as a ShopOrder row, through mapOrder; null
+ * when it lacks what a row needs (id, dates, subtotal, total), so the caller stops cleanly instead of crashing.
+ */
+export function mapAskCartOrder(o: AskCartOrder): ShopOrderRow | null {
+  const subtotal = shopMoney(o?.currentSubtotalPriceSet);
+  const total = shopMoney(o?.currentTotalPriceSet);
+  if (!subtotal || !total || !o.id || !o.processedAt || !o.updatedAt) return null;
+  return mapOrder({
     ...o,
-    currentSubtotalPriceSet: shopMoney(o.currentSubtotalPriceSet)!,
+    currentSubtotalPriceSet: subtotal,
     currentTotalDiscountsSet: shopMoney(o.currentTotalDiscountsSet),
     currentShippingPriceSet: shopMoney(o.currentShippingPriceSet),
-    currentTotalPriceSet: shopMoney(o.currentTotalPriceSet)!,
+    currentTotalPriceSet: total,
     totalRefundedSet: shopMoney(o.totalRefundedSet),
-    currentTaxLines: (o.currentTaxLines ?? []).map((t) => ({ priceSet: shopMoney(t.priceSet)! })),
+    currentTaxLines: (o.currentTaxLines ?? []).flatMap((t) => {
+      const priceSet = shopMoney(t?.priceSet);
+      return priceSet ? [{ priceSet }] : [];
+    }),
   });
+}
 
 /**
  * fetchOrders for a brand reading through AskCart (server/shopify/askcart.ts): AskCart's incremental mode
@@ -225,7 +235,15 @@ export async function fetchAskCartOrders(bearer: string, sinceUpdatedAt: Date, s
       throw err;
     }
     if (res.warning?.code === "read_all_orders_pending" && page === 0) console.warn("[askcart-orders] orders created before", res.warning.visibleSince, "aren't visible yet");
-    for (const o of res.items ?? []) byId.set(o.id, mapAskCartOrder(o));
+    for (const o of res.items ?? []) {
+      const row = mapAskCartOrder(o);
+      // An order AskCart sent without its totals: the run fails cleanly (nothing written, retried), never half a page.
+      if (!row) {
+        console.error("[askcart-orders] an order came without its totals");
+        return none("failed");
+      }
+      byId.set(row.shopifyId, row);
+    }
     if (res.rateLimited) return done("rate_limited");
     if (res.complete || !res.nextCursor) return done();
     cursor = res.nextCursor;

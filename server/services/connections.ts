@@ -143,7 +143,7 @@ export async function startConnect(input: {
 
 /** A single-use connect state (DEC-017: only its hash is stored, ≤10 min); returns the raw state for the URL. */
 export async function createConnectState(input: {
-  workspaceId: string; brandId: string; userId: string; provider: IntegrationProvider; client?: "web" | "mobile"; codeVerifier?: string;
+  workspaceId: string; brandId: string; userId: string; provider: IntegrationProvider; client?: "web" | "mobile"; codeVerifier?: string; shop?: string;
 }) {
   const { raw, hash } = newToken();
   await prisma.oAuthStateTransaction.create({
@@ -159,6 +159,8 @@ export async function createConnectState(input: {
  */
 export async function claimConnectState(input: { provider: IntegrationProvider; state: string; userId: string }) {
   const stateHash = hashToken(input.state);
+  // The PKCE verifier is read before the consume clears it, so a used state holds none; only the consumer uses it.
+  const verifier = (await prisma.oAuthStateTransaction.findUnique({ where: { stateHash }, select: { codeVerifier: true } }))?.codeVerifier ?? null;
   const consumed = await prisma.oAuthStateTransaction.updateMany({
     where: {
       stateHash,
@@ -167,14 +169,14 @@ export async function claimConnectState(input: { provider: IntegrationProvider; 
       consumedAt: null,
       expiresAt: { gt: new Date() },
     },
-    data: { consumedAt: new Date() },
+    data: { consumedAt: new Date(), codeVerifier: null },
   });
   if (consumed.count !== 1) {
     const replay = await replayedConnect(stateHash, input);
     if (replay) return { replay };
     throw new ConnectionError("This connect link expired or was already used. Try again.");
   }
-  const st = await prisma.oAuthStateTransaction.findUniqueOrThrow({ where: { stateHash } });
+  const st = { ...(await prisma.oAuthStateTransaction.findUniqueOrThrow({ where: { stateHash } })), codeVerifier: verifier };
   await requireBrandAccess(st.workspaceId, st.brandId, input.userId);
   await requirePermission(st.workspaceId, input.userId, "integrations.manage", st.brandId);
   return { st };

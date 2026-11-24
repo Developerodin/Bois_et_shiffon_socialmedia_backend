@@ -18,7 +18,7 @@ vi.mock("@/server/auth/access", async (orig) => ({
   }),
 }));
 vi.mock("@/server/auth/permissions", async (orig) => ({ ...(await orig<object>()), requirePermission: vi.fn(async () => undefined) }));
-vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
+vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn(), kickIfDue: vi.fn(async () => undefined) }));
 
 import { createHash } from "node:crypto";
 import { prisma } from "@/server/db/prisma";
@@ -26,11 +26,12 @@ import { decryptCredentials } from "@/server/crypto/credentials";
 import { runCatalogSync } from "@/server/catalog/sync";
 import { ConnectionError, disconnect } from "@/server/services/connections";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
-import { ASKCART_REFUSED } from "@/server/shopify/askcart";
+import { ASKCART_MODE_CHANGED, ASKCART_REFUSED } from "@/server/shopify/askcart";
 import { completeAskCartConnect } from "@/server/shopify/askcart-connect";
 import { askCartToken } from "@/server/shopify/askcart-token";
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/integrations/shopify/askcart/route";
 import { DELETE } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/connections/[connectionId]/route";
+import { GET as products } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/products/route";
 
 /**
  * Connecting a brand's Shopify through AskCart against Postgres, in both modes: per-brand (portal-initiated, PKCE,
@@ -202,6 +203,64 @@ describe("per-brand mode", () => {
   });
 });
 
+describe("per-brand mode: review fixes", () => {
+  beforeEach(() => {
+    vi.stubEnv("ASKCART_CLIENT_ID", "portal");
+    vi.stubEnv("ASKCART_CLIENT_SECRET", CLIENT_SECRET);
+  });
+  async function startState(brandId: string, shop: string) {
+    const res = await connect(brandId, { shop });
+    return new URL(((await res.json()) as { url: string }).url).searchParams.get("state")!;
+  }
+
+  it("the typed shop is kept with the state: a token answer for another store is refused even without a callback shop", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const state = await startState("ac-a", "a.myshopify.com");
+    expect(await prisma.oAuthStateTransaction.findFirstOrThrow({ where: { brandId: "ac-a" } })).toMatchObject({ shop: "a.myshopify.com" });
+    vi.stubGlobal("fetch", vi.fn(async () => json({ access_token: "t", shop: { domain: "b.myshopify.com", name: "B" } })));
+    await expect(completeAskCartConnect({ state, code: "c", shop: null, userId: user })).rejects.toThrow("different store");
+    expect(await prisma.integrationConnection.count()).toBe(0);
+  });
+
+  it("the PKCE verifier is cleared when the state is used", async () => {
+    const state = await startState("ac-a", "a.myshopify.com");
+    vi.stubGlobal("fetch", vi.fn(async () => json({ access_token: "t", shop: { domain: "a.myshopify.com", name: "A" } })));
+    await completeAskCartConnect({ state, code: "c", shop: null, userId: user });
+    expect(await prisma.oAuthStateTransaction.findFirstOrThrow({ where: { brandId: "ac-a" } })).toMatchObject({ codeVerifier: null });
+  });
+
+  it("two reads at once refresh once: the second waits and uses the new token, never marking the connection", async () => {
+    const state = await startState("ac-a", "a.myshopify.com");
+    vi.stubGlobal("fetch", vi.fn(async () => json({ access_token: "tok_1", refresh_token: "ref_1", expires_in: 60, shop: { domain: "a.myshopify.com", name: "A" } })));
+    await completeAskCartConnect({ state, code: "c", shop: null, userId: user });
+    const c = await conn("ac-a");
+    // AskCart rotates refresh tokens: ref_1 works once, a second use is refused.
+    let used = false;
+    const f = vi.fn(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+      if (used) return json({ error: "invalid_grant" }, 400);
+      used = true;
+      return json({ access_token: "tok_2", refresh_token: "ref_2", expires_in: 3600 });
+    });
+    vi.stubGlobal("fetch", f);
+    expect(await Promise.all([askCartToken(c), askCartToken(c)])).toEqual(["tok_2", "tok_2"]);
+    expect(f).toHaveBeenCalledOnce();
+    expect(await conn("ac-a")).toMatchObject({ status: "ACTIVE" });
+  });
+
+  it("a single-store connection left after switching to per-brand asks to connect again", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await prisma.integrationConnection.create({
+      data: { workspaceId: ws, brandId: "ac-a", provider: "SHOPIFY", externalAccountId: "askcart", displayName: "B&C", scopes: ["askcart"], credentialKeyVersion: 1, encryptedCredentials: "x", connectedByUserId: user },
+    });
+    const f = vi.fn();
+    vi.stubGlobal("fetch", f);
+    await expect(runCatalogSync({ workspaceId: ws, brandId: "ac-a" })).rejects.toBeInstanceOf(ReconnectNeeded);
+    expect(f).not.toHaveBeenCalled();
+    expect(await conn("ac-a")).toMatchObject({ status: "ERROR", lastError: ASKCART_MODE_CHANGED });
+  });
+});
+
 describe("INTERIM single-store mode", () => {
   beforeEach(() => vi.stubEnv("ASKCART_SECRET", SECRET));
 
@@ -269,6 +328,34 @@ describe("INTERIM single-store mode", () => {
     const done = await lastSync("ac-a");
     expect(done).toMatchObject({ source: "SHOPIFY", count: 2, error: null });
     expect(done.walk).toBeUndefined();
+  });
+
+  it("a walk is ignored by another connection, dropped when AskCart refuses its cursor, and never shown on the products route", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => json({ name: "B&C", currencyCode: "INR" })));
+    await connect("ac-a");
+    const c = await conn("ac-a");
+    const stale = { cursor: "other", startedAt: new Date().toISOString(), connectionId: "another" };
+    await prisma.brandProfile.updateMany({ where: { brandId: "ac-a" }, data: { catalogSync: { at: "x", source: "SHOPIFY", count: 1, error: null, walk: stale } } });
+    let f = vi.fn(async () => json({ items: [PRODUCT(1)], nextCursor: "c1", complete: false, rateLimited: true }));
+    vi.stubGlobal("fetch", f);
+    await runCatalogSync({ workspaceId: ws, brandId: "ac-a" });
+    expect(new URL((f.mock.calls[0] as unknown as [string])[0]).searchParams.get("cursor")).toBeNull();
+    expect(await lastSync("ac-a")).toMatchObject({ walk: { cursor: "c1", connectionId: c.id } });
+
+    auth.perms = new Set(["integrations.manage", "brand.read"]);
+    try {
+      const body = (await (await products(new Request("http://x?status=1"), { params })).json()) as { catalogSync: Record<string, unknown> };
+      expect(body.catalogSync).toMatchObject({ source: "SHOPIFY" });
+      expect(body.catalogSync.walk).toBeUndefined();
+    } finally {
+      auth.perms = new Set(["integrations.manage"]);
+    }
+
+    f = vi.fn(async () => json({ error: "invalid_cursor" }, 400));
+    vi.stubGlobal("fetch", f);
+    await expect(runCatalogSync({ workspaceId: ws, brandId: "ac-a" })).rejects.toThrow("AskCart 400 invalid_cursor");
+    expect((await lastSync("ac-a")).walk).toBeUndefined();
   });
 
   it("store_reconnect_needed marks the connection with AskCart's reason, not Shopify's token text", async () => {

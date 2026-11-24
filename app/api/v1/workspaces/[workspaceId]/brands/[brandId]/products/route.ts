@@ -33,7 +33,10 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       catalogSource(where),
       catalogSyncRunning(where),
     ]);
-    const status = { source: found.source, catalogSync: profile?.catalogSync ?? null, running };
+    // An AskCart walk (catalogSync.walk: its cursor) is the sync's own bookkeeping, not for the screen.
+    const sync = profile?.catalogSync as Record<string, unknown> | null | undefined;
+    const catalogSync = sync ? Object.fromEntries(Object.entries(sync).filter(([k]) => k !== "walk")) : null;
+    const status = { source: found.source, catalogSync, running };
     return Response.json(products ? { products: products.map(toProductListDto), ...status } : status);
   } catch (error) {
     return fromAccessError(error);

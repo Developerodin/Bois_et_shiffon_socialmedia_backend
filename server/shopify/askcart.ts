@@ -37,8 +37,13 @@ export const isAskCart = (conn: { externalAccountId: string; scopes?: string[] }
 
 export const ASKCART_REFUSED = "AskCart can't reach the store. Open AskCart in Shopify admin to reconnect it, then connect Shopify via AskCart again.";
 export const ASKCART_KEY_REFUSED = "AskCart no longer accepts this platform's access to the store. Connect Shopify via AskCart again.";
-/** The reason shown in Connections for a ReconnectNeeded thrown here: our access (401) or the store's install (503). */
-export const askCartReason = (e: Error) => (e.message.startsWith("AskCart 401") ? ASKCART_KEY_REFUSED : ASKCART_REFUSED);
+export const ASKCART_MODE_CHANGED = "AskCart now connects each store on its own. Connect Shopify via AskCart again.";
+/**
+ * The reason shown in Connections for a ReconnectNeeded from AskCart: our access (401), a connection from the other
+ * mode (askCartToken), or the store's install (503).
+ */
+export const askCartReason = (e: Error) =>
+  e.message.startsWith("AskCart 401") ? ASKCART_KEY_REFUSED : e.message.startsWith("AskCart mode") ? ASKCART_MODE_CHANGED : ASKCART_REFUSED;
 
 /** Any other non-2xx answer, a body that isn't JSON or one over the cap. Carries the status and AskCart's code only. */
 export class AskCartError extends Error {

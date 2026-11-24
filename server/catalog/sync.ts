@@ -8,7 +8,7 @@ import { enqueueJob } from "@/server/jobs/queue";
 import { shopifySized } from "@/server/research/brand-assets";
 import { htmlText, safeFetch, safeFetchBytes } from "@/server/research/crawl";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
-import { askCartCatalog, askCartReason, isAskCart } from "@/server/shopify/askcart";
+import { AskCartError, askCartCatalog, askCartReason, isAskCart } from "@/server/shopify/askcart";
 import { askCartToken } from "@/server/shopify/askcart-token";
 
 /**
@@ -43,11 +43,16 @@ export type SyncedRow = {
 };
 type Fetched = { rows: SyncedRow[]; complete: boolean; note?: Note; walk?: Walk; seenSince?: Date };
 /**
- * An AskCart walk that spans runs: the cursor to resume from and when the walk began. Kept in catalogSync (server
- * only; the products route passes it through, an opaque cursor and a time). Its final, complete run archives the rows
- * no run of the walk saw (saveRows' seenSince).
+ * An AskCart walk that spans runs: the cursor to resume from, when the walk began, and the connection it reads (a
+ * walk of another connection, e.g. another store after a reconnect, is ignored). Kept in catalogSync, server only
+ * (the products route strips it). Its final, complete run archives the rows no run of the walk saw (saveRows' seenSince).
  */
-type Walk = { cursor: string; startedAt: string };
+export type Walk = { cursor: string; startedAt: string; connectionId: string };
+/** The saved walk, only when it belongs to this connection. */
+const walkOf = (last: CatalogSync | null, connectionId: string) => {
+  const walk = last?.source === "SHOPIFY" ? (last as CatalogSync & { walk?: Walk }).walk : undefined;
+  return walk?.connectionId === connectionId ? walk : undefined;
+};
 /** What saveRows writes: IMPORT rows also carry the person fields from the file (null = empty cell, keeps the stored value). */
 export type SavedRow = SyncedRow & { materials?: string | null; dimensions?: string | null; certifications?: string | null };
 
@@ -248,14 +253,13 @@ export async function websiteFeed(websiteUrl: string, signal?: AbortSignal): Pro
  * The connection's store (its account id is the shop domain), token via accessToken(), which throws ReconnectNeeded.
  * An AskCart connection reads through AskCart instead (no token here; it throws ReconnectNeeded the same way).
  */
-async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, last: CatalogSync | null, at: string): Promise<Fetched> {
+async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, walk: Walk | undefined, at: string): Promise<Fetched> {
   if (isAskCart(conn)) {
     // A walk carries on from the last run's cursor, so a store past one run's MAX_ROWS completes over several runs.
-    const walk = last?.source === "SHOPIFY" ? (last as CatalogSync & { walk?: Walk }).walk : undefined;
     const read = await askCartCatalog(await askCartToken(conn), walk?.cursor ?? null, MAX_ROWS, signal);
     const rows = shopifyRows(read.variants, read.currency);
     if (read.complete) return { rows, complete: true, seenSince: walk && new Date(walk.startedAt) };
-    return { rows, complete: false, note: PARTIAL, walk: read.cursor ? { cursor: read.cursor, startedAt: walk?.startedAt ?? at } : undefined };
+    return { rows, complete: false, note: PARTIAL, walk: read.cursor ? { cursor: read.cursor, startedAt: walk?.startedAt ?? at, connectionId: conn.id } : undefined };
   }
   const { variants, currency, complete } = await shopifyVariants(conn.externalAccountId, await accessToken(conn), signal);
   return capRows({ rows: shopifyRows(variants, currency), complete, note: complete ? undefined : PARTIAL });
@@ -507,11 +511,10 @@ export async function runCatalogSync(payload: unknown) {
   }
   const signal = AbortSignal.timeout(DEADLINE_MS);
   const shopLast = found.source === "SHOPIFY" && isAskCart(found.shop) ? await lastSync(scope) : null;
-  // A failed run keeps an AskCart walk's cursor, so the next run carries on rather than starting over.
-  const walk = (shopLast as (CatalogSync & { walk?: Walk }) | null)?.walk;
+  const walk = found.source === "SHOPIFY" ? walkOf(shopLast, found.shop.id) : undefined;
   try {
     // A SITE brand's feed is checked every day too: once the site has one, the feed takes over (and archives SITE rows).
-    const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal, shopLast, at) : await websiteFeed(found.websiteUrl, signal);
+    const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal, walk, at) : await websiteFeed(found.websiteUrl, signal);
     // A SITE brand stays one when its feed URL turns readers away for a day: only a feed that answers moves it.
     // A feed that worked must say "not a feed" on two different days before its products are left for the pages.
     const last = found.source === "WEBSITE" ? found.last : null;
@@ -545,7 +548,10 @@ export async function runCatalogSync(payload: unknown) {
     console.warn("[catalog] sync failed", scope.brandId, found.source, error instanceof Error ? error.message : error);
     // A SITE brand keeps its reader's progress on screen.
     const kept = found.source === "SITE" ? await siteProgress(scope, found.capped) : { count: 0 };
-    await record(scope, { at, source: found.source, ...kept, ...(walk && { walk }) }, refused ? { ...REFUSED, error: refusal } : FAILED);
+    // A failed run keeps the walk, so the next run carries on, unless AskCart refused the request itself (400:
+    // invalid_cursor): resuming it would fail forever, so the next run starts over.
+    const keepWalk = walk && !(error instanceof AskCartError && error.status === 400);
+    await record(scope, { at, source: found.source, ...kept, ...(keepWalk && { walk }) }, refused ? { ...REFUSED, error: refusal } : FAILED);
     throw error;
   }
 }
