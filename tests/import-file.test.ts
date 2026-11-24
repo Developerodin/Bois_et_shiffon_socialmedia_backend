@@ -35,6 +35,11 @@ describe("parseSheet CSV", () => {
     });
   });
 
+  it("opens a quote only at the start of a cell", () => {
+    expect(csv('5" screen;Price\nTV;10')).toEqual({ headers: ['5" screen', "Price"], rows: [["TV", "10"]] });
+    expect(csv('Name,Note\n"",x""y\n')).toEqual({ headers: ["Name", "Note"], rows: [["", 'x""y']] });
+  });
+
   it("reads a UTF-8 BOM, UTF-16 (LE and BE) and Windows-1252", () => {
     expect(csv("﻿Name\nCafé")).toEqual({ headers: ["Name"], rows: [["Café"]] });
     const le = Buffer.from("﻿Name,Price\nCafé,1", "utf16le");
@@ -108,6 +113,29 @@ describe("parseSheet XLSX", () => {
     }
     expect(zip.length).toBeLessThan(5 * 1024 * 1024);
     expect(parseSheet(zip)).toEqual({ error: expect.stringContaining("too large once unpacked") });
+  });
+
+  it("refuses unclosed tags in one pass", () => {
+    const damaged = expect.stringContaining("couldn't read this Excel file");
+    const t0 = Date.now();
+    expect(parseSheet(book(`<row r="1">${inline("A1", "T")}</row>`, "<si>".repeat(200_000)))).toEqual({ error: damaged });
+    expect(parseSheet(book("<row>".repeat(200_000)))).toEqual({ error: damaged });
+    expect(parseSheet(book(`<row>${"<c>".repeat(200_000)}</row>`))).toEqual({ error: damaged });
+    expect(parseSheet(book(`<row><c t="inlineStr"><is>${"<t>".repeat(200_000)}</is></c></row>`))).toEqual({ error: damaged });
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it("reads namespace-prefixed tags", () => {
+    const x = `xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"`;
+    const zip = zipSync({
+      "xl/workbook.xml": strToU8(`<x:workbook ${x} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><x:sheets><x:sheet name="P" sheetId="1" r:id="R1"/></x:sheets></x:workbook>`),
+      "xl/_rels/workbook.xml.rels": strToU8(
+        `<p:Relationships xmlns:p="http://schemas.openxmlformats.org/package/2006/relationships"><p:Relationship Id="R1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/sheet1.xml"/></p:Relationships>`,
+      ),
+      "xl/worksheets/sheet1.xml": strToU8(`<x:worksheet ${x}><x:sheetData><x:row r="1"><x:c r="A1" t="s"><x:v>0</x:v></x:c><x:c r="B1" t="inlineStr"><x:is><x:t>Price</x:t></x:is></x:c></x:row><x:row r="2"><x:c r="A2" t="s"><x:v>1</x:v></x:c><x:c r="B2"><x:v>9</x:v></x:c></x:row></x:sheetData></x:worksheet>`),
+      "xl/sharedStrings.xml": strToU8(`<x:sst ${x}><x:si><x:t>Title</x:t></x:si><x:si><x:r><x:t>Ch</x:t></x:r><x:r><x:t>air</x:t></x:r></x:si></x:sst>`),
+    });
+    expect(parseSheet(zip)).toEqual({ headers: ["Title", "Price"], rows: [["Chair", "9"]] });
   });
 
   it("refuses a zip with no workbook", () => {

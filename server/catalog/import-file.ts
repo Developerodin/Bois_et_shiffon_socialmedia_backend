@@ -75,15 +75,26 @@ function decode(b: Uint8Array): string {
   }
 }
 
-// The most frequent of , ; tab in the first line outside quotes; comma on a tie or none.
+// The most frequent of , ; tab in the first line outside quotes; comma on a tie or none. A quote opens only at the
+// start of a cell, so a header like `5" screen` doesn't hide the delimiters after it.
 function delimiter(text: string): string {
   const counts: Record<string, number> = { ",": 0, ";": 0, "\t": 0 };
   let quoted = false;
-  for (const ch of text) {
-    if (ch === '"') quoted = !quoted;
-    else if (quoted) continue;
-    else if (ch === "\n" || ch === "\r") break;
-    else if (ch in counts) counts[ch]++;
+  let cellStart = true;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch !== '"') continue;
+      if (text[i + 1] === '"') i++;
+      else quoted = false;
+    } else if (ch === "\n" || ch === "\r") break;
+    else if (ch === '"' && cellStart) {
+      quoted = true;
+      cellStart = false;
+    } else {
+      cellStart = ch in counts;
+      if (cellStart) counts[ch]++;
+    }
   }
   return Object.keys(counts).reduce((a, b) => (counts[b] > counts[a] ? b : a));
 }
@@ -95,12 +106,15 @@ function parseCsv(text: string): Sheet {
   let row: string[] = [];
   let cell = "";
   let quoted = false;
+  let cellStart = true; // `cell === ""` can't tell a fresh cell from a quoted empty one ("")
   const add = (ch: string) => {
     if (cell.length < MAX_CELL) cell += ch;
+    cellStart = false;
   };
   const endCell = () => {
     row.push(cell);
     cell = "";
+    cellStart = true;
     if (row.length > MAX_COLS) throw new Refused(TOO_MANY_COLS);
   };
   for (let i = 0; i < text.length; i++) {
@@ -112,7 +126,10 @@ function parseCsv(text: string): Sheet {
         add('"');
         i++;
       }
-    } else if (ch === '"' && cell === "") quoted = true;
+    } else if (ch === '"' && cellStart) {
+      quoted = true;
+      cellStart = false;
+    }
     else if (ch === delim) endCell();
     else if (ch === "\n" || ch === "\r") {
       endCell();
@@ -178,10 +195,47 @@ const unescapeXml = (s: string) =>
     return code <= 0x10ffff ? String.fromCodePoint(code) : "";
   });
 
+type Element = { attrs: string; body: string; start: number; end: number };
+
+/**
+ * Each `<name …>…</name>` or `<name …/>` in order, with an optional namespace prefix (`<x:row>`, as the .NET OpenXML
+ * SDK writes). One pass: each open tag's `>` and close tag are looked up once and the cursor moves past them, so a
+ * file of unclosed tags costs one scan, not one per tag; a missing `>` or close tag refuses the file as damaged.
+ * Same-name elements never nest in the parts read here. Ceiling: a `>` inside an attribute value would end the tag
+ * early; OOXML writers escape it.
+ */
+function* elements(xml: string, name: string): Generator<Element> {
+  const open = new RegExp(`<((?:[A-Za-z_][\\w.-]*:)?${name})(?=[\\s/>])`, "g");
+  for (let m = open.exec(xml); m; m = open.exec(xml)) {
+    const tagEnd = xml.indexOf(">", m.index);
+    if (tagEnd < 0) throw new Refused(DAMAGED);
+    if (xml[tagEnd - 1] === "/") {
+      yield { attrs: xml.slice(m.index + m[0].length, tagEnd - 1), body: "", start: m.index, end: tagEnd + 1 };
+      open.lastIndex = tagEnd + 1;
+      continue;
+    }
+    const closeTag = `</${m[1]}>`;
+    const close = xml.indexOf(closeTag, tagEnd + 1);
+    if (close < 0) throw new Refused(DAMAGED);
+    const end = close + closeTag.length;
+    yield { attrs: xml.slice(m.index + m[0].length, tagEnd), body: xml.slice(tagEnd + 1, close), start: m.index, end };
+    open.lastIndex = end;
+  }
+}
+
+const first = (xml: string, name: string) => elements(xml, name).next().value as Element | undefined;
+
 // A string item: plain <t>, or rich-text <r><t> runs joined; phonetic <rPh> runs are not part of the text.
-const T = /<t\b[^>]*?(?:\/>|>([\s\S]*?)<\/t>)/g;
-const text = (xml: string) =>
-  unescapeXml([...xml.replace(/<rPh\b[\s\S]*?<\/rPh>/g, "").matchAll(T)].map((m) => m[1] ?? "").join("")).slice(0, MAX_CELL);
+function text(xml: string): string {
+  let kept = "";
+  let at = 0;
+  for (const ph of elements(xml, "rPh")) {
+    kept += xml.slice(at, ph.start);
+    at = ph.end;
+  }
+  kept += xml.slice(at);
+  return unescapeXml([...elements(kept, "t")].map((e) => e.body).join("")).slice(0, MAX_CELL);
+}
 
 // "AX" -> 49. Throws as soon as the letters pass column 50, so XFD1 never allocates a 16,384-cell row.
 function column(letters: string): number {
@@ -195,9 +249,9 @@ function column(letters: string): number {
 
 function value(attrs: string, body: string, shared: string[]): string {
   const type = attr(attrs, "t");
-  if (type === "inlineStr") return text(/<is\b[^>]*>([\s\S]*?)<\/is>/.exec(body)?.[1] ?? "");
+  if (type === "inlineStr") return text(first(body, "is")?.body ?? "");
   // A formula with no cached <v> reads as empty.
-  const v = unescapeXml(/<v\b[^>]*>([\s\S]*?)<\/v>/.exec(body)?.[1] ?? "");
+  const v = unescapeXml(first(body, "v")?.body ?? "");
   if (type === "s") return v === "" ? "" : (shared[Number(v)] ?? "");
   if (type === "e") return "";
   return v.slice(0, MAX_CELL); // n, str, b ("1"/"0"), dates as their serial number
@@ -207,9 +261,10 @@ function parseXlsx(bytes: Uint8Array): Sheet {
   const budget = { total: 0 };
   // Pass 1: which part is the first sheet, and where the shared strings are.
   const book = unzip(bytes, ["xl/workbook.xml", "xl/_rels/workbook.xml.rels"], budget);
-  const rels = [...(book.get("xl/_rels/workbook.xml.rels") ?? "").matchAll(/<Relationship\b[^>]*>/g)].map((m) => m[0]);
-  const firstSheet = /<sheet\b[^>]*>/.exec(book.get("xl/workbook.xml") ?? "")?.[0];
-  const rid = firstSheet && /\b\w+:id=["']([^"']*)["']/.exec(firstSheet)?.[1];
+  const rels = [...elements(book.get("xl/_rels/workbook.xml.rels") ?? "", "Relationship")].map((e) => e.attrs);
+  const firstSheet = first(book.get("xl/workbook.xml") ?? "", "sheet")?.attrs;
+  // The relationship id is a prefixed attribute (r:id); anchored on whitespace so the scan stays linear.
+  const rid = firstSheet && /\s[A-Za-z_][\w.-]*:id=["']([^"']*)["']/.exec(firstSheet)?.[1];
   const sheetTarget = rid && rels.map((r) => (attr(r, "Id") === rid ? attr(r, "Target") : undefined)).find(Boolean);
   if (!sheetTarget) throw new Refused(NO_SHEET);
   const sharedTarget = rels.map((r) => (attr(r, "Type")?.endsWith("/sharedStrings") ? attr(r, "Target") : undefined)).find(Boolean);
@@ -220,19 +275,19 @@ function parseXlsx(bytes: Uint8Array): Sheet {
   const parts = unzip(bytes, [sheetPath, sharedPath], budget);
   const sheet = parts.get(sheetPath);
   if (sheet == null) throw new Refused(NO_SHEET);
-  const shared = [...(parts.get(sharedPath) ?? "").matchAll(/<si\b[^>]*?(?:\/>|>([\s\S]*?)<\/si>)/g)].map((m) => text(m[1] ?? ""));
+  const shared = [...elements(parts.get(sharedPath) ?? "", "si")].map((e) => text(e.body));
 
   const t = table();
-  for (const row of sheet.matchAll(/<row\b[^>]*?(?:\/>|>([\s\S]*?)<\/row>)/g)) {
+  for (const row of elements(sheet, "row")) {
     const cells: string[] = [];
     let next = 0;
-    for (const c of (row[1] ?? "").matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+    for (const c of elements(row.body, "c")) {
       // Cells with r="B3" go to their column; cells without r follow the previous one.
-      const ref = /\br=["']([A-Z]+)/.exec(c[1])?.[1];
+      const ref = /\br=["']([A-Z]+)/.exec(c.attrs)?.[1];
       const col = ref ? column(ref) : next;
       if (col >= MAX_COLS) throw new Refused(TOO_MANY_COLS);
       while (cells.length < col) cells.push("");
-      cells[col] = value(c[1], c[2] ?? "", shared);
+      cells[col] = value(c.attrs, c.body, shared);
       next = col + 1;
     }
     t.add(cells);
