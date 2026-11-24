@@ -66,7 +66,7 @@ describe("day helpers", () => {
 describe("kinds", () => {
   it("every kind has a URL slug and a read key; sales and ads need their own keys", () => {
     for (const k of DATA_SOURCE_KINDS) expect(DATA_SOURCE_SLUGS[k]).toMatch(/^[a-z-]+$/);
-    expect(READ_KEY).toEqual({ SEARCH_CONSOLE: "analytics.read", POST_METRICS: "analytics.read", SHOPIFY_ORDERS: "crm.read", META_ADS: "ads.read" });
+    expect(READ_KEY).toEqual({ SEARCH_CONSOLE: "analytics.read", POST_METRICS: "analytics.read", SHOPIFY_ORDERS: "crm.read", META_ADS: "ads.read", SHOPIFY_QUOTES: "crm.manage" });
   });
 });
 

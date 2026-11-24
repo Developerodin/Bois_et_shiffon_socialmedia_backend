@@ -153,7 +153,8 @@ const audit = (db: Prisma.TransactionClient | typeof prisma, scope: { workspaceI
 
 /**
  * A new DRAFT quote, numbered from the brand's counter in the same transaction (one row update, so two creates at once
- * get distinct numbers), valid 30 brand days.
+ * get distinct numbers), valid 30 brand days. The brand's first quote also turns on its SHOPIFY_QUOTES source (daily
+ * status, expiry and payment reminders: server/quotes/status-sync.ts).
  */
 export async function createQuote(scope: QuoteScope, input: z.infer<typeof QuoteCreate>) {
   const currency = (await shopCurrency(scope)) ?? input.currency;
@@ -173,6 +174,7 @@ export async function createQuote(scope: QuoteScope, input: z.infer<typeof Quote
         note: input.note || null, internalNote: input.internalNote || null, validUntil: new Date(`${validUntil}T00:00:00Z`), createdById: scope.userId,
       },
     });
+    await tx.dataSource.createMany({ data: [{ workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SHOPIFY_QUOTES", externalId: "" }], skipDuplicates: true });
     await audit(tx, scope, "quote.created", q.id, { number, lines: lines.length });
     return q;
   });

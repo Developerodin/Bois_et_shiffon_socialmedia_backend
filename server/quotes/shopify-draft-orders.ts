@@ -5,7 +5,7 @@ import { loadQuote, quoteDiscount, quoteLines, quoteTotals, toQuoteDto, type Quo
 import { PublishingError } from "@/server/services/publishing";
 import { askCartWriteAdapter, type DraftOrder, type DraftOrderInput, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
 import { confirmWrite, previewWrite, ShopifyWriteError } from "@/server/shopify/writes";
-import type { DraftOrderWritePreview, QuoteShopifyAction } from "@/shared";
+import { quoteNumber, type DraftOrderWritePreview, type InvoiceEmailInput, type InvoiceWritePreview, type QuoteShopifyAction } from "@/shared";
 
 /**
  * Quotes to Shopify as draft orders (plan 2026-11-24-phase-3-crm, Task 8a): create, then update after edits, each a
@@ -16,8 +16,8 @@ import type { DraftOrderWritePreview, QuoteShopifyAction } from "@/shared";
  * invoice until a person accepts it. Shopify access goes through AskCart, whose write endpoints don't exist yet: until
  * then previews say so and confirms answer 503.
  */
-const ACTION = { create: "DRAFT_ORDER_CREATE", update: "DRAFT_ORDER_UPDATE" } as const satisfies Partial<Record<QuoteShopifyAction, ShopifyWriteAction>>;
-type DraftAction = keyof typeof ACTION;
+const ACTION = { create: "DRAFT_ORDER_CREATE", update: "DRAFT_ORDER_UPDATE", invoice: "DRAFT_ORDER_INVOICE_SEND" } as const satisfies Record<QuoteShopifyAction, ShopifyWriteAction>;
+type DraftAction = Exclude<QuoteShopifyAction, "invoice">;
 export const quoteTag = (id: string) => `sma-quote-${id}`;
 export const target = (scope: { workspaceId: string; brandId: string }) => ({ workspaceId: scope.workspaceId, brandId: scope.brandId });
 
@@ -127,5 +127,78 @@ export async function confirmDraftOrderWrite(scope: QuoteScope, quoteId: string,
     }
     throw e;
   }
+  return toQuoteDto(await loadQuote(scope, quoteId));
+}
+
+// ---- invoice (Task 8b) ---------------------------------------------------------------------------------------------
+
+const EMAIL = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+
+/**
+ * The invoice as it would be sent now: Shopify's draft must hold this version of the quote, and a subtotal Shopify
+ * worked out differently must have been accepted. `to` defaults to the quote's contact, the subject to "Quote Q-0042
+ * from <brand>", the message to the quote's note. To, subject and message are all in the confirm token's hash.
+ */
+async function buildInvoice(scope: { workspaceId: string; brandId: string }, q: Quote, email: InvoiceEmailInput): Promise<InvoiceWritePreview> {
+  if ((q.status !== "CREATED" && q.status !== "SENT") || !q.shopifyId) throw new PublishingError("Create the quote in Shopify before sending its invoice", 409, "quote.notInShopify");
+  if (q.syncedVersion !== q.version) throw new PublishingError("Send the quote's changes to Shopify before the invoice", 409, "quote.needsUpdate");
+  const dto = toQuoteDto(q);
+  if (dto.subtotalDiffers && !dto.subtotalAccepted) {
+    throw new PublishingError(`Shopify's subtotal is ${q.shopifySubtotal} ${q.currency}; ours is ${dto.totals.total}. Accept Shopify's before sending.`, 409, "quote.subtotalDiffers");
+  }
+  const to = (email.to ?? q.contactEmail ?? "").trim();
+  if (!EMAIL.test(to)) throw new PublishingError("Add the customer's email address", 400, "quote.noEmail");
+  const brand = await prisma.brand.findFirstOrThrow({ where: { id: scope.brandId, workspaceId: scope.workspaceId }, select: { displayName: true } });
+  return {
+    draftOrder: q.shopifyName ?? quoteNumber(q.number),
+    to,
+    subject: (email.subject ?? `Quote ${quoteNumber(q.number)} from ${brand.displayName}`).trim(),
+    message: (email.message ?? q.note ?? "").trim(),
+  };
+}
+
+/**
+ * What a person confirms before Shopify emails its invoice. `again`: after an invoice was sent, a token for sending it
+ * once more (a new attempt); without it, a second confirm is "Already done".
+ */
+export async function previewInvoice(scope: QuoteScope, quoteId: string, email: InvoiceEmailInput, opts: { again?: boolean } = {}, adapter: ShopifyWriteAdapter = askCartWriteAdapter) {
+  if (!scope.perms.has("crm.manage")) throw new AccessDeniedError("Missing permission crm.manage");
+  const q = await loadQuote(scope, quoteId);
+  const payload = await buildInvoice(scope, q, email);
+  return previewWrite(scope, { entityType: "QUOTE", entityId: q.id, action: ACTION.invoice, version: q.version, payload, again: opts.again }, adapter);
+}
+
+/** Shopify sends its invoice email (draftOrderInvoiceSend), at most once per confirmed attempt; the quote is SENT. */
+export async function confirmInvoice(scope: QuoteScope, quoteId: string, email: InvoiceEmailInput, token: string, adapter: ShopifyWriteAdapter = askCartWriteAdapter) {
+  let q = await loadQuote(scope, quoteId);
+  const where = { id: q.id, workspaceId: scope.workspaceId, brandId: scope.brandId };
+  await confirmWrite<InvoiceWritePreview, DraftOrder>(
+    scope,
+    token,
+    { entityType: "QUOTE", entityId: q.id, action: ACTION.invoice },
+    {
+      permission: "crm.manage",
+      rebuild: async () => {
+        q = await loadQuote(scope, quoteId);
+        return { version: q.version, payload: await buildInvoice(scope, q, email) };
+      },
+      run: (a, p, requestId) => a.sendInvoice(target(scope), requestId, q.shopifyId!, { to: p.to, subject: p.subject, message: p.message }),
+      reconcile: async (a, write) => {
+        // Sent when Shopify's invoiceSentAt is from this attempt on.
+        const found = await a.lookupDraftOrder(target(scope), { id: q.shopifyId! });
+        if (!found.ok || !found.value) return found;
+        const sentAt = found.value.invoiceSentAt;
+        return { ok: true, value: sentAt && new Date(sentAt) >= write.startedAt ? found.value : null };
+      },
+      onDone: async (tx, result, write) => {
+        // The sender owns the payment reminders (server/quotes/status-sync.ts).
+        await tx.quote.updateMany({
+          where: { ...where, status: { in: ["CREATED", "SENT"] } },
+          data: { status: "SENT", sentAt: result.invoiceSentAt ? new Date(result.invoiceSentAt) : new Date(), sentById: write.actorUserId, invoiceUrl: result.invoiceUrl },
+        });
+      },
+    },
+    adapter,
+  );
   return toQuoteDto(await loadQuote(scope, quoteId));
 }

@@ -1645,6 +1645,8 @@ enum DataSourceKind {
   POST_METRICS
   SHOPIFY_ORDERS
   META_ADS
+  /// quote status, expiry and payment reminders (server/quotes/status-sync.ts); no connection, externalId ""
+  SHOPIFY_QUOTES
 }
 
 enum DataSourceStatus {

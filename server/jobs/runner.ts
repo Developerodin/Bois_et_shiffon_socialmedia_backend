@@ -16,6 +16,7 @@ import { DIGEST_JOB, enqueueWeeklyDigests, runDigest } from "@/server/digest/job
 import { ensurePostMetricSources } from "@/server/data/post-metric-sync"; // also registers the POST_METRICS runner
 import "@/server/data/shopify-orders-sync"; // registers the SHOPIFY_ORDERS runner
 import "@/server/data/meta-ads-sync"; // registers the META_ADS sync
+import "@/server/quotes/status-sync"; // registers the SHOPIFY_QUOTES runner (quote status, expiry, reminders)
 import { prisma } from "@/server/db/prisma";
 import { EMAIL_SEND_JOB, sendOutboxEmail } from "@/server/email/outbox";
 import { notifyOverdueTasks, notifyRechecks, pruneNotifications } from "@/server/notifications/daily-tasks";
