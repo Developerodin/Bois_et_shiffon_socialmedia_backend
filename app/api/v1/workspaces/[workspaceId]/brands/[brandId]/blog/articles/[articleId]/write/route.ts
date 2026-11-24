@@ -2,6 +2,9 @@ import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-r
 import { blogProblem } from "@/server/blog/articles";
 import { writeArticle } from "@/server/blog/writer";
 
+// The AI call (or a Shopify send) runs in the request: give it time, so a host timeout never cuts off the refund or the settle.
+export const maxDuration = 300;
+
 type Params = BrandRouteParams & { articleId: string };
 
 /** Have the article writer (re)write the article (content.create; costs credits, given back on failure). */

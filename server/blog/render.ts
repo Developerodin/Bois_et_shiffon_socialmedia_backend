@@ -12,10 +12,12 @@ export const ArticleSpanSchema = z.object({
   italic: z.boolean(),
   href: z.string().max(2000).nullable(),
 });
-export const ArticleBlockSchema = z.object({
-  type: z.enum(["h2", "h3", "p", "ul", "ol"]),
-  lines: z.array(z.array(ArticleSpanSchema).max(ARTICLE_LIMITS.spans)).min(1).max(ARTICLE_LIMITS.lines),
-});
+export const ArticleBlockSchema = z
+  .object({
+    type: z.enum(["h2", "h3", "p", "ul", "ol"]),
+    lines: z.array(z.array(ArticleSpanSchema).max(ARTICLE_LIMITS.spans)).min(1).max(ARTICLE_LIMITS.lines),
+  })
+  .refine((b) => b.type === "ul" || b.type === "ol" || b.lines.length === 1, "A heading or paragraph has exactly one line");
 export const ArticleBlocksSchema = z.array(ArticleBlockSchema).max(ARTICLE_LIMITS.blocks);
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -48,6 +50,21 @@ export function renderArticleHtml(blocks: ArticleBlock[]): string {
       return `<${b.type}>${line(b.lines[0] ?? [])}</${b.type}>`;
     })
     .join("\n");
+}
+
+/** The summary as Shopify's themes print it (raw HTML): escaped text in one paragraph, "" when there is none. */
+export const renderSummaryHtml = (summary: string) => (summary.trim() ? `<p>${escape(summary.trim())}</p>` : "");
+
+/** The links whose host isn't the brand's website (or a subdomain of it): the confirm dialog flags them. No website: all. */
+export function externalLinks(links: string[], websiteUrl: string | null) {
+  let own: string | null = null;
+  try {
+    own = websiteUrl ? new URL(websiteUrl).hostname.replace(/^www\./, "") : null;
+  } catch {}
+  return links.filter((l) => {
+    const host = new URL(l).hostname.replace(/^www\./, "");
+    return !own || (host !== own && !host.endsWith(`.${own}`));
+  });
 }
 
 /** Every link target the HTML will carry, in order, once each: the confirm dialog lists them all. */

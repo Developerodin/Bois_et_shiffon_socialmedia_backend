@@ -59,7 +59,8 @@ describe("articles to Shopify", () => {
     const p = preview.preview as ArticleWritePreview;
     expect(p).toMatchObject({ blogId: "gid://shopify/Blog/1", author: "Bois & Chiffons", handle: a.handle, summary: "How to.", links: ["https://bc.test/guide"] });
     expect(p.bodyHtml).toBe('<h2>Care</h2>\n<p>See <a href="https://bc.test/guide">our guide</a></p>');
-    expect(create.mock.calls[0]![2]).toEqual({ blogId: "gid://shopify/Blog/1", title: a.title, handle: a.handle, bodyHtml: p.bodyHtml, summary: "How to.", tags: [], author: "Bois & Chiffons" });
+    expect(create.mock.calls[0]![2]).toEqual({ blogId: "gid://shopify/Blog/1", title: a.title, handle: a.handle, bodyHtml: p.bodyHtml, summaryHtml: "<p>How to.</p>", tags: [], author: "Bois & Chiffons" });
+    expect(p).toMatchObject({ blocks, summaryHtml: "<p>How to.</p>", externalLinks: ["https://bc.test/guide"] });
     expect(article).toMatchObject({ status: "HIDDEN_IN_SHOPIFY", shopifyId: "gid://shopify/Article/1" });
     expect(shop.articles.get("gid://shopify/Article/1")!.isPublished).toBe(false);
   });
@@ -146,6 +147,64 @@ describe("articles to Shopify", () => {
     expect(article).toMatchObject({ status: "HIDDEN_IN_SHOPIFY", shopifyId: "gid://shopify/Article/1" });
     expect(shop.calls.filter((c) => c.method === "createArticle")).toHaveLength(1);
     expect(shop.calls.some((c) => c.method === "lookupArticle")).toBe(true);
+  });
+
+  it("an edit after a create whose answer was lost never creates it twice: found by handle, the article takes its id", async () => {
+    const shop = fakeShopify();
+    const a = await approved();
+    const p = await previewArticleWrite(approver, a.id, "create", {}, shop.adapter);
+    shop.fail("lost");
+    await refusal(confirmArticleWrite(approver, a.id, "create", p.confirmToken, shop.adapter));
+    await editArticle(writer, a.id, ArticleEdit.parse({ version: 2, title: "Retitled" }));
+    await decideArticle(approver, a.id, { version: 3, verdict: "APPROVED" });
+    expect(await refusal(previewArticleWrite(approver, a.id, "create", {}, shop.adapter))).toMatchObject({ status: 409, code: "blog.earlierSend" });
+    expect(await prisma.blogArticle.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ status: "APPROVED", version: 3, shopifyId: "gid://shopify/Article/1" });
+    expect(await prisma.shopifyWrite.findFirst({ where: { entityId: a.id, version: 2 } })).toMatchObject({ status: "DONE", shopifyId: "gid://shopify/Article/1" });
+    const { article } = await send(a.id, "update", shop);
+    expect(article).toMatchObject({ status: "HIDDEN_IN_SHOPIFY" });
+    expect(shop.calls.filter((c) => c.method === "createArticle")).toHaveLength(1);
+  });
+
+  it("an edit after a create that never arrived waits 10 minutes, keeps the address, then may create again", async () => {
+    const shop = fakeShopify();
+    const a = await approved();
+    const p = await previewArticleWrite(approver, a.id, "create", {}, shop.adapter);
+    shop.fail("throw");
+    await refusal(confirmArticleWrite(approver, a.id, "create", p.confirmToken, shop.adapter));
+    expect(await refusal(editArticle(writer, a.id, ArticleEdit.parse({ version: 2, handle: "another-address" })))).toMatchObject({ status: 409, code: "blog.handleLocked" });
+    await editArticle(writer, a.id, ArticleEdit.parse({ version: 2, title: "Retitled" }));
+    await decideArticle(approver, a.id, { version: 3, verdict: "APPROVED" });
+    expect(await refusal(previewArticleWrite(approver, a.id, "create", {}, shop.adapter))).toMatchObject({ status: 409, code: "blog.earlierSend" });
+    await prisma.shopifyWrite.updateMany({ where: { entityId: a.id, version: 2 }, data: { startedAt: new Date(Date.now() - 11 * 60_000) } });
+    const { article } = await send(a.id, "create", shop);
+    expect(article).toMatchObject({ status: "HIDDEN_IN_SHOPIFY", version: 3 });
+    expect(await prisma.shopifyWrite.findFirst({ where: { entityId: a.id, version: 2 } })).toMatchObject({ status: "FAILED" });
+    expect(shop.articles.size).toBe(1);
+  });
+
+  it("an edit during an in-flight Publish: the article is still marked published and the task told", async () => {
+    const shop = fakeShopify();
+    const task = await prisma.task.create({ data: { workspaceId: ws, brandId: brand, title: "Write about drying", areas: ["SEO"] } });
+    const a = await approved(task.id);
+    await send(a.id, "create", shop);
+    const publish = shop.adapter.publishArticle;
+    vi.spyOn(shop.adapter, "publishArticle").mockImplementation(async (...args) => {
+      await editArticle(writer, a.id, ArticleEdit.parse({ version: 2, title: "Edited meanwhile" }));
+      return publish(...args);
+    });
+    const { article } = await send(a.id, "publish", shop);
+    expect(article).toMatchObject({ status: "PUBLISHED", version: 3, publishedAt: expect.any(String) });
+    expect(await prisma.taskComment.count({ where: { taskId: task.id, kind: "SYSTEM" } })).toBe(1);
+  });
+
+  it("an update Shopify answers as published leaves the article published, not hidden", async () => {
+    const shop = fakeShopify();
+    const a = await approved();
+    const { article: hidden } = await send(a.id, "create", shop);
+    shop.articles.get(hidden.shopifyId!)!.isPublished = true;
+    await editArticle(writer, a.id, ArticleEdit.parse({ version: 2, title: "Changed" }));
+    await decideArticle(approver, a.id, { version: 3, verdict: "APPROVED" });
+    expect((await send(a.id, "update", shop)).article).toMatchObject({ status: "PUBLISHED" });
   });
 
   it("until AskCart's writes exist: the preview says so and a confirm writes nothing", async () => {

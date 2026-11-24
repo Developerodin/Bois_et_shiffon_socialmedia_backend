@@ -37,7 +37,7 @@ export type DraftOrder = {
 };
 export type InvoiceInput = { to: string; subject: string; message: string };
 export type Blog = { id: string; title: string };
-export type ArticleInput = { blogId: string; title: string; handle: string; bodyHtml: string; summary: string; tags: string[]; author: string };
+export type ArticleInput = { blogId: string; title: string; handle: string; bodyHtml: string; /** escaped, in a <p> (themes print it as HTML) */ summaryHtml: string; tags: string[]; author: string };
 export type Article = { shopifyId: string; blogId: string; handle: string; isPublished: boolean; updatedAt: string };
 
 export interface ShopifyWriteAdapter {

@@ -148,6 +148,10 @@ export async function editArticle(scope: ArticleScope, id: string, patch: z.infe
   if (!EDITABLE.includes(current.status)) throw new PublishingError("A published article is changed in Shopify", 409, "blog.published");
   if (patch.blocks && textLength(patch.blocks) > ARTICLE_LIMITS.chars) throw new PublishingError(`The article is longer than ${ARTICLE_LIMITS.chars} characters`, 400);
   const productIds = patch.productIds && (await checkProducts(scope, patch.productIds));
+  // An unconfirmed create is found again in Shopify by its handle (shopify-articles.ts earlierCreates): keep it.
+  if (fields.handle !== undefined && fields.handle !== current.handle && (await unsettledCreate(scope, id))) {
+    throw new PublishingError("The address can't change while a send to Shopify is unconfirmed. Try again in a few minutes.", 409, "blog.handleLocked");
+  }
   const status = afterEdit(current.status);
   try {
     const { count } = await prisma.blogArticle.updateMany({
@@ -171,6 +175,12 @@ export async function editArticle(scope: ArticleScope, id: string, patch: z.infe
   return toArticleDto(await loadArticle(scope, id));
 }
 
+const unsettledCreate = (scope: { workspaceId: string; brandId: string }, id: string) =>
+  prisma.shopifyWrite.findFirst({
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, entityType: "BLOG_ARTICLE", entityId: id, action: "ARTICLE_CREATE", status: { in: ["PENDING", "UNKNOWN"] } },
+    select: { id: true },
+  });
+
 /**
  * Remove an article: one never sent to Shopify is deleted; one that was is archived here and left as it is in Shopify
  * (removing it there is a person's call in Shopify).
@@ -193,7 +203,8 @@ export async function decideArticle(scope: ArticleScope, id: string, input: z.in
   if (input.verdict === "CHANGES_REQUESTED" && !input.note) throw new PublishingError("Say what needs to change", 400);
   if (input.verdict === "APPROVED") {
     if (!articleBlocks(a.blocks).length) throw new PublishingError("The article has no text yet", 409, "blog.empty");
-    if (a.editedById === scope.userId && (await hasOtherHolder(scope.workspaceId, scope.brandId, scope.userId, "content.approve"))) {
+    // An author is whoever started it or changed its text last (the writer's run counts as the person who ran it).
+    if ((a.editedById === scope.userId || a.createdById === scope.userId) && (await hasOtherHolder(scope.workspaceId, scope.brandId, scope.userId, "content.approve"))) {
       throw new PublishingError("You wrote this article, so someone else has to approve it", 403, "blog.ownWork");
     }
   }
@@ -204,7 +215,7 @@ export async function decideArticle(scope: ArticleScope, id: string, input: z.in
   });
   if (!count) throw changed();
   // The note is the team's own words about the text, never customer data.
-  await audit(scope, approved ? "blog.article.approved" : "blog.article.changes-requested", id, { version: a.version, note: input.note ?? null });
+  await audit(scope, approved ? "blog.article.approved" : "blog.article.changes-requested", id, { version: a.version, note: input.note ?? null, byClient: scope.clientReviewer });
   return toArticleDto(await loadArticle(scope, id));
 }
 

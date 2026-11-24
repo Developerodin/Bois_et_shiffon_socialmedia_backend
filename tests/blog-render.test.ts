@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { articleLinks, capBlocks, renderArticleHtml } from "@/server/blog/render";
+import { ArticleBlockSchema, articleLinks, capBlocks, externalLinks, renderArticleHtml, renderSummaryHtml } from "@/server/blog/render";
 import { spansToText, textToSpans, type ArticleBlock, type ArticleSpan } from "@/shared";
 
 const s = (text: string, o: Partial<ArticleSpan> = {}): ArticleSpan => ({ text, bold: false, italic: false, href: null, ...o });
@@ -31,6 +31,25 @@ describe("renderArticleHtml", () => {
   it("lists every http(s) link target once", () => {
     const blocks = [p(s("a", { href: "https://a.test/x" }), s("b", { href: "javascript:x" })), p(s("again", { href: "https://a.test/x" }), s("c", { href: "http://c.test" }))];
     expect(articleLinks(blocks)).toEqual(["https://a.test/x", "http://c.test/"]);
+  });
+});
+
+describe("the summary and links", () => {
+  it("escapes the summary into one paragraph (themes print it as HTML)", () => {
+    expect(renderSummaryHtml(' <img src=x onerror="a()"> & more ')).toBe("<p>&lt;img src=x onerror=&quot;a()&quot;&gt; &amp; more</p>");
+    expect(renderSummaryHtml("  ")).toBe("");
+  });
+
+  it("flags links off the brand's website, subdomains counting as its own", () => {
+    const links = ["https://www.bc.test/a", "https://shop.bc.test/b", "https://evil.test/c", "https://notbc.test/d"];
+    expect(externalLinks(links, "https://bc.test")).toEqual(["https://evil.test/c", "https://notbc.test/d"]);
+    expect(externalLinks(links, null)).toEqual(links);
+  });
+
+  it("a heading or paragraph has exactly one line; a list may have many", () => {
+    expect(ArticleBlockSchema.safeParse({ type: "p", lines: [[s("a")], [s("b")]] }).success).toBe(false);
+    expect(ArticleBlockSchema.safeParse({ type: "h2", lines: [[s("a")], [s("b")]] }).success).toBe(false);
+    expect(ArticleBlockSchema.safeParse({ type: "ul", lines: [[s("a")], [s("b")]] }).success).toBe(true);
   });
 });
 

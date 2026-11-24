@@ -1,7 +1,7 @@
-import type { BlogArticle, ShopifyWriteAction } from "@prisma/client";
+import type { BlogArticle, Prisma, ShopifyWriteAction } from "@prisma/client";
 import { AccessDeniedError } from "@/server/auth/errors";
 import { articleBlocks, loadArticle, toArticleDto, type ArticleScope } from "@/server/blog/articles";
-import { articleLinks, renderArticleHtml } from "@/server/blog/render";
+import { articleLinks, externalLinks, renderArticleHtml, renderSummaryHtml } from "@/server/blog/render";
 import { prisma } from "@/server/db/prisma";
 import { PublishingError } from "@/server/services/publishing";
 import { askCartWriteAdapter, type Article, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
@@ -67,16 +67,20 @@ async function build(scope: ArticleScope, article: BlogArticle, action: ArticleS
   if (article.status !== need.status || !!article.shopifyId !== need.inShopify) throw new PublishingError(need.refusal, 409, "blog.notReady");
   if (action === "publish") return { shopifyId: article.shopifyId!, title: article.title, handle: article.handle };
   const blocks = articleBlocks(article.blocks);
-  const brand = await prisma.brand.findFirstOrThrow({ where: { id: scope.brandId, workspaceId: scope.workspaceId }, select: { displayName: true } });
+  const brand = await prisma.brand.findFirstOrThrow({ where: { id: scope.brandId, workspaceId: scope.workspaceId }, select: { displayName: true, profile: { select: { websiteUrl: true } } } });
+  const links = articleLinks(blocks);
   return {
     blogId: action === "update" ? article.shopifyBlogId : await blogFor(scope, adapter),
     title: article.title,
     handle: article.handle,
     summary: article.summary ?? "",
+    summaryHtml: renderSummaryHtml(article.summary ?? ""),
     tags: article.tags,
     author: brand.displayName,
+    blocks,
     bodyHtml: renderArticleHtml(blocks),
-    links: articleLinks(blocks),
+    links,
+    externalLinks: externalLinks(links, brand.profile?.websiteUrl ?? null),
   };
 }
 
@@ -102,9 +106,78 @@ async function goneFromShopify(scope: ArticleScope, article: BlogArticle, adapte
 export async function previewArticleWrite(scope: ArticleScope, articleId: string, action: ArticleShopifyAction, opts: { again?: boolean } = {}, adapter: ShopifyWriteAdapter = askCartWriteAdapter) {
   if (!scope.perms.has("publish.execute")) throw new AccessDeniedError("Missing permission publish.execute");
   const article = await loadArticle(scope, articleId);
-  if (action !== "create") await goneFromShopify(scope, article, adapter);
+  if (action === "create") await earlierCreates(scope, article, adapter);
+  else await goneFromShopify(scope, article, adapter);
   const payload = await build(scope, article, action, adapter);
   return previewWrite<Payload>(scope, { entityType: "BLOG_ARTICLE", entityId: article.id, action: ACTION[action], version: article.version, payload, again: opts.again }, adapter);
+}
+
+/**
+ * The article as Shopify's answer leaves it (in the transaction that marks the write DONE). Shopify is the truth for
+ * what it shows: a published answer makes the article PUBLISHED whatever happened here meanwhile (an edit during an
+ * in-flight Publish included: it is live, so it is changed in Shopify from then on). Otherwise HIDDEN_IN_SHOPIFY, but
+ * only for the version that was sent; an edit since keeps its own state (back to review).
+ */
+async function settleArticle(tx: Prisma.TransactionClient, scope: ArticleScope, article: BlogArticle, result: Article, version: number) {
+  const where = { id: article.id, workspaceId: scope.workspaceId, brandId: scope.brandId };
+  await tx.blogArticle.updateMany({ where, data: { shopifyId: result.shopifyId, shopifyBlogId: result.blogId } });
+  if (!result.isPublished) {
+    await tx.blogArticle.updateMany({ where: { ...where, version, status: "APPROVED" }, data: { status: "HIDDEN_IN_SHOPIFY" } });
+    return;
+  }
+  const { count } = await tx.blogArticle.updateMany({ where: { ...where, status: { not: "PUBLISHED" } }, data: { status: "PUBLISHED", publishedAt: new Date() } });
+  // The SEO task it came from hears about it once and stays open: a person closes it.
+  if (count && article.taskId) {
+    await tx.taskComment.create({
+      data: { workspaceId: scope.workspaceId, brandId: scope.brandId, taskId: article.taskId, authorId: null, kind: "SYSTEM", body: `The article "${article.title}" is published on the Shopify blog`, byClient: false, internal: false },
+    });
+  }
+}
+
+const PENDING_STALE_MS = 2 * 60_000;
+const UNKNOWN_WAIT_MS = 10 * 60_000;
+
+/**
+ * A create sent for an earlier version (then edited) whose answer never came: confirmWrite settles only rows of the
+ * version being confirmed, so before any new create this settles those, or refuses, so the article is never created
+ * twice. The handle can't change while such a row exists (editArticle), so it is looked up by the article's handle.
+ * Found: the row is DONE and the article takes its Shopify id (its next step is an update). Not found 10 min after the
+ * send: the row is FAILED and a new create may go. Else 409 until then.
+ */
+async function earlierCreates(scope: ArticleScope, article: BlogArticle, adapter: ShopifyWriteAdapter, now = new Date()) {
+  const rows = await prisma.shopifyWrite.findMany({
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, entityType: "BLOG_ARTICLE", entityId: article.id, action: "ARTICLE_CREATE", status: { in: ["PENDING", "UNKNOWN"] }, version: { not: article.version } },
+  });
+  for (const row of rows) {
+    const age = now.getTime() - row.startedAt.getTime();
+    if (row.status === "PENDING" && age < PENDING_STALE_MS) throw new PublishingError("An earlier send of this article to Shopify is still running", 409, "blog.earlierSend");
+    const blogId = article.shopifyBlogId ?? (await blogFor(scope, adapter));
+    const found = blogId ? await adapter.lookupArticle(target(scope), { blogId, handle: article.handle }) : null;
+    if (!found?.ok) throw new PublishingError("Couldn't check an earlier send of this article in Shopify. Try again.", 503, "blog.earlierSend");
+    const own = { id: row.id, runs: row.runs, status: row.status };
+    const audit = (tx: Prisma.TransactionClient, status: string, extra: Record<string, string> = {}) =>
+      tx.auditEvent.create({
+        data: {
+          workspaceId: row.workspaceId, brandId: row.brandId, actorUserId: scope.userId, action: "shopify.article_create", entityType: "ShopifyWrite", entityId: row.id,
+          metadata: { entityType: row.entityType, entityId: row.entityId, version: row.version, attempt: row.attempt, run: row.runs, status, ...extra },
+        },
+      });
+    if (found.value) {
+      const result = found.value;
+      await prisma.$transaction(async (tx) => {
+        const { count } = await tx.shopifyWrite.updateMany({ where: own, data: { status: "DONE", shopifyId: result.shopifyId, error: null } });
+        if (!count) return;
+        await settleArticle(tx, scope, article, result, row.version);
+        await audit(tx, "DONE", { shopifyId: result.shopifyId });
+      });
+      throw new PublishingError("An earlier send of this article reached Shopify. Send your changes as an update.", 409, "blog.earlierSend");
+    }
+    if (age < UNKNOWN_WAIT_MS) throw new PublishingError("Shopify hasn't confirmed an earlier send of this article yet; check again in a few minutes", 409, "blog.earlierSend");
+    await prisma.$transaction(async (tx) => {
+      const { count } = await tx.shopifyWrite.updateMany({ where: own, data: { status: "FAILED", error: "No sign in Shopify after 10 minutes" } });
+      if (count) await audit(tx, "FAILED");
+    });
+  }
 }
 
 const HANDLE_TAKEN = "An article with this address exists in Shopify; change the address";
@@ -112,8 +185,8 @@ const HANDLE_TAKEN = "An article with this address exists in Shopify; change the
 /** Writes what the person confirmed, at most once; the article follows Shopify's answer. Returns the article. */
 export async function confirmArticleWrite(scope: ArticleScope, articleId: string, action: ArticleShopifyAction, token: string, adapter: ShopifyWriteAdapter = askCartWriteAdapter) {
   let article = await loadArticle(scope, articleId);
+  if (action === "create") await earlierCreates(scope, article, adapter);
   let built: Payload | null = null;
-  const where = { id: article.id, workspaceId: scope.workspaceId, brandId: scope.brandId };
   try {
     await confirmWrite<Payload, Article>(
       scope,
@@ -130,7 +203,7 @@ export async function confirmArticleWrite(scope: ArticleScope, articleId: string
           if (action === "publish") return a.publishArticle(target(scope), requestId, article.shopifyId!);
           const p = payload as ArticleWritePreview;
           if (!p.blogId) return { ok: false, reason: "NOT_CONNECTED" };
-          const input = { blogId: p.blogId, title: p.title, handle: p.handle, bodyHtml: p.bodyHtml, summary: p.summary, tags: p.tags, author: p.author };
+          const input = { blogId: p.blogId, title: p.title, handle: p.handle, bodyHtml: p.bodyHtml, summaryHtml: p.summaryHtml, tags: p.tags, author: p.author };
           // Created hidden (the adapter's createArticle never publishes); published only by ARTICLE_PUBLISH.
           return action === "create" ? a.createArticle(target(scope), requestId, input) : a.updateArticle(target(scope), requestId, article.shopifyId!, input);
         },
@@ -145,24 +218,7 @@ export async function confirmArticleWrite(scope: ArticleScope, articleId: string
           const reached = action === "publish" ? found.value.isPublished : new Date(found.value.updatedAt) >= write.startedAt;
           return { ok: true, value: reached ? found.value : null };
         },
-        onDone: async (tx, result, write) => {
-          // The status moves only for the version that was confirmed; an edit since keeps its own (back to review).
-          const confirmed = { ...where, version: write.version };
-          if (action === "create") {
-            await tx.blogArticle.updateMany({ where, data: { shopifyId: result.shopifyId, shopifyBlogId: result.blogId } });
-            await tx.blogArticle.updateMany({ where: { ...confirmed, status: "APPROVED" }, data: { status: "HIDDEN_IN_SHOPIFY" } });
-          } else if (action === "update") {
-            await tx.blogArticle.updateMany({ where: { ...confirmed, status: "APPROVED" }, data: { status: "HIDDEN_IN_SHOPIFY" } });
-          } else {
-            const { count } = await tx.blogArticle.updateMany({ where: { ...where, status: "HIDDEN_IN_SHOPIFY" }, data: { status: "PUBLISHED", publishedAt: new Date() } });
-            // The SEO task it came from hears about it and stays open: a person closes it.
-            if (count && article.taskId) {
-              await tx.taskComment.create({
-                data: { workspaceId: scope.workspaceId, brandId: scope.brandId, taskId: article.taskId, authorId: null, kind: "SYSTEM", body: `The article "${article.title}" is published on the Shopify blog`, byClient: false, internal: false },
-              });
-            }
-          }
-        },
+        onDone: (tx, result, write) => settleArticle(tx, scope, article, result, write.version),
       },
       adapter,
     );

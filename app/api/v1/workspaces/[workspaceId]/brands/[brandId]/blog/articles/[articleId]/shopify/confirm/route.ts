@@ -4,6 +4,9 @@ import { blogProblem, invalidBody } from "@/server/blog/articles";
 import { confirmArticleWrite } from "@/server/blog/shopify-articles";
 import { shopifyWriteProblem } from "@/server/shopify/writes";
 
+// The AI call (or a Shopify send) runs in the request: give it time, so a host timeout never cuts off the refund or the settle.
+export const maxDuration = 300;
+
 type Params = BrandRouteParams & { articleId: string };
 const Body = z.object({ action: z.enum(["create", "update", "publish"]), confirmToken: z.string().min(1).max(1000) });
 
