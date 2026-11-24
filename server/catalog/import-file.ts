@@ -7,7 +7,13 @@ import { Unzip, UnzipInflate } from "fflate";
  * evaluated and no date converted. The first non-empty row is the header; empty rows are skipped; cells are trimmed.
  */
 /** `lines[i]`: where data row i starts in the file (CSV line, Excel row number), so a problem names the row people see. */
-export type Sheet = { headers: string[]; rows: string[][]; lines: number[] };
+export type Sheet = {
+  headers: string[];
+  rows: string[][];
+  lines: number[];
+  /** "row:column" of Excel number cells (exact decimals, never "1.299" meaning 1,299); CSV has none. */
+  numeric?: Set<string>;
+};
 
 const MAX_FILE = 5 * 1024 * 1024;
 const MAX_ROWS = 5_000;
@@ -50,17 +56,21 @@ function table() {
   let headers: string[] | null = null;
   const rows: string[][] = [];
   const lines: number[] = [];
+  const numeric = new Set<string>();
   return {
-    add(cells: string[], line: number) {
+    add(cells: string[], line: number, numericCols: number[] = []) {
       const row = cells.map((c) => c.trim());
       if (!row.some(Boolean)) return;
       if (!headers) headers = row;
       else if (rows.push(row) > MAX_ROWS) throw new Refused(TOO_MANY_ROWS);
-      else lines.push(line);
+      else {
+        lines.push(line);
+        for (const c of numericCols) numeric.add(`${rows.length - 1}:${c}`);
+      }
     },
     done(): Sheet {
       if (!headers) throw new Refused(EMPTY);
-      return { headers, rows, lines };
+      return { headers, rows, lines, numeric };
     },
   };
 }
@@ -292,6 +302,7 @@ function parseXlsx(bytes: Uint8Array): Sheet {
     // <row r="7"> is Excel's row number; a row without r follows the previous one.
     rowNumber = Number(/\br=["'](\d+)/.exec(row.attrs)?.[1] ?? rowNumber + 1);
     const cells: string[] = [];
+    const numericCols: number[] = [];
     let next = 0;
     for (const c of elements(row.body, "c")) {
       // Cells with r="B3" go to their column; cells without r follow the previous one.
@@ -300,9 +311,11 @@ function parseXlsx(bytes: Uint8Array): Sheet {
       if (col >= MAX_COLS) throw new Refused(TOO_MANY_COLS);
       while (cells.length < col) cells.push("");
       cells[col] = value(c.attrs, c.body, shared);
+      const type = attr(c.attrs, "t");
+      if ((type === undefined || type === "n") && cells[col] !== "" && Number.isFinite(Number(cells[col]))) numericCols.push(col);
       next = col + 1;
     }
-    t.add(cells, rowNumber);
+    t.add(cells, rowNumber, numericCols);
   }
   return t.done();
 }

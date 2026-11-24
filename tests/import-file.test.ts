@@ -23,7 +23,7 @@ const inline = (ref: string, s: string) => `<c r="${ref}" t="inlineStr"><is><t>$
 
 describe("parseSheet CSV", () => {
   it("detects comma, semicolon and tab", () => {
-    expect(csv("Name,Price\nChair,10\n")).toMatchObject({ headers: ["Name", "Price"], rows: [["Chair", "10"]] });
+    expect(csv("Name,Price\nChair,10\n")).toMatchObject({ headers: ["Name", "Price"], rows: [["Chair", "10"]], numeric: new Set() });
     expect(csv("Nom;Prix\r\nChaise;1 299,00\r\n")).toMatchObject({ headers: ["Nom", "Prix"], rows: [["Chaise", "1 299,00"]] });
     expect(csv("Name\tPrice\nChair, oak\t10")).toMatchObject({ headers: ["Name", "Price"], rows: [["Chair, oak", "10"]] });
   });
@@ -33,6 +33,7 @@ describe("parseSheet CSV", () => {
       headers: ["Name;x", "Desc"],
       rows: [["Chair", 'Line 1\nsaid "hi", ok']],
       lines: [4],
+      numeric: new Set(),
     });
   });
 
@@ -76,7 +77,7 @@ describe("parseSheet XLSX", () => {
   it("reads shared, rich-text and inline strings, booleans and numbers", () => {
     const shared = `<si><t>Title</t></si><si><r><t>Ch</t></r><r><rPr><b/></rPr><t xml:space="preserve">air &amp; co</t></r><rPh><t>ignored</t></rPh></si><si><t>In stock</t></si>`;
     const rows = `<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>2</v></c><c r="C1" t="str"><v>Price</v></c></row>` + `<row r="2"><c r="A2" t="s"><v>1</v></c><c r="B2" t="b"><v>1</v></c><c r="C2"><v>1299</v></c></row>` + `<row r="3">${inline("A3", "Lamp &#233;")}<c r="C3" t="n"><v>35.880000000000003</v></c></row>`;
-    expect(parseSheet(book(rows, shared))).toMatchObject({ headers: ["Title", "In stock", "Price"], rows: [["Chair & co", "1", "1299"], ["Lamp é", "", "35.88"]] });
+    expect(parseSheet(book(rows, shared))).toMatchObject({ headers: ["Title", "In stock", "Price"], rows: [["Chair & co", "1", "1299"], ["Lamp é", "", "35.88"]], numeric: new Set(["0:2", "1:2"]) });
   });
 
   it("places sparse cells by column and cells without r in sequence", () => {

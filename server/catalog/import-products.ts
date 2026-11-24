@@ -53,16 +53,22 @@ const NO = new Set(["no", "n", "non", "0", "false", "faux", "out of stock", "rup
 const SYMBOL: Record<string, string> = { "€": "EUR", $: "USD", "£": "GBP" };
 
 /**
- * "1 299,00 €" → 1299; empty → null; not an amount (or negative) → NaN, which ProductInput refuses. A plain number
- * ("24.995", "35.88": how Excel's number cells arrive) is read as a decimal and rounded to cents; written prices go
- * through amountOf. ponytail: so a CSV "1.299" meaning 1,299 reads as 1.30; such files write "1.299,00" in practice.
+ * "1 299,00 €" → 1299; empty → null; not an amount (or negative) → NaN, which ProductInput refuses. An Excel number
+ * cell is an exact decimal, rounded half up to cents (through the exponent, so 24.995 is 25.00, not 24.99). Written
+ * text goes through amountOf, except one separator and exactly three digits ("1.299", "1,299"): 1,299 or 1.30 can't
+ * be told apart, so that's `{ ambiguous }` and the caller reports it instead of guessing a price.
  */
-function money(cell: string) {
+function money(cell: string, numeric: boolean): number | null | { ambiguous: string } {
   if (!cell) return null;
-  if (/^\d+(\.\d+)?(e[+-]?\d+)?$/i.test(cell)) return Math.round(Number(cell) * 100) / 100;
+  if (numeric) return Math.round(Number(`${cell}e2`)) / 100;
   const digits = cell.replace(/[^\d.,\s]/g, "").trim();
+  if (/^\d{1,3}[.,]\d{3}$/.test(digits)) return { ambiguous: digits };
   return cell.includes("-") || !/\d/.test(digits) ? NaN : amountOf(digits);
 }
+
+/** "Price 1.299 is ambiguous: write 1299 or 1.30". */
+const ambiguous = (label: string, digits: string) =>
+  `${label} ${digits} is ambiguous: write ${digits.replace(/[.,]/, "")} or ${Number(digits.replace(",", ".")).toFixed(2)}`;
 
 /** "12", "12.0" (Excel numbers), "1 200" → an integer; a negative count (oversold) is 0; empty → null. */
 function count(cell: string) {
@@ -121,6 +127,9 @@ export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
     const currency = at("currency");
     const stock = norm(at("inStock"));
     const inStock = YES.has(stock) ? true : NO.has(stock) ? false : null;
+    const amount = (f: "price" | "compareAtPrice") => money(at(f), sheet.numeric?.has(`${i}:${mapping.indexOf(f)}`) ?? false);
+    const price = amount("price");
+    const compareAtPrice = amount("compareAtPrice");
     const input = ProductInput.safeParse({
       title: line(at("title"), 300) ?? "",
       sku: line(at("sku"), 100),
@@ -132,8 +141,8 @@ export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
       materials: block(at("materials"), 1000),
       dimensions: block(at("dimensions"), 1000),
       certifications: block(at("certifications"), 1000),
-      price: money(at("price")),
-      compareAtPrice: money(at("compareAtPrice")),
+      price: typeof price === "object" ? null : price,
+      compareAtPrice: typeof compareAtPrice === "object" ? null : compareAtPrice,
       currency: /^[a-z]{3}$/i.test(currency) ? currency : (SYMBOL[currency] ?? null),
       inStock,
       stockQuantity: count(at("stockQuantity")),
@@ -144,6 +153,9 @@ export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
     }
     const p = input.data;
     if (stock && inStock === null) report(NOT_STOCK);
+    // An ambiguous price is left empty (the row is still imported) rather than guessed.
+    if (price && typeof price === "object") report(ambiguous("Price", price.ambiguous));
+    if (compareAtPrice && typeof compareAtPrice === "object") report(ambiguous("Compare-at price", compareAtPrice.ambiguous));
     const row: SavedRow = {
       externalId: "",
       sku: p.sku ?? null,

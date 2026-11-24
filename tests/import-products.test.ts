@@ -88,9 +88,19 @@ describe("toRows", () => {
     expect([...matchStored(rows, stored, new Set(["a"]))]).toEqual([["sku:M-1", "b"]]);
   });
 
-  it("reads plain numbers (Excel's number cells) as decimals rounded to cents, written prices with amountOf", () => {
-    const { rows } = toRows(sheet(["Nom", "Prix"], ["A", "35.880000000000003"], ["B", "1299.999"], ["C", "12.5"], ["D", "1.299,00 €"]), map);
-    expect(rows.map((r) => r.price)).toEqual(["35.88", "1300.00", "12.50", "1299.00"]);
+  it("reads Excel number cells as exact decimals, rounded half up to cents", () => {
+    const xlsx = { ...sheet(["Nom", "Prix"], ["A", "24.995"], ["B", "35.880000000000003"], ["C", "1.299"]), numeric: new Set(["0:1", "1:1", "2:1"]) };
+    expect(toRows(xlsx, map).rows.map((r) => r.price)).toEqual(["25.00", "35.88", "1.30"]);
+  });
+
+  it("written prices: amountOf, except an ambiguous '1.299', left empty and reported (the row is still imported)", () => {
+    const { rows, skipped, problems } = toRows(sheet(["Nom", "Prix"], ["A", "1 299,00"], ["B", "12.5"], ["C", "1.299"], ["D", "1,299 €"], ["E", "1.299,00 €"]), map);
+    expect(rows.map((r) => r.price)).toEqual(["1299.00", "12.50", null, null, "1299.00"]);
+    expect(skipped).toBe(0);
+    expect(problems).toEqual([
+      { row: 4, reason: "Price 1.299 is ambiguous: write 1299 or 1.30", skipped: false },
+      { row: 5, reason: "Price 1,299 is ambiguous: write 1299 or 1.30", skipped: false },
+    ]);
   });
 
   it("stays fast on hostile descriptions: 5,000 rows of 10,000 '<'", () => {
