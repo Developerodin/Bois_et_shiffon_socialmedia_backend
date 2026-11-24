@@ -11,7 +11,7 @@ import { GET as list, POST as create } from "@/app/api/v1/workspaces/[workspaceI
 import { PATCH as edit } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/quotes/[quoteId]/route";
 import { quoteNumber, type PermissionKey } from "@/shared";
 
-const params = (extra = {}) => ({ params: Promise.resolve({ workspaceId: "w1", brandId: "b1", ...extra }) });
+const params = (extra: { quoteId?: string } = {}) => ({ params: Promise.resolve({ workspaceId: "w1", brandId: "b1", quoteId: "", ...extra }) });
 const req = (method: string, body?: unknown) => new Request("http://x", { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
 const roleKeys = (slug: string) => new Set(SYSTEM_ROLES.find((r) => r.slug === slug)!.permissions as PermissionKey[]);
 

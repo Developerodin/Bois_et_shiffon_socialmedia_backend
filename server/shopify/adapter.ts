@@ -33,6 +33,8 @@ export type DraftOrder = {
   subtotal: string;
   invoiceUrl: string | null;
   invoiceSentAt: string | null;
+  /** The order a completed draft became (status "COMPLETED") */
+  orderId: string | null;
   updatedAt: string;
 };
 export type InvoiceInput = { to: string; subject: string; message: string };
