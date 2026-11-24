@@ -6,7 +6,8 @@ import { Unzip, UnzipInflate } from "fflate";
  * a cell at XFD1, a million rows, huge cells) is refused before it costs memory. Cells are plain text: no formula is
  * evaluated and no date converted. The first non-empty row is the header; empty rows are skipped; cells are trimmed.
  */
-export type Sheet = { headers: string[]; rows: string[][] };
+/** `lines[i]`: where data row i starts in the file (CSV line, Excel row number), so a problem names the row people see. */
+export type Sheet = { headers: string[]; rows: string[][]; lines: number[] };
 
 const MAX_FILE = 5 * 1024 * 1024;
 const MAX_ROWS = 5_000;
@@ -48,16 +49,18 @@ const startsWith = (b: Uint8Array, magic: number[]) => magic.every((x, i) => b[i
 function table() {
   let headers: string[] | null = null;
   const rows: string[][] = [];
+  const lines: number[] = [];
   return {
-    add(cells: string[]) {
+    add(cells: string[], line: number) {
       const row = cells.map((c) => c.trim());
       if (!row.some(Boolean)) return;
       if (!headers) headers = row;
       else if (rows.push(row) > MAX_ROWS) throw new Refused(TOO_MANY_ROWS);
+      else lines.push(line);
     },
     done(): Sheet {
       if (!headers) throw new Refused(EMPTY);
-      return { headers, rows };
+      return { headers, rows, lines };
     },
   };
 }
@@ -107,6 +110,8 @@ function parseCsv(text: string): Sheet {
   let cell = "";
   let quoted = false;
   let cellStart = true; // `cell === ""` can't tell a fresh cell from a quoted empty one ("")
+  let line = 1; // the line being read; a newline inside quotes moves it on too
+  let rowStart = 1;
   const add = (ch: string) => {
     if (cell.length < MAX_CELL) cell += ch;
     cellStart = false;
@@ -120,6 +125,7 @@ function parseCsv(text: string): Sheet {
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
     if (quoted) {
+      if (ch === "\n" || (ch === "\r" && text[i + 1] !== "\n")) line++;
       if (ch !== '"') add(ch);
       else if (text[i + 1] !== '"') quoted = false;
       else {
@@ -133,14 +139,15 @@ function parseCsv(text: string): Sheet {
     else if (ch === delim) endCell();
     else if (ch === "\n" || ch === "\r") {
       endCell();
-      t.add(row);
+      t.add(row, rowStart);
       row = [];
+      rowStart = ++line;
       if (ch === "\r" && text[i + 1] === "\n") i++;
     } else add(ch);
   }
   if (cell || row.length) {
     endCell();
-    t.add(row);
+    t.add(row, rowStart);
   }
   return t.done();
 }
@@ -278,7 +285,10 @@ function parseXlsx(bytes: Uint8Array): Sheet {
   const shared = [...elements(parts.get(sharedPath) ?? "", "si")].map((e) => text(e.body));
 
   const t = table();
+  let rowNumber = 0;
   for (const row of elements(sheet, "row")) {
+    // <row r="7"> is Excel's row number; a row without r follows the previous one.
+    rowNumber = Number(/\br=["'](\d+)/.exec(row.attrs)?.[1] ?? rowNumber + 1);
     const cells: string[] = [];
     let next = 0;
     for (const c of elements(row.body, "c")) {
@@ -290,7 +300,7 @@ function parseXlsx(bytes: Uint8Array): Sheet {
       cells[col] = value(c.attrs, c.body, shared);
       next = col + 1;
     }
-    t.add(cells);
+    t.add(cells, rowNumber);
   }
   return t.done();
 }

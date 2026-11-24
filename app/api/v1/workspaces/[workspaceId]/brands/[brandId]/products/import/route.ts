@@ -7,7 +7,7 @@ import { hitRateLimit } from "@/server/auth/rate-limit";
 import { parseSheet } from "@/server/catalog/import-file";
 import { guessMapping, matchStored, toRows, vouchedMapped } from "@/server/catalog/import-products";
 import { cannotVouch, VOUCHED_FIELDS } from "@/server/catalog/products";
-import { lockedSave } from "@/server/catalog/sync";
+import { CatalogBusy, lockedSave } from "@/server/catalog/sync";
 import { prisma } from "@/server/db/prisma";
 
 export const maxDuration = 60;
@@ -36,12 +36,15 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
   try {
     const scope = await authorizeBrandRoute(request, context.params, "context.edit");
     if (scope instanceof Response) return scope;
+    const dryRun = new URL(request.url).searchParams.get("dryRun") === "1";
+    // Previews have their own, higher limits: the screen previews again each time a column's field is changed.
+    const [kind, perBrand, perUser] = dryRun ? ["product-import-preview", 120, 240] : ["product-import", 30, 60];
     const busy = () => invalid("Too many imports. Try again in a while.", 429);
-    if (!(await hitRateLimit(`product-import:${scope.brandId}:${scope.userId}`, 30, 3_600_000)).allowed) return busy();
-    if (!(await hitRateLimit(`product-import:${scope.userId}`, 60, 3_600_000)).allowed) return busy();
+    if (!(await hitRateLimit(`${kind}:${scope.brandId}:${scope.userId}`, perBrand, 3_600_000)).allowed) return busy();
+    if (!(await hitRateLimit(`${kind}:${scope.userId}`, perUser, 3_600_000)).allowed) return busy();
     // A chunked request has no Content-Length and formData() would buffer all of it before the size is checked.
     const length = request.headers.get("content-length");
-    if (length === null) return invalid("Send the file with a Content-Length", 411);
+    if (length === null || !/^\d+$/.test(length)) return invalid("Send the file with a Content-Length", 411);
     if (Number(length) > MAX_BYTES + 64 * 1024) return invalid("Files can be up to 5 MB", 413);
 
     const form = (await request.formData().catch(() => null)) ?? new FormData();
@@ -50,7 +53,6 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     const sheet = parseSheet(new Uint8Array(await file.arrayBuffer()));
     if ("error" in sheet) return invalid(sheet.error);
 
-    const dryRun = new URL(request.url).searchParams.get("dryRun") === "1";
     const sent = form.get("mapping");
     let mapping = guessMapping(sheet.headers);
     if (typeof sent === "string" || !dryRun) {
@@ -84,9 +86,15 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     if (vouched.length && !approves) return cannotVouch();
     if (!rows.length) return invalid("No row in this file could be imported, so nothing was changed.", 422);
 
-    // Price and stock columns the file doesn't have keep what's stored (writing them needs rules.approve).
+    // A price or stock column the file doesn't have keeps what's stored (writing it needs rules.approve, and a file
+    // without prices isn't saying there are none); an empty cell in a column it has clears it (toRows).
     const keep = (["price", "compareAtPrice", "inStock", "stockQuantity"] as const).filter((f) => !mapping.includes(f));
-    const saved = await lockedSave(scope, "IMPORT", { rows, complete: true }, { match: matchStored, keep });
+    // 15 s for another import or the sync to finish, leaving the save well inside maxDuration.
+    const saved = await lockedSave(scope, "IMPORT", { rows, complete: true }, { match: matchStored, keep }, 15_000).catch((e: unknown) => {
+      if (e instanceof CatalogBusy) return null;
+      throw e;
+    });
+    if (!saved) return invalid("Another import or sync of your products is running. Try again in a minute.", 409);
     const result: ImportResultDto = { created: saved.created, updated: saved.updated, unchanged: saved.unchanged, archived: saved.archived, skipped, duplicates, problems };
     await prisma.auditEvent.create({
       data: {

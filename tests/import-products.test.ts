@@ -16,7 +16,7 @@ vi.mock("@/server/db/prisma", () => ({ prisma: { auditEvent: { create: audit } }
 
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/products/import/route";
 
-const sheet = (headers: string[], ...rows: string[][]) => ({ headers, rows });
+const sheet = (headers: string[], ...rows: string[][]) => ({ headers, rows, lines: rows.map((_, i) => i + 2) });
 
 describe("guessMapping", () => {
   it("matches French and English headers, accents and punctuation aside", () => {
@@ -58,6 +58,18 @@ describe("toRows", () => {
     );
     expect(rows.map((r) => [r.externalId, r.title])).toEqual([["sku:M-1", "Milo v2"], ["url:https://shop.fr/oslo", "Oslo"], ["title:ava chair", "Ava  Chair".replace(/\s+/g, " ")]]);
     expect(duplicates).toBe(1);
+  });
+
+  it("keys names in any script apart: Greek, CJK, Arabic and Hindi names aren't one product", () => {
+    const { rows, duplicates } = toRows(sheet(["Nom"], ["Χαλί"], ["Καρέκλα"], ["木椅"], ["木桌"], ["سجادة"], ["किताब"], ["कताब"], ["★★★"]), guessMapping(["Nom"]));
+    expect(duplicates).toBe(0);
+    expect(rows.map((r) => r.externalId)).toEqual(["title:χαλι", "title:καρεκλα", "title:木椅", "title:木桌", "title:سجادة", "title:किताब", "title:कताब", "title:★★★"]);
+  });
+
+  it("reports a row's own line, and an in-stock value it can't read (the row is still imported)", () => {
+    const { rows, skipped, problems } = toRows({ headers: ["Nom", "En stock"], rows: [["", "oui"], ["Milo", "bientôt"]], lines: [5, 9] }, guessMapping(["Nom", "En stock"]));
+    expect([rows.length, rows[0]!.inStock, skipped]).toEqual([1, null, 1]);
+    expect(problems).toEqual([{ row: 5, reason: "it has no name" }, { row: 9, reason: "the in-stock value isn't yes or no, so its stock was left unknown" }]);
   });
 
   it("an empty facts cell is null, so the save keeps what's stored", () => {
@@ -103,9 +115,26 @@ describe("import route", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
-  it("refuses a chunked upload (no Content-Length) with 411", async () => {
-    const res = await POST(new Request("http://x/import", { method: "POST", body: "x" }), { params });
-    expect(res.status).toBe(411);
+  it("refuses a chunked upload (no Content-Length), or a Content-Length that isn't a number, with 411", async () => {
+    expect((await POST(new Request("http://x/import", { method: "POST", body: "x" }), { params })).status).toBe(411);
+    expect((await POST(new Request("http://x/import", { method: "POST", body: "x", headers: { "content-length": "1e3" } }), { params })).status).toBe(411);
+  });
+
+  it("previews have their own higher limits", async () => {
+    await upload("Nom\nMilo", undefined, true);
+    expect(hit.mock.calls).toEqual([["product-import-preview:b1:u1", 120, 3_600_000], ["product-import-preview:u1", 240, 3_600_000]]);
+  });
+
+  it("names the file's own line for a problem, blank lines included", async () => {
+    const res = await upload("Nom;Prix\n\nMilo;10\n\n;12", undefined, true);
+    expect((await res.json()).problems).toEqual([{ row: 5, reason: "it has no name" }]);
+  });
+
+  it("another import or sync holding the catalogue: 409, try again", async () => {
+    const { CatalogBusy } = await import("@/server/catalog/sync");
+    save.mockRejectedValueOnce(new CatalogBusy());
+    expect((await upload("Nom\nMilo", ["title"])).status).toBe(409);
+    expect(audit).not.toHaveBeenCalled();
   });
 
   it("previews: guessed mapping, sample, problems, and the fields this person can't import", async () => {
@@ -139,7 +168,8 @@ describe("import route", () => {
     const res = await upload("Nom,Catégorie\nMilo,Sofas", ["title", "category"]);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ created: 1, updated: 0, unchanged: 0, archived: 0, skipped: 0, duplicates: 0, problems: [] });
-    const [scope, source, fetched, opts] = save.mock.calls[0] as unknown as [unknown, string, { complete: boolean; rows: unknown[] }, { keep: string[] }];
+    const [scope, source, fetched, opts, wait] = save.mock.calls[0] as unknown as [unknown, string, { complete: boolean; rows: unknown[] }, { keep: string[] }, number];
+    expect(wait).toBe(15_000);
     expect([scope, source, fetched.complete, opts.keep]).toEqual([{ userId: "u1", workspaceId: "w1", brandId: "b1" }, "IMPORT", true, ["price", "compareAtPrice", "inStock", "stockQuantity"]]);
     expect(audit.mock.calls[0]![0].data).toMatchObject({ action: "product.import", entityId: "b1", metadata: { fields: ["title", "category"], created: 1 } });
   });

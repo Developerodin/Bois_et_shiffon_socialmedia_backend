@@ -295,7 +295,9 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
     const own = p && opts.keep?.length ? Object.fromEntries(opts.keep.map((f) => [f, kept(p, f)])) : {};
     return { ...r, ...(keep && { currency: keep }), ...own };
   });
-  const reports = (r: SavedRow) => r.inStock !== null || r.stockQuantity !== null;
+  // Stock is fresh only when the source said something about it: values kept from the stored row (`keep`) aren't news.
+  const reported = new Set(unique.filter((r) => r.inStock !== null || r.stockQuantity !== null).map((r) => r.externalId));
+  const reports = (r: SavedRow) => reported.has(r.externalId);
   const created = rows.filter((r) => !target.has(r.externalId));
   const changed: (SavedRow & { id: string })[] = [];
   const unchangedReporting: string[] = [];
@@ -316,16 +318,17 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
         "stockQuantity" = u.stock_quantity, "imageUrl" = u.image_url,
         materials = COALESCE(u.materials, p.materials), dimensions = COALESCE(u.dimensions, p.dimensions),
         certifications = COALESCE(u.certifications, p.certifications),
-        "stockCheckedAt" = CASE WHEN u.in_stock IS NOT NULL OR u.stock_quantity IS NOT NULL THEN ${at}::timestamp(3) ELSE p."stockCheckedAt" END,
+        "stockCheckedAt" = CASE WHEN u.reports THEN ${at}::timestamp(3) ELSE p."stockCheckedAt" END,
         "archivedAt" = NULL, "updatedAt" = ${at}::timestamp(3)
       FROM unnest(
         ${col((r) => r.id)}::text[], ${col((r) => r.externalId)}::text[], ${col((r) => r.sku)}::text[], ${col((r) => r.title)}::text[],
         ${col((r) => r.url)}::text[], ${col((r) => r.category)}::text[], ${col((r) => r.description)}::text[],
         ${col((r) => r.price)}::text[]::numeric[], ${col((r) => r.compareAtPrice)}::text[]::numeric[], ${col((r) => r.currency)}::text[],
         ${col((r) => text(r.inStock))}::text[]::boolean[], ${col((r) => text(r.stockQuantity))}::text[]::int[], ${col((r) => r.imageUrl)}::text[],
-        ${col((r) => r.materials)}::text[], ${col((r) => r.dimensions)}::text[], ${col((r) => r.certifications)}::text[]
+        ${col((r) => r.materials)}::text[], ${col((r) => r.dimensions)}::text[], ${col((r) => r.certifications)}::text[],
+        ${col((r) => text(reports(r)))}::text[]::boolean[]
       ) AS u(id, external_id, sku, title, url, category, description, price, compare_at_price, currency, in_stock, stock_quantity,
-             image_url, materials, dimensions, certifications)
+             image_url, materials, dimensions, certifications, reports)
       WHERE p.id = u.id AND p."workspaceId" = ${scope.workspaceId} AND p."brandId" = ${scope.brandId} AND p.source = ${source}::"ProductSource"`;
   }
 
@@ -353,10 +356,20 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
 /**
  * saveRows in a transaction holding the brand's catalogue lock, so an import and a sync of one brand (or two imports)
  * never interleave: the second waits for the first to commit. 60 s covers MAX_ROWS rows (well under 5 s on a test DB).
+ * `lockWaitMs` (a request, which has its own time limit): wait at most that long for the lock, then throw CatalogBusy.
+ * Prisma's maxWait only covers getting a connection, so the wait is Postgres' lock_timeout, for the lock only.
  */
-export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL">, fetched: { rows: SavedRow[]; complete: boolean }, opts: SaveOptions = {}) {
+export class CatalogBusy extends Error {}
+export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL">, fetched: { rows: SavedRow[]; complete: boolean }, opts: SaveOptions = {}, lockWaitMs?: number) {
   return prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('catalog:' || ${scope.brandId}))`;
+    if (lockWaitMs) await tx.$executeRaw`SELECT set_config('lock_timeout', ${String(lockWaitMs)}, true)`;
+    try {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('catalog:' || ${scope.brandId}))`;
+    } catch (e) {
+      if (lockWaitMs && /lock timeout/i.test(String(e))) throw new CatalogBusy("Another import or sync of this catalogue is running");
+      throw e;
+    }
+    if (lockWaitMs) await tx.$executeRaw`SELECT set_config('lock_timeout', '0', true)`;
     return saveRows(tx, scope, source, fetched, opts);
   }, { timeout: 60_000 });
 }

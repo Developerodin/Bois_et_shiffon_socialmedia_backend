@@ -70,10 +70,19 @@ const block = (s: string, max: number) => s.trim().slice(0, max) || null;
 /** A link without its #fragment or trailing slash, so "…/chair/" and "…/chair#reviews" are one product. */
 const sameLink = (url: string) => { const u = new URL(url); u.hash = ""; return u.toString().replace(/\/+(\?|$)/, "$1"); };
 
+/**
+ * "Ava  Chair!" → "ava chair": a name compared in any script (Greek, Arabic, Hindi, CJK keep their letters), Latin
+ * and Greek accents and punctuation gone (other marks stay: Hindi vowel signs tell words apart). A name of symbols only
+ * ("★★★") is compared as written, so a key is never just "title:".
+ */
+const sameName = (title: string) =>
+  title.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, " ").trim() || title.toLowerCase();
+
 /** The key a row is stored under: its SKU, else its link, else its name (My calls 4). */
 const keyOf = (r: Pick<SavedRow, "sku" | "url" | "title">) =>
-  r.sku ? `sku:${r.sku}` : r.url ? `url:${sameLink(r.url)}` : `title:${norm(r.title)}`;
+  r.sku ? `sku:${r.sku}` : r.url ? `url:${sameLink(r.url)}` : `title:${sameName(r.title)}`;
 
+const NOT_STOCK = "the in-stock value isn't yes or no, so its stock was left unknown";
 const MESSAGE: Partial<Record<string, string>> = {
   price: "the price isn't an amount",
   compareAtPrice: "the compare-at price isn't an amount",
@@ -82,8 +91,10 @@ const MESSAGE: Partial<Record<string, string>> = {
 
 /**
  * Rows to save from a sheet and a mapping. Links that aren't http(s) are dropped (not the row); a row without a name,
- * or with a price or stock that isn't a number, is skipped and reported. Two rows with the same key: the last wins.
- * An empty cell is null: it clears a price or stock (the file is the catalogue) but never a stored fact (saveRows).
+ * or with a price or stock that isn't a number, is skipped and reported; an in-stock value that isn't yes or no is
+ * reported and read as unknown. Two rows with the same key: the last wins. An empty cell is null: it clears a price or
+ * stock (the file is the catalogue) but never a stored fact (saveRows). A price or stock column the file doesn't have
+ * at all is different: the route keeps those stored values (saveRows' `keep`).
  */
 export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
   const problems: ImportProblem[] = [];
@@ -91,8 +102,11 @@ export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
   let skipped = 0;
   sheet.rows.forEach((cells, i) => {
     const at = (f: ImportField) => { const c = mapping.indexOf(f); return c < 0 ? "" : (cells[c] ?? "").trim(); };
-    const skip = (reason: string) => { skipped++; problems.push({ row: i + 2, reason }); };
+    const report = (reason: string) => problems.push({ row: sheet.lines[i] ?? i + 2, reason });
+    const skip = (reason: string) => { skipped++; report(reason); };
     const currency = at("currency");
+    const stock = norm(at("inStock"));
+    const inStock = YES.has(stock) ? true : NO.has(stock) ? false : null;
     const input = ProductInput.safeParse({
       title: line(at("title"), 300) ?? "",
       sku: line(at("sku"), 100),
@@ -106,7 +120,7 @@ export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
       price: money(at("price")),
       compareAtPrice: money(at("compareAtPrice")),
       currency: /^[a-z]{3}$/i.test(currency) ? currency : (SYMBOL[currency] ?? null),
-      inStock: YES.has(norm(at("inStock"))) ? true : NO.has(norm(at("inStock"))) ? false : null,
+      inStock,
       stockQuantity: count(at("stockQuantity")),
     });
     if (!input.success) {
@@ -114,6 +128,7 @@ export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
       return skip(field === "title" ? "it has no name" : (MESSAGE[field] ?? input.error.issues[0]?.message ?? "it couldn't be read"));
     }
     const p = input.data;
+    if (stock && inStock === null) report(NOT_STOCK);
     const row: SavedRow = {
       externalId: "",
       sku: p.sku ?? null,
@@ -151,10 +166,10 @@ export function matchStored(rows: SavedRow[], stored: { id: string; sku: string 
   };
   const bySku = index((p) => p.sku);
   const byLink = index((p) => (p.url ? sameLink(p.url) : null));
-  const byName = index((p) => norm(p.title));
+  const byName = index((p) => sameName(p.title));
   const found = new Map<string, string>();
   for (const r of rows) {
-    const id = (r.sku && bySku.get(r.sku)) || (r.url && byLink.get(sameLink(r.url))) || byName.get(norm(r.title));
+    const id = (r.sku && bySku.get(r.sku)) || (r.url && byLink.get(sameLink(r.url))) || byName.get(sameName(r.title));
     if (id) found.set(r.externalId, id);
   }
   return found;

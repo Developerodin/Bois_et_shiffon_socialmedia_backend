@@ -23,29 +23,34 @@ const inline = (ref: string, s: string) => `<c r="${ref}" t="inlineStr"><is><t>$
 
 describe("parseSheet CSV", () => {
   it("detects comma, semicolon and tab", () => {
-    expect(csv("Name,Price\nChair,10\n")).toEqual({ headers: ["Name", "Price"], rows: [["Chair", "10"]] });
-    expect(csv("Nom;Prix\r\nChaise;1 299,00\r\n")).toEqual({ headers: ["Nom", "Prix"], rows: [["Chaise", "1 299,00"]] });
-    expect(csv("Name\tPrice\nChair, oak\t10")).toEqual({ headers: ["Name", "Price"], rows: [["Chair, oak", "10"]] });
+    expect(csv("Name,Price\nChair,10\n")).toMatchObject({ headers: ["Name", "Price"], rows: [["Chair", "10"]] });
+    expect(csv("Nom;Prix\r\nChaise;1 299,00\r\n")).toMatchObject({ headers: ["Nom", "Prix"], rows: [["Chaise", "1 299,00"]] });
+    expect(csv("Name\tPrice\nChair, oak\t10")).toMatchObject({ headers: ["Name", "Price"], rows: [["Chair, oak", "10"]] });
   });
 
   it("keeps quoted newlines, delimiters and doubled quotes; skips empty rows", () => {
     expect(csv('"Name;x",Desc\n\n,\n"Chair","Line 1\nsaid ""hi"", ok"\n')).toEqual({
       headers: ["Name;x", "Desc"],
       rows: [["Chair", 'Line 1\nsaid "hi", ok']],
+      lines: [4],
     });
   });
 
+  it("numbers each data row by the line it starts on: blank lines and quoted newlines count", () => {
+    expect(csv('Name\r\n\r\nA\r\n"B\r\nb"\n\nC')).toMatchObject({ rows: [["A"], ["B\r\nb"], ["C"]], lines: [3, 4, 7] });
+  });
+
   it("opens a quote only at the start of a cell", () => {
-    expect(csv('5" screen;Price\nTV;10')).toEqual({ headers: ['5" screen', "Price"], rows: [["TV", "10"]] });
-    expect(csv('Name,Note\n"",x""y\n')).toEqual({ headers: ["Name", "Note"], rows: [["", 'x""y']] });
+    expect(csv('5" screen;Price\nTV;10')).toMatchObject({ headers: ['5" screen', "Price"], rows: [["TV", "10"]] });
+    expect(csv('Name,Note\n"",x""y\n')).toMatchObject({ headers: ["Name", "Note"], rows: [["", 'x""y']] });
   });
 
   it("reads a UTF-8 BOM, UTF-16 (LE and BE) and Windows-1252", () => {
-    expect(csv("﻿Name\nCafé")).toEqual({ headers: ["Name"], rows: [["Café"]] });
+    expect(csv("﻿Name\nCafé")).toMatchObject({ headers: ["Name"], rows: [["Café"]] });
     const le = Buffer.from("﻿Name,Price\nCafé,1", "utf16le");
-    expect(parseSheet(le)).toEqual({ headers: ["Name", "Price"], rows: [["Café", "1"]] });
-    expect(parseSheet(Buffer.from(le).swap16())).toEqual({ headers: ["Name", "Price"], rows: [["Café", "1"]] });
-    expect(parseSheet(new Uint8Array([...strToU8("Nom\nCaf"), 0xe9]))).toEqual({ headers: ["Nom"], rows: [["Café"]] });
+    expect(parseSheet(le)).toMatchObject({ headers: ["Name", "Price"], rows: [["Café", "1"]] });
+    expect(parseSheet(Buffer.from(le).swap16())).toMatchObject({ headers: ["Name", "Price"], rows: [["Café", "1"]] });
+    expect(parseSheet(new Uint8Array([...strToU8("Nom\nCaf"), 0xe9]))).toMatchObject({ headers: ["Nom"], rows: [["Café"]] });
   });
 
   it("stops at 5,001 rows and 51 columns, and cuts long cells", () => {
@@ -53,7 +58,7 @@ describe("parseSheet CSV", () => {
     expect(csv("Name\n" + "x\n".repeat(5001))).toEqual({ error: expect.stringContaining("more than 5,000") });
     expect(csv(",".repeat(49) + "\n")).toEqual({ error: "The file is empty." });
     expect(csv("a" + ",".repeat(50) + "\n")).toEqual({ error: expect.stringContaining("more than 50 columns") });
-    expect(csv("Name\n" + "y".repeat(20_000))).toEqual({ headers: ["Name"], rows: [["y".repeat(10_000)]] });
+    expect(csv("Name\n" + "y".repeat(20_000))).toMatchObject({ headers: ["Name"], rows: [["y".repeat(10_000)]] });
   });
 
   it("refuses an old .xls file and a file over 5 MB", () => {
@@ -65,23 +70,24 @@ describe("parseSheet CSV", () => {
 describe("parseSheet XLSX", () => {
   it("reads our own export", () => {
     const x = toXlsx("Products", [{ key: "t", label: "Title", width: 30 }, { key: "p", label: "Price", width: 10 }], [{ t: "Chair <oak> & co", p: 12.5 }, { t: "=1+1", p: null }]);
-    expect(parseSheet(x)).toEqual({ headers: ["Title", "Price"], rows: [["Chair <oak> & co", "12.5"], ["=1+1", ""]] });
+    expect(parseSheet(x)).toMatchObject({ headers: ["Title", "Price"], rows: [["Chair <oak> & co", "12.5"], ["=1+1", ""]] });
   });
 
   it("reads shared, rich-text and inline strings, booleans and numbers", () => {
     const shared = `<si><t>Title</t></si><si><r><t>Ch</t></r><r><rPr><b/></rPr><t xml:space="preserve">air &amp; co</t></r><rPh><t>ignored</t></rPh></si><si><t>In stock</t></si>`;
     const rows = `<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>2</v></c><c r="C1" t="str"><v>Price</v></c></row>` + `<row r="2"><c r="A2" t="s"><v>1</v></c><c r="B2" t="b"><v>1</v></c><c r="C2"><v>1299</v></c></row>` + `<row r="3">${inline("A3", "Lamp &#233;")}</row>`;
-    expect(parseSheet(book(rows, shared))).toEqual({ headers: ["Title", "In stock", "Price"], rows: [["Chair & co", "1", "1299"], ["Lamp é"]] });
+    expect(parseSheet(book(rows, shared))).toMatchObject({ headers: ["Title", "In stock", "Price"], rows: [["Chair & co", "1", "1299"], ["Lamp é"]] });
   });
 
   it("places sparse cells by column and cells without r in sequence", () => {
     const rows = `<row r="1">${inline("A1", "a")}${inline("C1", "c")}</row><row r="4"><c t="inlineStr"><is><t>x</t></is></c><c t="inlineStr"><is><t>y</t></is></c>${inline("E4", "z")}</row>`;
-    expect(parseSheet(book(rows))).toEqual({ headers: ["a", "", "c"], rows: [["x", "y", "", "", "z"]] });
+    expect(parseSheet(book(rows))).toMatchObject({ headers: ["a", "", "c"], rows: [["x", "y", "", "", "z"]] });
+    expect(parseSheet(book(`${rows}<row>${inline("A5", "w")}</row>`))).toMatchObject({ lines: [4, 5] });
   });
 
   it("reads a formula with no cached value as empty", () => {
     const rows = `<row r="1">${inline("A1", "Title")}${inline("B1", "Price")}</row><row r="2">${inline("A2", "Chair")}<c r="B2"><f>SUM(C2:D2)</f></c></row>`;
-    expect(parseSheet(book(rows))).toEqual({ headers: ["Title", "Price"], rows: [["Chair", ""]] });
+    expect(parseSheet(book(rows))).toMatchObject({ headers: ["Title", "Price"], rows: [["Chair", ""]] });
   });
 
   it("refuses a cell at XFD1 and column AY, accepts AX", () => {
@@ -135,7 +141,7 @@ describe("parseSheet XLSX", () => {
       "xl/worksheets/sheet1.xml": strToU8(`<x:worksheet ${x}><x:sheetData><x:row r="1"><x:c r="A1" t="s"><x:v>0</x:v></x:c><x:c r="B1" t="inlineStr"><x:is><x:t>Price</x:t></x:is></x:c></x:row><x:row r="2"><x:c r="A2" t="s"><x:v>1</x:v></x:c><x:c r="B2"><x:v>9</x:v></x:c></x:row></x:sheetData></x:worksheet>`),
       "xl/sharedStrings.xml": strToU8(`<x:sst ${x}><x:si><x:t>Title</x:t></x:si><x:si><x:r><x:t>Ch</x:t></x:r><x:r><x:t>air</x:t></x:r></x:si></x:sst>`),
     });
-    expect(parseSheet(zip)).toEqual({ headers: ["Title", "Price"], rows: [["Chair", "9"]] });
+    expect(parseSheet(zip)).toMatchObject({ headers: ["Title", "Price"], rows: [["Chair", "9"]] });
   });
 
   it("refuses a zip with no workbook", () => {

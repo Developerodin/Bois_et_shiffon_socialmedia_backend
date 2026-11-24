@@ -6,6 +6,7 @@ vi.mock("@/server/auth/rate-limit", () => ({ hitRateLimit: vi.fn(async () => ({ 
 vi.mock("@/server/auth/permissions", () => ({ effectivePermissions: vi.fn(async () => new Set(["context.edit", "rules.approve"])) }));
 
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/products/import/route";
+import { CatalogBusy, lockedSave } from "@/server/catalog/sync";
 
 /** The import route against Postgres: re-imports keep ids and facts, archive only IMPORT rows, and stay in one brand. */
 let ws: string;
@@ -61,6 +62,40 @@ describe("product import", () => {
     await upload("Name,SKU,Materials\nMilo,A,", ["title", "sku", "materials"]);
     const p = await prisma.product.findFirstOrThrow({ where: { workspaceId: ws, externalId: "sku:A" } });
     expect([p.materials, p.price?.toFixed(2)]).toEqual(["Oak", "10.00"]);
+  });
+
+  it("stock kept from the stored row isn't stamped as checked; stock the file reports is", async () => {
+    await upload("Name,SKU,Stock\nMilo,A,3", ["title", "sku", "stockQuantity"]);
+    const old = new Date("2026-01-01T00:00:00Z");
+    await prisma.product.updateMany({ where: { workspaceId: ws, externalId: "sku:A" }, data: { stockCheckedAt: old } });
+    await upload("Name,SKU\nMilo Sofa,A", ["title", "sku"]);
+    let p = await prisma.product.findFirstOrThrow({ where: { workspaceId: ws, externalId: "sku:A" } });
+    expect([p.title, p.stockQuantity, p.stockCheckedAt?.toISOString()]).toEqual(["Milo Sofa", 3, old.toISOString()]);
+    await upload("Name,SKU,Stock\nMilo Sofa,A,4", ["title", "sku", "stockQuantity"]);
+    p = await prisma.product.findFirstOrThrow({ where: { workspaceId: ws, externalId: "sku:A" } });
+    expect(p.stockQuantity).toBe(4);
+    expect(p.stockCheckedAt!.getTime()).toBeGreaterThan(old.getTime());
+  });
+
+  it("a save that can't get the brand's lock in time gives up with CatalogBusy and writes nothing", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const isLocked = new Promise<void>((r) => (locked = r));
+    const holder = prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('catalog:' || ${"ip-a"}))`;
+      locked();
+      await held;
+    }, { timeout: 10_000 });
+    await isLocked;
+    const scope = { workspaceId: ws, brandId: "ip-a" };
+    const row = { externalId: "sku:Z", sku: "Z", title: "Z", url: null, category: null, description: null, price: null, compareAtPrice: null, currency: null, inStock: null, stockQuantity: null, imageUrl: null };
+    await expect(lockedSave(scope, "IMPORT", { rows: [row], complete: true }, {}, 200)).rejects.toBeInstanceOf(CatalogBusy);
+    release();
+    await holder;
+    expect(await live()).toEqual([]);
+    await lockedSave(scope, "IMPORT", { rows: [row], complete: true }, {}, 200);
+    expect(await live()).toEqual(["IMPORT:sku:Z"]);
   });
 
   it("a file with no good row writes and archives nothing", async () => {
