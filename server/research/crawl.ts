@@ -1,14 +1,18 @@
+import { lookup as dnsLookup } from "node:dns";
 import { lookup } from "node:dns/promises";
-import { isIP } from "node:net";
+import { isIP, type LookupFunction } from "node:net";
+import { Agent, fetch } from "undici";
 
 /**
  * Brand-website crawler for the Research agent (design §5.1).
  * Untrusted URLs → SSRF guard on every hop: http(s) only, default ports, no
- * credentials, every resolved address must be public. Respects robots.txt (User-agent: *).
- * ponytail: DNS is checked before fetch, but fetch re-resolves (rebinding window);
- * pin the resolved IP with a custom undici dispatcher if this ever crawls hostile hosts at scale.
+ * credentials, every resolved address must be public. Respects robots.txt (our own group, else `*`).
+ * The connection itself goes through PINNED, whose lookup re-checks the addresses it connects to, so DNS
+ * rebinding between assertPublicUrl and connect can't reach a private address.
  */
 export const USER_AGENT = "BrandpilotResearchBot/0.1 (+brand onboarding)";
+/** Our product token as robots.txt names it (`User-agent: BrandpilotResearchBot`). */
+export const ROBOTS_AGENT = USER_AGENT.split("/")[0];
 const MAX_PAGES = 8;
 const MAX_BYTES = 1_000_000;
 const MAX_TEXT = 8_000;
@@ -72,6 +76,23 @@ export async function assertPublicUrl(raw: string): Promise<URL> {
   return url;
 }
 
+/**
+ * The lookup the socket actually connects with: every resolved address must be public, else the connect fails.
+ * IP-literal hosts skip lookup; assertPublicUrl already checked them and they can't rebind.
+ * ponytail: one shared Agent (undici's default pool limits); no proxy support.
+ */
+const pinnedLookup: LookupFunction = (hostname, options, callback) => {
+  dnsLookup(hostname, { ...options, all: true }, (err, addresses) => {
+    if (err) return callback(err, "", 0);
+    if (addresses.length === 0 || addresses.some((a) => isPrivateAddress(a.address))) {
+      return callback(new CrawlError("Private or local addresses are not allowed") as NodeJS.ErrnoException, "", 0);
+    }
+    if (options.all) (callback as unknown as (e: null, a: typeof addresses) => void)(null, addresses);
+    else callback(null, addresses[0].address, addresses[0].family);
+  });
+};
+const PINNED = new Agent({ connect: { lookup: pinnedLookup } });
+
 /** Fetch with SSRF check on each redirect hop, timeout and size cap. */
 export async function safeFetch(raw: string, accept = "text/html", signal?: AbortSignal): Promise<{ url: URL; status: number; body: string; contentType: string }> {
   const { url, status, bytes, contentType } = await safeFetchBytes(raw, accept, MAX_BYTES, signal);
@@ -83,6 +104,7 @@ export async function safeFetchBytes(raw: string, accept: string, maxBytes = MAX
   let url = await assertPublicUrl(raw);
   for (let hop = 0; hop < 4; hop++) {
     const res = await fetch(url, {
+      dispatcher: PINNED,
       redirect: "manual",
       headers: { "user-agent": USER_AGENT, accept },
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
@@ -118,9 +140,11 @@ export async function safeFetchBytes(raw: string, accept: string, maxBytes = MAX
   throw new CrawlError("Too many redirects");
 }
 
-/** Disallow rules per user-agent (lower-cased). Consecutive User-agent lines share one group. */
-export function robotsGroups(txt: string): Map<string, string[]> {
-  const groups = new Map<string, string[]>();
+export type RobotsGroup = { disallow: string[]; allow: string[]; crawlDelay: number | null };
+
+function readRobots(txt: string) {
+  const groups = new Map<string, RobotsGroup>();
+  const sitemaps: string[] = [];
   let agents: string[] = [];
   let inRules = false;
   for (const line of txt.split(/\r?\n/)) {
@@ -132,18 +156,65 @@ export function robotsGroups(txt: string): Map<string, string[]> {
       inRules = false;
       const ua = value.toLowerCase();
       agents.push(ua);
-      if (!groups.has(ua)) groups.set(ua, []);
+      if (!groups.has(ua)) groups.set(ua, { disallow: [], allow: [], crawlDelay: null });
     } else if (key === "disallow" || key === "allow") {
       inRules = true;
-      if (key === "disallow" && value) for (const a of agents) groups.get(a)!.push(value);
+      if (value) for (const a of agents) groups.get(a)![key].push(value);
+    } else if (key === "crawl-delay") {
+      inRules = true;
+      const seconds = Number(value);
+      if (value && Number.isFinite(seconds) && seconds >= 0) for (const a of agents) groups.get(a)!.crawlDelay = seconds;
+    } else if (key === "sitemap" && value) {
+      sitemaps.push(value); // not part of any group
     }
   }
-  return groups;
+  return { groups, sitemaps };
 }
 
-/** Disallow rules for `User-agent: *` (simple prefix match; ponytail: no wildcards/Allow precedence). */
-export function parseRobots(txt: string): string[] {
-  return robotsGroups(txt).get("*") ?? [];
+/** Rules per user-agent (lower-cased). Consecutive User-agent lines share one group; repeated agents merge. */
+export function robotsGroups(txt: string): Map<string, RobotsGroup> {
+  return readRobots(txt).groups;
+}
+
+/** The group that applies to `agent`: its own, else `*`. */
+const groupFor = (txt: string, agent: string) => {
+  const groups = robotsGroups(txt);
+  return groups.get(agent.toLowerCase()) ?? groups.get("*");
+};
+
+/** `*` matches any run, a trailing `$` anchors the end; otherwise a prefix match. Two pointers: O(path × rule), no regex backtracking on hostile rules. */
+function robotsMatch(rule: string, path: string) {
+  const p = rule.endsWith("$") ? rule.slice(0, -1) : `${rule}*`;
+  let i = 0, j = 0, star = -1, mark = 0;
+  while (j < path.length) {
+    if (i < p.length && p[i] !== "*" && p[i] === path[j]) { i++; j++; }
+    else if (i < p.length && p[i] === "*") { star = i++; mark = j; }
+    else if (star >= 0) { i = star + 1; j = ++mark; }
+    else return false;
+  }
+  while (i < p.length && p[i] === "*") i++;
+  return i === p.length;
+}
+
+/**
+ * Whether `agent` may fetch `path` (path + query). Google semantics: the longest matching rule wins, Allow beats
+ * Disallow on equal length, no match = allowed. ponytail: no percent-encoding normalisation of rules or paths.
+ */
+export function robotsAllows(txt: string, path: string, agent: string) {
+  const group = groupFor(txt, agent);
+  if (!group) return true;
+  const longest = (rules: string[]) => Math.max(-1, ...rules.filter((r) => robotsMatch(r, path)).map((r) => r.length));
+  return longest(group.allow) >= longest(group.disallow);
+}
+
+/** Crawl-delay in seconds for `agent` (its own group, else `*`), null when unset. */
+export function robotsCrawlDelay(txt: string, agent: string) {
+  return groupFor(txt, agent)?.crawlDelay ?? null;
+}
+
+/** `Sitemap:` URLs as written (callers validate them). */
+export function robotsSitemaps(txt: string) {
+  return readRobots(txt).sitemaps;
 }
 
 const decode = (s: string) =>
@@ -291,10 +362,10 @@ export function seoSignals(html: string) {
 }
 export type PageSeo = ReturnType<typeof seoSignals>;
 
-type LdNode = Record<string, unknown>;
+export type LdNode = Record<string, unknown>;
 
 /** Every object in the page's JSON-LD (arrays, @graph and nested objects flattened); broken blocks skipped. */
-function jsonLdNodes(html: string): LdNode[] {
+export function jsonLdNodes(html: string): LdNode[] {
   const out: LdNode[] = [];
   const walk = (v: unknown) => {
     if (Array.isArray(v)) v.forEach(walk);
@@ -533,8 +604,7 @@ export async function crawlSite(startUrl: string, onPage?: (p: CrawledPage) => P
   const robotsTxt = await safeFetch(new URL("/robots.txt", start).toString(), "text/plain")
     .then((r) => (r.status === 200 ? r.body : null))
     .catch(() => null);
-  const disallow = robotsTxt ? parseRobots(robotsTxt) : [];
-  const allowed = (u: string) => !disallow.some((rule) => new URL(u).pathname.startsWith(rule));
+  const allowed = (u: string) => !robotsTxt || robotsAllows(robotsTxt, new URL(u).pathname + new URL(u).search, ROBOTS_AGENT);
 
   const queue = [start.toString()];
   const seen = new Set(queue);

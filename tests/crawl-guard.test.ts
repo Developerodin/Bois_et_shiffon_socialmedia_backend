@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertPublicUrl, extractPage, isPrivateAddress, parseRobots } from "@/server/research/crawl";
+import { assertPublicUrl, extractPage, isPrivateAddress, robotsGroups } from "@/server/research/crawl";
 
 describe("SSRF guard", () => {
   it("flags private, loopback, link-local and metadata addresses", () => {
@@ -24,7 +24,7 @@ describe("SSRF guard", () => {
 
 describe("robots + extraction", () => {
   it("reads Disallow rules for User-agent * only", () => {
-    const rules = parseRobots("User-agent: Googlebot\nDisallow: /g\n\nUser-agent: *\nDisallow: /cart\nDisallow: /account # private\n");
+    const rules = robotsGroups("User-agent: Googlebot\nDisallow: /g\n\nUser-agent: *\nDisallow: /cart\nDisallow: /account # private\n").get("*")?.disallow;
     expect(rules).toEqual(["/cart", "/account"]);
   });
 
