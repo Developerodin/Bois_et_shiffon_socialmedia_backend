@@ -240,13 +240,13 @@ async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal): Pr
  * Which source a brand syncs from: its newest working Shopify connection, else a broken one, else the website: its
  * product pages (SITE) once its last sync found no feed there (catalogSync.source), else its feed (WEBSITE).
  */
-export async function catalogSource(scope: Scope) {
-  const shop = await prisma.integrationConnection.findFirst({
+export async function catalogSource(scope: Scope, db: Db = prisma) {
+  const shop = await db.integrationConnection.findFirst({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId, provider: "SHOPIFY", status: { not: "REVOKED" } },
     orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
   });
   if (shop) return { source: "SHOPIFY" as const, shop };
-  const profile = await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { websiteUrl: true, catalogSync: true } });
+  const profile = await db.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { websiteUrl: true, catalogSync: true } });
   if (!profile?.websiteUrl) return { source: null };
   const last = profile.catalogSync as CatalogSync | null;
   return last?.source === "SITE"
@@ -421,8 +421,8 @@ export function withCatalogLock<T>(scope: Scope, lockWaitMs: number, fn: (tx: Db
 const archiveShopifyRows = (scope: Scope) =>
   prisma.product.updateMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, source: "SHOPIFY", archivedAt: null }, data: { archivedAt: new Date() } });
 
-export const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count" | "pages">, note: Note | null) =>
-  prisma.brandProfile.updateMany({
+export const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count" | "pages">, note: Note | null, db: Db = prisma) =>
+  db.brandProfile.updateMany({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId },
     data: { catalogSync: { ...sync, error: note?.error ?? null, reason: note?.reason ?? null } },
   });
@@ -449,22 +449,31 @@ export async function runCatalogSync(payload: unknown) {
   try {
     // A SITE brand's feed is checked every day too: once the site has one, the feed takes over (and archives SITE rows).
     const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal) : await websiteFeed(found.websiteUrl, signal);
-    if (fetched.note === NOT_A_FEED) {
+    // A SITE brand stays one when its feed URL turns readers away for a day: only a feed that answers moves it.
+    if (fetched.note === NOT_A_FEED || (fetched.note === BLOCKED && found.source === "SITE")) {
       await archiveShopifyRows(scope);
       await startPageChain(scope);
       return void (await record(scope, { at, source: "SITE", ...(await siteProgress(scope, found.source === "SITE" && found.capped)) }, READING));
     }
     const source = found.source === "SHOPIFY" ? "SHOPIFY" : "WEBSITE";
     // Up to 2 minutes behind an import or another sync's save; past that the job is retried, nothing recorded.
-    const { seen: count } = await lockedSave(scope, source, fetched, {}, 120_000);
-    await record(scope, { at, source, count }, fetched.note ?? null);
+    // The save and the record share the catalogue lock's transaction: the site reader checks the source under the
+    // same lock, so it never writes SITE rows (or archives these) after the brand moved.
+    await withCatalogLock(scope, 120_000, async (tx) => {
+      const { seen: count } = await saveRows(tx, scope, source, fetched, {});
+      // A complete save archived any SITE rows: forget what the site reader read, so a switch back reads every page again.
+      if (fetched.complete) await tx.catalogPage.updateMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { readAt: null, etag: null, modifiedAt: null } });
+      await record(scope, { at, source, count }, fetched.note ?? null, tx);
+    });
   } catch (error) {
     if (error instanceof CatalogBusy) throw error;
     const refused = error instanceof ReconnectNeeded;
     if (refused && found.source === "SHOPIFY") await markReconnect(found.shop.id, SHOPIFY_REFUSED);
     // Messages here carry statuses and Shopify error codes only, never a token.
     console.warn("[catalog] sync failed", scope.brandId, found.source, error instanceof Error ? error.message : error);
-    await record(scope, { at, source: found.source, count: 0 }, refused ? REFUSED : FAILED);
+    // A SITE brand keeps its reader's progress on screen.
+    const kept = found.source === "SITE" ? await siteProgress(scope, found.capped) : { count: 0 };
+    await record(scope, { at, source: found.source, ...kept }, refused ? REFUSED : FAILED);
     throw error;
   }
 }
@@ -502,7 +511,9 @@ export const pagesKey = (brandId: string, day: string, step: number, manual?: nu
  */
 export async function startPageChain(scope: Scope, day = new Date().toISOString().slice(0, 10)) {
   const where = { type: CATALOG_PAGES_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId };
-  if (await prisma.job.findFirst({ where: { ...where, status: { in: ["PENDING", "RUNNING"] } }, select: { id: true } })) return;
+  // A step left from an earlier day doesn't count: it ends without reading when it runs.
+  const alive = await prisma.job.findFirst({ where: { ...where, status: { in: ["PENDING", "RUNNING"] }, payload: { path: ["day"], equals: day } }, select: { id: true } });
+  if (alive) return;
   const ranToday = await prisma.job.findUnique({ where: { idempotencyKey: pagesKey(scope.brandId, day, 0) }, select: { id: true } });
   const manual = ranToday
     ? 1 + (await prisma.job.count({ where: { ...where, idempotencyKey: { startsWith: `catalog-pages:${scope.brandId}:${day}:manual:`, endsWith: ":0" } } }))

@@ -8,7 +8,7 @@ import {
   type Note, type SyncedRow,
 } from "@/server/catalog/sync";
 import { prisma } from "@/server/db/prisma";
-import { enqueueJob, type Lease } from "@/server/jobs/queue";
+import { enqueueJob } from "@/server/jobs/queue";
 import { fetchRobots, ROBOTS_AGENT, robotsAllows, robotsRules, safeFetchBytes, sameSite } from "@/server/research/crawl";
 
 /**
@@ -41,6 +41,10 @@ const LOCK_WAIT_MS = 120_000;
 
 const SITE_REFUSED: Note = { error: "Your website turned our product reader away, so we stopped reading its product pages. Connect Shopify, import a file or add products by hand.", reason: "site-refused" };
 const NO_PRODUCT_PAGES: Note = { error: "We couldn't find product pages in your website's sitemap. Connect Shopify, import a file or add products by hand.", reason: "no-product-pages" };
+// Pages that listed products now show none (a bot challenge, maintenance, a new template): nothing archived, tomorrow again.
+const PAGES_CHANGED: Note = { error: "Your website's product pages stopped showing product details we can read, so we paused reading them. We'll try again tomorrow.", reason: "site-refused" };
+// A batch stops the run when more than half of its pages that listed products come back empty, and at least this many do.
+const EMPTIED_MIN = 3;
 
 /** Pause after each page read: at least 1 s, the site's Crawl-delay when longer, never more than 10 s. */
 export const spacingMs = (crawlDelay: number | null) => Math.min(10, Math.max(1, crawlDelay ?? 1)) * 1000;
@@ -62,9 +66,17 @@ type Scope = { workspaceId: string; brandId: string };
 type Page = { id: string; url: string; etag: string | null; modifiedAt: string | null; productKeys: string[] };
 type Outcome =
   | { page: Page; kind: "read"; rows: SyncedRow[]; etag: string | null; modifiedAt: string | null }
-  | { page: Page; kind: "unchanged" | "gone" | "failed" };
+  | { page: Page; kind: "unchanged" | "gone" | "disallowed" }
+  /** `emptied`: a 200 without the products this page listed before (kept, not archived). */
+  | { page: Page; kind: "failed"; emptied?: boolean };
 /** Why a run ended: "time" and "busy" (another brand reads this host) carry on in a minute; the rest end the chain. */
-type Stop = "time" | "busy" | "budget" | "refused" | "done" | "robots" | "day";
+type Stop = "time" | "busy" | "budget" | "refused" | "done" | "robots" | "changed";
+
+/** The brand stopped reading from its product pages (Shopify connected, or a feed saved), seen under the catalogue lock. */
+class Moved extends Error {}
+async function stillSite(tx: Prisma.TransactionClient, scope: Scope) {
+  if ((await catalogSource(scope, tx)).source !== "SITE") throw new Moved();
+}
 
 /**
  * Pages due, at most BATCH: never read, then lastmod newer than the read, then read over 7 days ago; never one already
@@ -122,6 +134,8 @@ function saveBatch(scope: Scope, outcomes: Outcome[]) {
   const now = new Date();
   const rows = outcomes.flatMap((o) => (o.kind === "read" ? o.rows : []));
   return withCatalogLock(scope, LOCK_WAIT_MS, async (tx) => {
+    // A sync that moved the brand saved under this lock first: writing SITE rows now would bring them back.
+    await stillSite(tx, scope);
     if (rows.length) await saveRows(tx, scope, "SITE", { rows, complete: false }, { keys: [...new Set(rows.map((r) => r.externalId))] });
     const removed: string[] = [];
     const confirmed: string[] = [];
@@ -129,6 +143,9 @@ function saveBatch(scope: Scope, outcomes: Outcome[]) {
       const where = { id: o.page.id, workspaceId: scope.workspaceId, brandId: scope.brandId };
       if (o.kind === "failed") {
         await tx.catalogPage.updateMany({ where, data: { triedAt: now, state: "failed" } });
+      } else if (o.kind === "disallowed") {
+        // robots.txt forbids it now: left alone for a week (no budget spent); a complete discovery drops it.
+        await tx.catalogPage.updateMany({ where, data: { readAt: now, state: "disallowed" } });
       } else if (o.kind === "unchanged") {
         confirmed.push(...o.page.productKeys);
         await tx.catalogPage.updateMany({ where, data: { readAt: now, triedAt: now } });
@@ -170,10 +187,12 @@ async function readPage(page: Page, signal: AbortSignal): Promise<Outcome | null
   if (res.status === 304) return { page, kind: "unchanged" };
   if (res.status === 404 || res.status === 410) return { page, kind: "gone" };
   if (res.status !== 200 || res.truncated) return { page, kind: "failed" };
+  const rows = pageProducts(Buffer.from(res.bytes).toString("utf8"), page.url);
+  if (!rows.length && page.productKeys.length) return { page, kind: "failed", emptied: true };
   return {
     page,
     kind: "read",
-    rows: pageProducts(Buffer.from(res.bytes).toString("utf8"), page.url),
+    rows,
     etag: validator(res.headers.get("etag")),
     modifiedAt: validator(res.headers.get("last-modified")),
   };
@@ -184,11 +203,15 @@ async function finish(scope: Scope, chain: Chain, stop: Stop) {
   const progress = await siteProgress(scope, chain.capped);
   const { read, total } = progress.pages;
   if (chain.complete && total > 0 && read === total) {
-    // SITE saves are partial (never archive), so the brand's WEBSITE/SHOPIFY rows go here, once it's all read.
-    await withCatalogLock(scope, LOCK_WAIT_MS, (tx) =>
-      tx.product.updateMany({ where: { ...scope, source: { in: ["WEBSITE", "SHOPIFY"] }, archivedAt: null }, data: { archivedAt: new Date() } }));
+    // SITE saves are partial (never archive), so the brand's WEBSITE/SHOPIFY rows go here, once it's all read, and
+    // only while it still reads from its pages.
+    await withCatalogLock(scope, LOCK_WAIT_MS, async (tx) => {
+      await stillSite(tx, scope);
+      await tx.product.updateMany({ where: { ...scope, source: { in: ["WEBSITE", "SHOPIFY"] }, archivedAt: null }, data: { archivedAt: new Date() } });
+    });
   }
-  const note = stop === "refused" || stop === "robots" ? SITE_REFUSED : total === 0 ? NO_PRODUCT_PAGES : read < total ? READING : null;
+  const note = stop === "refused" || stop === "robots" ? SITE_REFUSED : stop === "changed" ? PAGES_CHANGED
+    : total === 0 ? NO_PRODUCT_PAGES : read < total ? READING : null;
   await record(scope, { at: new Date().toISOString(), source: "SITE", ...progress }, note);
   await prisma.auditEvent.create({
     data: {
@@ -199,37 +222,53 @@ async function finish(scope: Scope, chain: Chain, stop: Stop) {
 }
 
 /**
- * Job handler. Exits at once when another run for the brand is going (one chain per brand), and stops the chain,
- * clearing what was read, once the brand reads from Shopify or a feed (a later switch back re-reads every page).
- * `sleep` is for tests.
+ * Job handler. One chain per brand: a run holds the brand's advisory lock for its whole length (in a transaction, so
+ * a pooled connection never keeps it); a second run for the brand (two chains claimed at once) finds it taken and
+ * ends without queuing anything, the holder carries on. A step left from an earlier day ends quietly (today's chain,
+ * which the daily sync starts, reads now). A brand that moved to Shopify or a feed ends the chain; the sync that moved
+ * it cleared what was read.
  */
-export async function runCatalogPages(payload: unknown, lease?: Lease, sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))) {
+export const runCatalogPages = (payload: unknown) => readSitePages(payload);
+
+/** runCatalogPages with the pause injectable (tests). */
+export async function readSitePages(payload: unknown, sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))) {
   const chain = Payload.parse(payload);
   const scope = { workspaceId: chain.workspaceId, brandId: chain.brandId };
-  const other = await prisma.job.findFirst({
-    where: { type: CATALOG_PAGES_JOB, ...scope, status: "RUNNING", leasedUntil: { gt: new Date() }, ...(lease && { id: { not: lease.jobId } }) },
-    select: { id: true },
-  });
-  if (other) return;
-  const found = await catalogSource(scope);
-  if (found.source !== "SITE") {
-    await prisma.catalogPage.updateMany({ where: scope, data: { readAt: null, etag: null, modifiedAt: null } });
-    return;
-  }
-  if (chain.day !== new Date().toISOString().slice(0, 10)) return finish(scope, chain, "day");
+  if (chain.day !== new Date().toISOString().slice(0, 10)) return;
+  // ponytail: holds one pooled connection idle for the run (≤ ~5 min); the timeout only bounds a stuck run.
+  await prisma.$transaction(async (tx) => {
+    const [{ locked }] = await tx.$queryRaw<{ locked: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtext('pages:' || ${scope.brandId})) AS locked`;
+    if (!locked) return;
+    await readChain(chain, scope, sleep).catch((e: unknown) => {
+      if (!(e instanceof Moved)) throw e;
+    });
+  }, { maxWait: 10_000, timeout: 10 * 60_000 });
+}
 
+async function readChain(chain: Chain, scope: Scope, sleep: (ms: number) => Promise<void>) {
+  const found = await catalogSource(scope);
+  if (found.source !== "SITE") return;
   const started = Date.now();
   const signal = AbortSignal.timeout(RUN_MS);
   const origin = new URL(found.websiteUrl).origin;
   const robots = await fetchRobots(origin, signal);
   if (robots.disallowAll) return finish(scope, chain, "robots");
   const rules = robotsRules(robots.txt ?? "", ROBOTS_AGENT);
-  if (chain.step === 0) {
+  // Once a day per brand: a chain started again by hand that day reads on from the pages found the first time
+  // (as incomplete, so it never archives the old feed's rows; tomorrow's chain does).
+  const discovered = `site-discovery:${scope.brandId}:${chain.day}`;
+  if (chain.step === 0 && !(await prisma.rateLimitBucket.findUnique({ where: { key: discovered }, select: { key: true } }))) {
     const discovery = await discoverProductUrls(origin, robots.txt ?? "", signal);
     const { goneKeys } = await syncCatalogPages(scope, discovery);
-    await withCatalogLock(scope, LOCK_WAIT_MS, (tx) => archiveUnproduced(tx, scope, goneKeys));
+    await withCatalogLock(scope, LOCK_WAIT_MS, async (tx) => {
+      await stillSite(tx, scope);
+      await archiveUnproduced(tx, scope, goneKeys);
+    });
+    await hitRateLimit(discovered, 1, DAY_MS);
     chain.complete = discovery.complete;
     chain.capped = discovery.capped;
+  } else if (chain.step === 0) {
+    chain.capped = found.capped;
   }
 
   const dayStart = new Date(`${chain.day}T00:00:00.000Z`);
@@ -247,9 +286,7 @@ export async function runCatalogPages(payload: unknown, lease?: Lease, sleep = (
       if (stop) break;
       const url = new URL(page.url);
       if (!robotsAllows(rules, url.pathname + url.search)) {
-        // Disallowed since discovery: not read; a complete discovery drops it (and archives what only it produced).
-        outcomes.push({ page, kind: "failed" });
-        tried++;
+        outcomes.push({ page, kind: "disallowed" });
         continue;
       }
       const host = url.hostname.toLowerCase().replace(/^www\./, "");
@@ -269,7 +306,11 @@ export async function runCatalogPages(payload: unknown, lease?: Lease, sleep = (
     }
     if (outcomes.length) {
       await saveBatch(scope, outcomes);
-      chain.read += outcomes.filter((o) => o.kind !== "failed").length;
+      chain.read += outcomes.filter((o) => o.kind !== "failed" && o.kind !== "disallowed").length;
+      // Most pages that listed products now list none: the site changed, not the catalogue. Stop before it spreads.
+      const listed = outcomes.filter((o) => o.page.productKeys.length && (o.kind === "read" || o.kind === "failed")).length;
+      const emptied = outcomes.filter((o) => o.kind === "failed" && o.emptied).length;
+      if (!stop && emptied >= EMPTIED_MIN && emptied * 2 > listed) stop = "changed";
     }
   }
 

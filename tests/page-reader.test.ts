@@ -4,7 +4,7 @@ const m = vi.hoisted(() => ({ safeFetchBytes: vi.fn(), enqueueJob: vi.fn(async (
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: m.enqueueJob }));
 vi.mock("@/server/research/crawl", async (orig) => ({ ...(await orig<object>()), safeFetch: vi.fn(async () => ({ status: 404, body: "" })), safeFetchBytes: m.safeFetchBytes }));
 vi.mock("@/server/db/prisma", () => {
-  const tx = { $executeRaw: vi.fn(async () => 0), product: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) } };
+  const tx = { $executeRaw: vi.fn(async () => 0), product: { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) }, brandProfile: { updateMany: m.updateMany } };
   return {
     prisma: {
       integrationConnection: { findFirst: vi.fn(async () => null) },
