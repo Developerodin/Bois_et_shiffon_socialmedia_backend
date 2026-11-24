@@ -8,7 +8,7 @@ vi.mock("@/server/research/crawl", async (orig) => ({ ...(await orig<object>()),
 import { shopifyRows } from "@/server/catalog/sync";
 import { CrawlError } from "@/server/research/crawl";
 import {
-  CatalogMcpError, catalogMcpProfileUrl, catalogTools, checkCatalogMcp, isShopifyMcp, majorUnits, mcpCatalog, mcpStoreHost, mcpVariants, searchCatalog,
+  CatalogMcpError, catalogMcpProfileUrl, catalogTools, checkCatalogMcp, isShopifyMcp, majorUnits, mcpCatalog, mcpStoreHost, mcpVariants, searchCatalog, storeHostMismatch,
 } from "@/server/shopify/catalog-mcp";
 import { RECORDED_PROFILE_NOT_HTTPS, RECORDED_PROFILE_UNREACHABLE, RECORDED_SEARCH, RECORDED_TOOLS, SEARCH_CATALOG_INPUT } from "./fixtures/catalog-mcp";
 
@@ -37,6 +37,19 @@ describe("mcpStoreHost", () => {
     for (const bad of ["127.0.0.1", "http://10.0.0.1/", "shop.example:8443", "user@shop.example", "https://a:b@shop.example", "[::1]", "", "a b.com"]) {
       expect(mcpStoreHost(bad), bad).toBeNull();
     }
+  });
+});
+
+describe("storeHostMismatch", () => {
+  it("a custom domain that isn't the brand's website is a mismatch; www. and case don't count", () => {
+    expect(storeHostMismatch("other-shop.fr", "https://www.boisetchiffons.fr/")).toBe(true);
+    expect(storeHostMismatch("www.boisetchiffons.fr", "https://BoisEtChiffons.fr")).toBe(false);
+    expect(storeHostMismatch("boisetchiffons.fr", "www.boisetchiffons.fr/shop")).toBe(false);
+  });
+  it("a myshopify address, no website or an unreadable website is never a mismatch", () => {
+    expect(storeHostMismatch("bc.myshopify.com", "https://boisetchiffons.fr")).toBe(false);
+    expect(storeHostMismatch("other-shop.fr", null)).toBe(false);
+    expect(storeHostMismatch("other-shop.fr", "http://")).toBe(false);
   });
 });
 

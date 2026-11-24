@@ -3,10 +3,11 @@ import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { enqueueCatalogSync } from "@/server/catalog/sync";
+import { prisma } from "@/server/db/prisma";
 import { kickRunner } from "@/server/jobs/runner";
 import { CrawlError } from "@/server/research/crawl";
 import { saveConnections, toConnectionDto } from "@/server/services/connections";
-import { CatalogMcpError, catalogMcpProfileUrl, checkCatalogMcp, isShopifyMcp, MCP_SCOPE, mcpStoreHost } from "@/server/shopify/catalog-mcp";
+import { CatalogMcpError, catalogMcpProfileUrl, checkCatalogMcp, isShopifyMcp, MCP_SCOPE, mcpStoreHost, storeHostMismatch } from "@/server/shopify/catalog-mcp";
 
 // Queued work runs after the response (kickRunner); give it room to finish.
 export const maxDuration = 300;
@@ -23,7 +24,8 @@ class TakenOtherWay extends Error {}
  * Connect the brand's Shopify store through Shopify's Storefront Catalog MCP (server/shopify/catalog-mcp.ts), products
  * only. Needs integrations.manage. `{ shop }`: the store's .myshopify.com or own domain. The store is asked for its
  * tools and one search before anything is saved; then a SHOPIFY connection (account id = the host, MCP_SCOPE marked,
- * no secret) and a catalogue sync are queued → 201 `{ connection }`. 409 when the same address is connected through
+ * no secret) and a catalogue sync are queued → 201 `{ connection, warning? }`; `warning` when the store's own domain
+ * isn't the brand's website (storeHostMismatch), so a wrong store is noticed; it still connects. 409 when the same address is connected through
  * AskCart or a token (disconnect that first). 10 tries a minute per brand and person: each one calls the store.
  */
 export async function POST(request: Request, context: { params: Promise<BrandRouteParams> }) {
@@ -79,7 +81,11 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     }
     await enqueueCatalogSync(scope, `connect:${conn.updatedAt.toISOString()}`);
     kickRunner();
-    return Response.json({ connection: toConnectionDto(conn) }, { status: 201 });
+    const site = await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { websiteUrl: true } });
+    const warning = storeHostMismatch(host, site?.websiteUrl)
+      ? `${host} isn't this brand's website (${site?.websiteUrl}). If that's the wrong store, disconnect it and connect the right one.`
+      : undefined;
+    return Response.json({ connection: toConnectionDto(conn), ...(warning ? { warning } : {}) }, { status: 201 });
   } catch (error) {
     return fromAccessError(error);
   }

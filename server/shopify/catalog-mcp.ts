@@ -90,6 +90,22 @@ export function mcpStoreHost(raw: string): string | null {
   return HOST.test(s) ? s : null;
 }
 
+/**
+ * True when the store's own domain isn't the brand's website (ignoring "www."): likely the wrong store. A .myshopify.com
+ * address never matches a brand's domain, and no website means nothing to compare, so both are false.
+ */
+export function storeHostMismatch(storeHost: string, websiteUrl: string | null | undefined): boolean {
+  if (!websiteUrl || storeHost.endsWith(".myshopify.com")) return false;
+  let site: string;
+  try {
+    site = new URL(/^https?:\/\//i.test(websiteUrl) ? websiteUrl : `https://${websiteUrl}`).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  const bare = (h: string) => h.replace(/^www\./, "");
+  return bare(site) !== bare(storeHost);
+}
+
 const RpcAnswer = z.object({
   result: z.unknown().optional(),
   error: z.object({ code: z.number().optional(), data: z.object({ code: z.unknown().optional() }).passthrough().nullish() }).passthrough().nullish(),

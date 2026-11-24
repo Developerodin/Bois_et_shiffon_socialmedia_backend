@@ -84,6 +84,23 @@ describe("connect", () => {
     expect(await prisma.job.count({ where: { type: "catalog.sync", payload: { path: ["brandId"], equals: "mcp-a" } } })).toBe(1);
   });
 
+  it("a store address that isn't the brand's website still connects, with a warning; a matching one has none", async () => {
+    await prisma.brandProfile.updateMany({ where: { brandId: "mcp-a" }, data: { websiteUrl: "https://boisetchiffons.fr" } });
+    try {
+      safeFetchBytes.mockResolvedValueOnce(TOOLS).mockResolvedValueOnce(search([]));
+      const other = await connect("mcp-a", { shop: "other-shop.fr" });
+      expect(other.status).toBe(201);
+      expect(((await other.json()) as { warning?: string }).warning).toContain("other-shop.fr isn't this brand's website");
+      await prisma.integrationConnection.deleteMany({});
+      safeFetchBytes.mockResolvedValueOnce(TOOLS).mockResolvedValueOnce(search([]));
+      const same = await connect("mcp-a", { shop: "www.boisetchiffons.fr" });
+      expect(same.status).toBe(201);
+      expect(await same.json()).not.toHaveProperty("warning");
+    } finally {
+      await prisma.brandProfile.updateMany({ where: { brandId: "mcp-a" }, data: { websiteUrl: null } });
+    }
+  });
+
   it("a bad address, a store that isn't one, or Shopify refusing our profile save nothing", async () => {
     expect((await connect("mcp-a", { shop: "10.0.0.1" })).status).toBe(422);
     safeFetchBytes.mockResolvedValueOnce(answer({ not: "rpc" }, 404));
