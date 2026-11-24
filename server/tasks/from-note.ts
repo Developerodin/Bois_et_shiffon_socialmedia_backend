@@ -18,6 +18,8 @@ import { TASK_AREAS, TASK_PRIORITIES, type TaskDto, type TaskProposalDto, type T
 export const FROM_NOTE_WORKFLOW = "tasks.from-note";
 export const NOTE_MAX = 8_000;
 const PROPOSALS_MAX = 20;
+/** Notes never propose a CRM task: those come from customer messages and quotes, and need a key the author may lack. */
+const NOTE_AREAS = z.enum(TASK_AREAS).exclude(["CRM"]);
 
 /** Strict JSON output: every field present, null when the note says nothing (no `optional`). */
 const Proposals = z.object({
@@ -25,7 +27,7 @@ const Proposals = z.object({
     z.object({
       title: z.string(),
       description: z.string().nullable(),
-      areas: z.array(z.enum(TASK_AREAS)),
+      areas: z.array(NOTE_AREAS),
       owner: z.string().nullable(),
       dueOn: z.string().nullable(),
       priority: z.enum(TASK_PRIORITIES),
@@ -37,7 +39,7 @@ const SYSTEM = `You turn a note from a business's marketing team (meeting notes,
 - Return {"proposals": [...]}: one per distinct piece of work the note asks for, at most ${PROPOSALS_MAX}; an empty list when it asks for nothing.
 - title: a short action, as the team would write it, in the note's language.
 - description: details from the note the title leaves out, else null.
-- areas: one or more of ${TASK_AREAS.join(", ")} (CONTENT: posts and social media; WEBSITE: pages of the site; SEO: search ranking; GENERAL: anything else).
+- areas: one or more of ${NOTE_AREAS.options.join(", ")} (CONTENT: posts and social media; WEBSITE: pages of the site; SEO: search ranking; GENERAL: anything else).
 - owner: when the note gives the work to someone, their name exactly as written in the members list, else null.
 - dueOn: YYYY-MM-DD when the note gives a date or deadline (relative ones count from today), else null.
 - priority: one of ${TASK_PRIORITIES.join(", ")}; NORMAL unless the note says it is urgent or can wait.

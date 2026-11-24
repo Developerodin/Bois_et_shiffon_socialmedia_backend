@@ -2,12 +2,13 @@ import "server-only";
 import type { Prisma } from "@prisma/client";
 import { CLIENT_GRANT_WHERE, type Db } from "@/server/auth/permissions";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";
-import { canBeAssigned, seesAllTasks } from "@/server/tasks/access";
+import { canBeAssigned, handlesCustomers, seesAllTasks } from "@/server/tasks/access";
+import { CRM_TASK_KEYS } from "@/shared";
 import { TaskError } from "@/server/tasks/errors";
 
 type Id = string | null | undefined;
-/** The ids a write sets; undefined = not changed, null = cleared (neither is checked). */
-export type TaskLinks = { workProjectId?: Id; contentItemId?: Id; auditReportId?: Id; ownerId?: Id; ownerRoleId?: Id; reviewerId?: Id; blockedOnId?: Id };
+/** The ids a write sets; undefined = not changed, null = cleared (neither is checked). `areas`: set by the write. */
+export type TaskLinks = { workProjectId?: Id; contentItemId?: Id; auditReportId?: Id; ownerId?: Id; ownerRoleId?: Id; reviewerId?: Id; blockedOnId?: Id; areas?: readonly string[] };
 
 /**
  * The roles a task can be given to: a project role of this workspace that reads tasks, never the client one
@@ -29,13 +30,20 @@ export const taskOwnerRoleWhere = (workspaceId: string): Prisma.RoleWhereInput =
  * The assign rule, without tasks.all (else 403 task.assignNotAllowed): on create the owner is the caller or nobody, and
  * no role; on a change the only owner moves are taking an unowned task with no role as yourself, or dropping your own
  * ownership of a task you created (so you still see it after).
+ * The CRM area: only someone who handlesCustomers may put a task in it (403 task.crmNotAllowed); on a CRM task the owner,
+ * reviewer, blocked-on and owning role must hold a CRM_TASK_KEYS key, and moving a task into CRM re-checks the ones it has.
  */
 export async function checkTaskLinks(
   tx: Db,
   scope: { workspaceId: string; brandId: string; userId: string; perms: Set<PermissionKey>; clientReviewer?: boolean },
   input: TaskLinks,
-  current?: { reviewerId: string | null; workProjectId: string | null; ownerId?: string | null; ownerRoleId?: string | null; createdById?: string | null },
+  current?: { reviewerId: string | null; workProjectId: string | null; ownerId?: string | null; ownerRoleId?: string | null; createdById?: string | null; blockedOnId?: string | null; areas?: readonly string[] },
 ): Promise<void> {
+  const crm = (input.areas ?? current?.areas ?? []).includes("CRM");
+  const intoCrm = crm && !current?.areas?.includes("CRM");
+  if (input.areas?.includes("CRM") && !handlesCustomers(scope.perms)) {
+    throw new TaskError("Only people who answer customers can put a task in Sales & CRM.", 403, "task.crmNotAllowed");
+  }
   if (!seesAllTasks(scope)) {
     const me = scope.userId;
     const was = { ownerId: current?.ownerId ?? null, ownerRoleId: current?.ownerRoleId ?? null };
@@ -54,13 +62,18 @@ export async function checkTaskLinks(
   if (input.workProjectId && !(await tx.workProject.findFirst({ where: where(input.workProjectId), select }))) throw refuse("workProjectId");
   if (input.contentItemId && !(await tx.contentItem.findFirst({ where: where(input.contentItemId), select }))) throw refuse("contentItemId");
   if (input.auditReportId && !(await tx.auditReport.findFirst({ where: where(input.auditReportId), select }))) throw refuse("auditReportId");
-  if (input.ownerRoleId && !(await tx.role.findFirst({ where: { id: input.ownerRoleId, ...taskOwnerRoleWhere(scope.workspaceId) }, select }))) throw refuse("ownerRoleId");
+  // Moving a task into CRM re-checks the people and role it already has (the write may keep them).
+  const kept = (field: "ownerId" | "ownerRoleId" | "reviewerId" | "blockedOnId") => (input[field] !== undefined ? input[field] : intoCrm ? current?.[field] : undefined);
+  const ownerRoleId = kept("ownerRoleId");
+  const crmRole = crm ? { AND: [{ permissions: { hasSome: [...CRM_TASK_KEYS] } }] } : {};
+  if (ownerRoleId && !(await tx.role.findFirst({ where: { id: ownerRoleId, ...taskOwnerRoleWhere(scope.workspaceId), ...crmRole }, select }))) throw refuse("ownerRoleId");
   const after = {
     reviewerId: input.reviewerId !== undefined ? input.reviewerId : (current?.reviewerId ?? null),
     workProjectId: input.workProjectId !== undefined ? input.workProjectId : (current?.workProjectId ?? null),
+    areas: input.areas ?? current?.areas,
   };
   for (const field of ["ownerId", "reviewerId", "blockedOnId"] as const) {
-    const userId = input[field];
+    const userId = kept(field);
     if (userId && !(await canBeAssigned(tx, scope, userId, after))) throw refuse(field);
   }
 }

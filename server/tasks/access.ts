@@ -3,14 +3,19 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, isClientGrant, isClientMember, memberRole } from "@/server/auth/permissions";
 import { CLIENT_REVIEWER, rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
+import { CRM_TASK_KEYS } from "@/shared";
 import { lockRow } from "@/server/services/publishing";
 import { TaskError } from "@/server/tasks/errors";
 
 /**
  * Who is looking at a brand's tasks, from the route scope already loaded (no extra read). `all` (tasks.all, staff only):
- * sees every task; without it a person sees only their own (ownClause).
+ * sees every task; without it a person sees only their own (ownClause). `crm` (handlesCustomers): sees CRM-area tasks.
  */
-export type TaskViewer = { userId: string; workspaceId: string; brandId: string; canRead: boolean; canManage: boolean; all: boolean; client: boolean };
+export type TaskViewer = { userId: string; workspaceId: string; brandId: string; canRead: boolean; canManage: boolean; all: boolean; client: boolean; crm: boolean };
+
+/** Holds a CRM_TASK_KEYS key: may see CRM-area tasks and be given one. Clients too, when the matrix gives them a key. */
+export const handlesCustomers = (perms: { has(k: PermissionKey): boolean } | readonly string[]) =>
+  CRM_TASK_KEYS.some((k) => ("has" in perms ? perms.has(k) : perms.includes(k)));
 
 /** tasks.all as it counts: a client reviewer never sees every task, whatever their roles hold. */
 export const seesAllTasks = (scope: { perms: Set<PermissionKey>; clientReviewer?: boolean }) => scope.perms.has("tasks.all") && !scope.clientReviewer;
@@ -24,6 +29,7 @@ export function taskViewer(scope: { userId: string; workspaceId: string; brandId
     canManage: scope.perms.has("tasks.manage"),
     all: seesAllTasks(scope),
     client: scope.clientReviewer,
+    crm: handlesCustomers(scope.perms),
   };
 }
 
@@ -48,7 +54,8 @@ const clientClause = (userId: string, a: Prisma.Sql) =>
   Prisma.sql`(${a}."reviewerId" = ${userId} OR EXISTS (SELECT 1 FROM "WorkProject" p WHERE p.id = ${a}."workProjectId" AND p."brandId" = ${a}."brandId" AND p."clientVisible"))`;
 
 type BrandScope = { workspaceId: string; brandId: string };
-type TaskPeople = { reviewerId: string | null; workProjectId: string | null };
+/** `areas`: the task's areas (after the change); a CRM task needs a CRM_TASK_KEYS key too. */
+type TaskPeople = { reviewerId: string | null; workProjectId: string | null; areas?: readonly string[] };
 
 /** Is the task in a project of this brand that is shared with the client? */
 async function inSharedProject(db: Db, scope: BrandScope, workProjectId: string | null): Promise<boolean> {
@@ -107,15 +114,20 @@ const ownedBy = (userId: string, a: Prisma.Sql) =>
 const ownClause = (userId: string, a: Prisma.Sql) =>
   Prisma.sql`(${ownedBy(userId, a)} OR ${a}."reviewerId" = ${userId} OR ${a}."blockedOnId" = ${userId} OR ${a}."createdById" = ${userId})`;
 
+/** The CRM-area rule: without a CRM_TASK_KEYS key on the brand, a CRM task is hidden whatever else would show it. */
+const notCrm = (a: Prisma.Sql) => Prisma.sql`NOT ('CRM' = ANY(${a}.areas))`;
+
 /**
  * THE definition of which tasks a person sees on one brand, as a SQL condition on the Task row `alias`. Every task read
  * (lists, search, comments, attachments, notifications, counts) builds on it or on visibleTasksAcrossSql below.
- * tasks.all: the whole brand; a client: clientClause; other staff: ownClause.
+ * tasks.all: the whole brand; a client: clientClause; other staff: ownClause. On top, CRM tasks only with v.crm.
  */
 export function visibleTaskSql(v: TaskViewer, alias = "t"): Prisma.Sql {
   if (!v.canRead) return Prisma.sql`FALSE`;
   const a = ref(alias);
-  const brand = Prisma.sql`${a}."workspaceId" = ${v.workspaceId} AND ${a}."brandId" = ${v.brandId}`;
+  const brand = v.crm
+    ? Prisma.sql`${a}."workspaceId" = ${v.workspaceId} AND ${a}."brandId" = ${v.brandId}`
+    : Prisma.sql`${a}."workspaceId" = ${v.workspaceId} AND ${a}."brandId" = ${v.brandId} AND ${notCrm(a)}`;
   if (v.client) return Prisma.sql`(${brand} AND ${clientClause(v.userId, a)})`;
   return v.all ? Prisma.sql`(${brand})` : Prisma.sql`(${brand} AND ${ownClause(v.userId, a)})`;
 }
@@ -124,7 +136,8 @@ export function visibleTaskSql(v: TaskViewer, alias = "t"): Prisma.Sql {
  * visibleTaskSql over every brand of the workspace at once (notifications): reads the person's role and project grants
  * once, then decides per brand as brandAccess + taskViewer would (brand.read and tasks.read from role ∪ grant; a
  * client-reviewer grant without content.approve from the workspace role makes them a client there, isClientMember;
- * tasks.all from role ∪ grant, ignored for a client). Archived brands are left out, as brandAccess refuses them.
+ * tasks.all from role ∪ grant, ignored for a client; CRM tasks where role ∪ grant handlesCustomers). Archived brands are
+ * left out, as brandAccess refuses them.
  */
 export async function visibleTasksAcrossSql(userId: string, workspaceId: string, alias = "t"): Promise<Prisma.Sql> {
   const a = ref(alias);
@@ -138,8 +151,10 @@ export async function visibleTasksAcrossSql(userId: string, workspaceId: string,
   const client: string[] = [];
   const all: string[] = [];
   const mine: string[] = [];
+  const crm: string[] = [];
   for (const g of grants) {
     const perms = [...own, ...rolePermissions(g.role)];
+    if (handlesCustomers(perms)) crm.push(g.brandId);
     if (isClientMember(isClientGrant(g.role), own)) {
       if (reads(perms)) client.push(g.brandId);
     } else if (reads(perms)) (perms.includes("tasks.all") ? all : mine).push(g.brandId);
@@ -154,7 +169,9 @@ export async function visibleTasksAcrossSql(userId: string, workspaceId: string,
       ? [noneOf(client), Prisma.sql`FALSE`]
       : [anyOf(all), noneOf([...client, ...all])];
   const live = Prisma.sql`EXISTS (SELECT 1 FROM "Brand" b WHERE b.id = ${a}."brandId" AND b."workspaceId" = ${workspaceId} AND b.status <> 'ARCHIVED')`;
-  return Prisma.sql`(${a}."workspaceId" = ${workspaceId} AND ${live} AND (${allSql} OR (${mineSql} AND ${ownClause(userId, a)}) OR (${anyOf(client)} AND ${clientClause(userId, a)})))`;
+  // A key in the workspace role reaches every brand (a grant only adds keys); else only the brands whose grant adds one.
+  const crmSql = handlesCustomers(own) ? Prisma.sql`TRUE` : Prisma.sql`(${notCrm(a)} OR ${anyOf(crm)})`;
+  return Prisma.sql`(${a}."workspaceId" = ${workspaceId} AND ${live} AND ${crmSql} AND (${allSql} OR (${mineSql} AND ${ownClause(userId, a)}) OR (${anyOf(client)} AND ${clientClause(userId, a)})))`;
 }
 
 /** The task if this viewer may see it, else null (callers answer 404). Every route on a task or its children starts here. */
@@ -208,13 +225,19 @@ export async function isSoleStaff(workspaceId: string, brandId: string, userId: 
 /**
  * May `userId` be owner, reviewer or blocked-on of this task? They must see it: tasks.read as staff, or as a client
  * (isClientOn) with tasks.read on a task that is client-visible to them (they review it, or its project is shared).
- * Pass `task` as it will be AFTER the proposed change (e.g. `reviewerId: proposed`, the new `workProjectId`), so a client
- * made reviewer of a task counts it as theirs, and moving a task out of a shared project is checked against the new one.
+ * Pass `task` as it will be AFTER the proposed change (e.g. `reviewerId: proposed`, the new `workProjectId`, `areas`), so
+ * a client made reviewer of a task counts it as theirs, and moving a task out of a shared project is checked against the
+ * new one. A CRM task also needs a CRM_TASK_KEYS key (handlesCustomers), from the same places as tasks.read.
  */
 export async function canBeAssigned(tx: Db, scope: BrandScope, userId: string, task: TaskPeople): Promise<boolean> {
   // brandMemberPerms: the workspace role or a non-client grant (a brand has one grant per person).
   const [client, staffReads] = await Promise.all([clientGrantOn(tx, scope, userId), brandMemberPerms(tx, scope, userId, "tasks.read")]);
+  const clientKeys = client ? rolePermissions(client.role) : [];
+  if (task.areas?.includes("CRM") && !handlesCustomers(clientKeys)) {
+    const keys = await Promise.all(CRM_TASK_KEYS.map((k) => brandMemberPerms(tx, scope, userId, k)));
+    if (!keys.some(Boolean)) return false;
+  }
   if (!client) return staffReads;
-  if (!staffReads && !rolePermissions(client.role).includes("tasks.read")) return false;
+  if (!staffReads && !clientKeys.includes("tasks.read")) return false;
   return clientSees(tx, scope, userId, task);
 }

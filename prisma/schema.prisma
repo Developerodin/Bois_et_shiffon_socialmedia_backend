@@ -1367,6 +1367,7 @@ enum TaskArea {
   WEBSITE
   SEO
   GENERAL
+  CRM
 }
 
 enum WebsiteChangeKind {
