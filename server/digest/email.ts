@@ -2,7 +2,7 @@ import "server-only";
 import type { DigestBody, DigestSection } from "@/shared";
 import { appUrl } from "@/server/auth/tokens";
 import { prisma } from "@/server/db/prisma";
-import { readerAccess, refilterDigest } from "@/server/digest/build";
+import { readableDigest, readerAccess } from "@/server/digest/build";
 import { unsubscribeUrl } from "@/server/digest/unsubscribe";
 
 const n = (v: number) => v.toLocaleString("en-GB");
@@ -13,7 +13,7 @@ function sectionLines(s: DigestSection): string[] {
     case "content":
       return [`Posts: ${n(s.published)} published, ${n(s.scheduled)} scheduled, ${n(s.awaitingApproval)} waiting for approval`];
     case "tasks":
-      return [`Tasks: ${n(s.done)} done, ${n(s.open)} open, ${n(s.overdue)} overdue`, ...s.overdueTitles.map((t) => `  - overdue: ${t}`)];
+      return [`Tasks: ${n(s.done)} done, ${n(s.open)} open, ${n(s.overdue)} overdue`, ...s.overdueTasks.map((t) => `  - overdue: ${t.title}`)];
     case "seo":
       return s.data
         ? [`Search (${s.data.range.from} to ${s.data.range.to}): ${n(s.data.totals.clicks)} clicks, ${n(s.data.totals.impressions)} impressions, CTR ${pct(s.data.totals.ctr)}`]
@@ -46,12 +46,13 @@ export async function digestEmailFor(digestId: string) {
   if (!d || !d.user.digestEmail || d.user.status !== "ACTIVE" || d.user.deletedAt) return null;
   const access = await readerAccess(d.userId, d.workspaceId);
   if (!access) return null;
-  const body = refilterDigest(d.body as DigestBody, access);
+  const body = await readableDigest(d.body as DigestBody, d.userId, d.workspaceId, access);
   if (!body.brands.length) return null;
   const url = unsubscribeUrl(d.userId, d.workspaceId);
   return {
     to: d.user.email,
-    subject: `Your weekly digest: week of ${d.weekStart.toISOString().slice(0, 10)}`,
+    // Each brand's own week (zones can put brands a week apart).
+    subject: `Your weekly digest: ${[...new Set(body.brands.map((b) => `${b.week.from} to ${b.week.to}`))].join(", ")}`,
     text: digestText(body, url),
     headers: { "List-Unsubscribe": `<${url}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
   };

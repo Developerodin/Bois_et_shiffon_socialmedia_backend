@@ -35,7 +35,7 @@ describe("digest unsubscribe token", () => {
 
 describe("scrubSent", () => {
   it("keeps nothing of a digest's body, and scrubs links from the rest as before", () => {
-    expect(scrubSent({ ref: "digest:d1", text: "Sales: 3 orders https://x.test/api/v1/digest/unsubscribe?token=t" })).toEqual({ text: "[digest]", html: null });
+    expect(scrubSent({ ref: "digest:d1", text: "Sales: 3 orders https://x.test/api/v1/digest/unsubscribe?token=t" })).toEqual({ to: "", text: "[digest]", html: null });
     expect(scrubSent({ ref: null, text: "Join: https://a.test/invite/abc" })).toEqual({ text: "Join: [link removed after sending]", html: null });
   });
 });

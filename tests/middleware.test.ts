@@ -36,6 +36,11 @@ describe("cross-origin writes", () => {
     expect(await refused(await send("POST", {}, "/api/v1/webhooks/meta"))).toBe(false);
   });
 
+  it("lets a mail provider's one-click unsubscribe through on that exact path only", async () => {
+    expect(await refused(await send("POST", {}, "/api/v1/digest/unsubscribe"))).toBe(false);
+    expect(await refused(await send("POST", {}, "/api/v1/digest/unsubscribe-other"))).toBe(true);
+  });
+
   it.each([
     ["another site's origin", { origin: "https://evil.example", "sec-fetch-site": "cross-site" }],
     ["a same-site subdomain", { origin: "https://x.localhost:3100", "sec-fetch-site": "same-site" }],

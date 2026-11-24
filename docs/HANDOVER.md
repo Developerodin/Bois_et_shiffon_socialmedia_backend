@@ -1556,3 +1556,9 @@ functional brief against the code (built, partial or missing). Use it to pick th
 ## Phase 3 CRM, Task 1 (branch `phase-3-crm`, 2026-11-24)
 - Web flags `crm` (Sales & CRM screens; the Sales & CRM tab on Tasks, shown only to people holding `inbox.read` or `crm.manage`), `blog` (articles to Shopify) and `digest` (weekly digest), all off by default (`WEB_FEATURES` / `WEB_FEATURE_WORKSPACES`).
 - Permission `crm.manage` (customer records, notes, quotes) on Owner, Admin, Project admin and Manager; task area `CRM`, whose tasks only `inbox.read`/`crm.manage` holders see or can be given. Migrations `20261125126000_task_area_crm`, `20261125127000_crm_manage`: not yet on the dev DB (apply at merge).
+
+## Phase 3 CRM, weekly digest (Tasks 2–3, branch `phase-3-crm`, 2026-11-24)
+- `digest.build` jobs are queued by the Monday sweep for every active member, whatever the web `digest` flag (the server can't read `WEB_FEATURES`); the flag only hides the page, the Overview link and the email toggle. Turning it on shows weeks already built.
+- Brands west of UTC get the week before the one that just ended (their Sunday isn't synced at the 05:00 UTC sweep); each brand section shows its own dates.
+- Rotating the credentials key (`CREDENTIALS_KEY_VERSION`) voids every unsubscribe link already emailed; people then turn the email off from the account menu.
+- Deploy: the sending domain's DKIM signature must cover the `List-Unsubscribe` and `List-Unsubscribe-Post` headers (Gmail and Yahoo require it for one-click unsubscribe). Check the SMTP provider's settings before turning the email on.

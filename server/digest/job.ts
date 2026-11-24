@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import { spreadSecs } from "@/server/data/sources";
-import { buildDigest, digestWeekStart } from "@/server/digest/build";
+import { buildDigest, digestWeekStart, sweepAt } from "@/server/digest/build";
 import { emailConfigured, queueEmail } from "@/server/email/outbox";
 import { enqueueJob } from "@/server/jobs/queue";
 
@@ -54,7 +54,8 @@ export async function runDigest(raw: unknown) {
   const key = { userId_workspaceId_weekStart: { userId, workspaceId, weekStart: new Date(`${weekStart}T00:00:00Z`) } };
   let digest = await prisma.digest.findUnique({ where: key });
   if (!digest) {
-    const body = await buildDigest(userId, workspaceId);
+    // Weeks are read at the sweep (not whenever a retry runs), so every brand gets its last fully synced week.
+    const body = await buildDigest(userId, workspaceId, new Date(), sweepAt(weekStart));
     if (!body) return; // nothing to say this week
     digest = await prisma.digest.upsert({ where: key, update: {}, create: { userId, workspaceId, weekStart: key.userId_workspaceId_weekStart.weekStart, body: body as Prisma.InputJsonValue } });
   }

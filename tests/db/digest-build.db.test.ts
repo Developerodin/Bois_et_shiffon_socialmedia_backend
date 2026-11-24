@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db/prisma";
 import { ensureSystemRoles } from "@/server/auth/permissions";
-import { buildDigest } from "@/server/digest/build";
+import { buildDigest, readableDigest, readerAccess } from "@/server/digest/build";
 
 /**
  * buildDigest on built-in roles. `admin` is workspace Admin (every key); `viewer`, `client` hold the Viewer and Client
@@ -49,7 +49,7 @@ describe("buildDigest", () => {
     const body = await buildDigest(user.admin!, ws, NOW);
     expect(kinds(body)).toEqual([[brand, ["content", "tasks", "seo", "posts", "sales", "ads"]]]);
     expect(body?.brands[0]?.week).toEqual({ from: "2026-11-16", to: "2026-11-22" });
-    expect(tasksOf(body)).toMatchObject({ crm: true, done: 1, open: 2, overdue: 1, overdueTitles: ["Fix the footer"] });
+    expect(tasksOf(body)).toMatchObject({ crm: true, done: 1, open: 2, overdue: 1, overdueTasks: [{ title: "Fix the footer" }] });
     expect(body?.brands[0]?.sections.find((s) => s.kind === "sales")).toMatchObject({ data: [] });
   });
 
@@ -67,6 +67,18 @@ describe("buildDigest", () => {
 
   it("a CRM task is counted only with inbox.read or crm.manage", async () => {
     expect(tasksOf(await buildDigest(user.lead!, ws, NOW))).toMatchObject({ crm: false, done: 1, open: 1 });
+  });
+
+  it("an overdue task the reader can no longer see is dropped on read; the counts stay as built", async () => {
+    const body = (await buildDigest(user.viewer!, ws, NOW))!;
+    const task = await prisma.task.findFirstOrThrow({ where: { workspaceId: ws, title: "Fix the footer" } });
+    await prisma.task.update({ where: { id: task.id }, data: { ownerId: user.admin } });
+    try {
+      const now = await readableDigest(body, user.viewer!, ws, (await readerAccess(user.viewer!, ws))!);
+      expect(tasksOf(now)).toMatchObject({ overdue: 1, overdueTasks: [] });
+    } finally {
+      await prisma.task.update({ where: { id: task.id }, data: { ownerId: user.viewer } });
+    }
   });
 
   it("nothing to say → null; a non-member → null", async () => {

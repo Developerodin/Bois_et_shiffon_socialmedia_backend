@@ -38,9 +38,12 @@ export const emailConfigured = () => Boolean(process.env.SMTP_HOST && process.en
  */
 export const scrubLinks = (text: string) => text.replace(/https?:\/\/\S*(?:\/invite\/|reset-password)\S*/g, "[link removed after sending]");
 
-/** What the outbox keeps of an email once it is out of our hands: a digest keeps nothing of its body (it is the Digest row's). */
+/**
+ * What the outbox keeps of an email once it is out of our hands: a digest keeps nothing of its body (it is the Digest
+ * row's) nor the address (read from the user at send time).
+ */
 export const scrubSent = (row: { ref: string | null; text: string }) =>
-  row.ref?.startsWith("digest:") ? { text: "[digest]", html: null } : { text: scrubLinks(row.text), html: null };
+  row.ref?.startsWith("digest:") ? { to: "", text: "[digest]", html: null } : { text: scrubLinks(row.text), html: null };
 
 let transport: nodemailer.Transporter | undefined;
 function smtp() {

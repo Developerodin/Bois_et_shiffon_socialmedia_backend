@@ -31,6 +31,14 @@ export function endedWeek(today: string): DateRange {
 }
 /** The digest row's label: the ended week's Monday in UTC. Each brand section carries its own week. */
 export const digestWeekStart = (now: Date) => endedWeek(zoneToday("UTC", now)).from;
+/** The Monday 05:00 UTC sweep that queued the digest labelled `weekStart`: the instant each brand's week is read at. */
+export const sweepAt = (weekStart: string) => new Date(Date.parse(`${weekStart}T05:00:00Z`) + 7 * 86_400_000);
+/**
+ * A brand's week: the Monday–Sunday ended in its zone at the sweep. The sweep's data syncs read up to the brand's
+ * "yesterday", so west of UTC (Sunday evening at 05:00 UTC) that is the week before, the last one whose Sunday is
+ * synced; east of UTC it is the week that just ended.
+ */
+export const brandWeek = (zone: string, weekAt: Date) => endedWeek(zoneToday(zone, weekAt));
 
 /** Brand-local midnight of `day` as a UTC timestamp (the columns' own kind), as the sales reader cuts its range. */
 const localMidnight = (day: string, zone: string) => Prisma.sql`(((${day}::date)::timestamp AT TIME ZONE ${zone}) AT TIME ZONE 'UTC')`;
@@ -146,8 +154,8 @@ async function tasksSection(
              count(*) FILTER (WHERE ${openTaskSql})::int AS open,
              count(*) FILTER (WHERE ${overdue})::int AS overdue
       FROM "Task" t WHERE ${visibleTaskSql(v)}`,
-    prisma.$queryRaw<{ title: string }[]>`
-      SELECT t.title FROM "Task" t WHERE ${visibleTaskSql(v)} AND ${overdue} ORDER BY t."dueOn", t.id LIMIT 5`,
+    prisma.$queryRaw<{ id: string; title: string }[]>`
+      SELECT t.id, t.title FROM "Task" t WHERE ${visibleTaskSql(v)} AND ${overdue} ORDER BY t."dueOn", t.id LIMIT 5`,
   ]);
   return {
     kind: "tasks",
@@ -156,7 +164,7 @@ async function tasksSection(
     done: counts?.done ?? 0,
     open: counts?.open ?? 0,
     overdue: counts?.overdue ?? 0,
-    overdueTitles: late.map((r) => r.title),
+    overdueTasks: late,
   };
 }
 
@@ -193,15 +201,18 @@ export async function readerAccess(userId: string, workspaceId: string) {
   return access;
 }
 
-/** The reader's digest for the week ended before `now` in each brand's zone, or null when nothing to say (or no member). */
-export async function buildDigest(userId: string, workspaceId: string, now = new Date()): Promise<DigestBody | null> {
+/**
+ * The reader's digest, or null when nothing to say (or no member). `weekAt`: the instant each brand's week is read at
+ * (brandWeek; the job passes its sweep); `now`: what is scheduled and overdue.
+ */
+export async function buildDigest(userId: string, workspaceId: string, now = new Date(), weekAt = now): Promise<DigestBody | null> {
   const access = await readerAccess(userId, workspaceId);
   if (!access) return null;
   const brands: DigestBrand[] = [];
   for (const [brandId, a] of access) {
     const scope = { workspaceId, brandId };
     const zone = await brandTimeZone(scope);
-    const week = endedWeek(zoneToday(zone, now));
+    const week = brandWeek(zone, weekAt);
     const [shared, tasks] = await Promise.all([
       brandSections(scope, a.perms, week, zone, now),
       a.perms.has("tasks.read") ? guarded(brandId, "tasks", () => tasksSection({ ...scope, userId, perms: a.perms, clientReviewer: a.clientReviewer }, week, zone, now)) : [],
@@ -216,7 +227,8 @@ export async function buildDigest(userId: string, workspaceId: string, now = new
  * A stored body as the reader may see it NOW: brands they no longer reach are removed, sections whose key they lost are
  * dropped (a tasks section that counted CRM tasks also needs inbox.read or crm.manage still). Brand names are today's.
  */
-export function refilterDigest(body: DigestBody, access: NonNullable<Awaited<ReturnType<typeof readerAccess>>>): DigestBody {
+type Access = NonNullable<Awaited<ReturnType<typeof readerAccess>>>;
+export function refilterDigest(body: DigestBody, access: Access): DigestBody {
   const brands = body.brands.flatMap((b) => {
     const a = access.get(b.brandId);
     if (!a) return [];
@@ -224,4 +236,25 @@ export function refilterDigest(body: DigestBody, access: NonNullable<Awaited<Ret
     return sections.length ? [{ ...b, brandName: a.brandName, sections }] : [];
   });
   return { brands };
+}
+
+/**
+ * refilterDigest, then each overdue task named is kept only while the reader can still see it (visibleTaskSql), so a
+ * task moved away from them leaves the page and the email; one query per brand with a tasks section. The counts stay
+ * as built (numbers only, no titles).
+ */
+export async function readableDigest(body: DigestBody, userId: string, workspaceId: string, access: Access): Promise<DigestBody> {
+  const filtered = refilterDigest(body, access);
+  for (const b of filtered.brands) {
+    const a = access.get(b.brandId)!;
+    for (const s of b.sections) {
+      if (s.kind !== "tasks" || !s.overdueTasks.length) continue;
+      const v = taskViewer({ userId, workspaceId, brandId: b.brandId, perms: a.perms, clientReviewer: a.clientReviewer });
+      const seen = await prisma.$queryRaw<{ id: string }[]>`
+        SELECT t.id FROM "Task" t WHERE t.id IN (${Prisma.join(s.overdueTasks.map((t) => t.id))}) AND ${visibleTaskSql(v)}`;
+      const ids = new Set(seen.map((r) => r.id));
+      s.overdueTasks = s.overdueTasks.filter((t) => ids.has(t.id));
+    }
+  }
+  return filtered;
 }

@@ -17,7 +17,7 @@ import { postsWithMetrics } from "@/server/data/post-metrics-read";
 import { salesSummary } from "@/server/data/sales-read";
 import { searchSummary } from "@/server/data/search-read";
 import { zoneToday } from "@/server/data/sources";
-import { brandSections, clearSectionMemo, endedWeek, refilterDigest } from "@/server/digest/build";
+import { brandSections, brandWeek, clearSectionMemo, endedWeek, refilterDigest, sweepAt } from "@/server/digest/build";
 
 const scope = { workspaceId: "w", brandId: "b" };
 const WEEK = { from: "2026-11-16", to: "2026-11-22" };
@@ -47,6 +47,18 @@ describe("the digest's week", () => {
     const sundayEvening = new Date("2026-11-22T20:00:00Z"); // Monday 01:30 in Kolkata, still Sunday in Paris
     expect(endedWeek(zoneToday("Asia/Kolkata", sundayEvening))).toEqual(WEEK);
     expect(endedWeek(zoneToday("Europe/Paris", sundayEvening))).toEqual({ from: "2026-11-09", to: "2026-11-15" });
+  });
+});
+
+describe("brandWeek at the sweep", () => {
+  it("west of UTC (still Sunday at the 05:00 UTC sweep) takes the week before, whose Sunday the syncs read", () => {
+    const at = sweepAt("2026-11-16"); // Monday 2026-11-23 05:00 UTC
+    expect(at.toISOString()).toBe("2026-11-23T05:00:00.000Z");
+    const before = { from: "2026-11-09", to: "2026-11-15" };
+    expect(brandWeek("America/Chicago", at)).toEqual(before);
+    expect(brandWeek("Pacific/Honolulu", at)).toEqual(before);
+    expect(brandWeek("Europe/Paris", at)).toEqual(WEEK);
+    expect(brandWeek("UTC", at)).toEqual(WEEK);
   });
 });
 
@@ -101,7 +113,7 @@ describe("refilterDigest", () => {
         week: WEEK,
         sections: [
           { kind: "content", key: "brand.read", published: 1, scheduled: 0, awaitingApproval: 0 },
-          { kind: "tasks", key: "tasks.read", crm: true, done: 1, open: 2, overdue: 0, overdueTitles: [] },
+          { kind: "tasks", key: "tasks.read", crm: true, done: 1, open: 2, overdue: 0, overdueTasks: [] },
           { kind: "sales", key: "crm.read", data: [] },
         ],
       },

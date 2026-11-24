@@ -252,36 +252,38 @@ model Brand {
 }
 
 model BrandProfile {
-  id           String   @id @default(cuid())
-  workspaceId  String
-  brandId      String   @unique
-  websiteUrl   String?
+  id            String   @id @default(cuid())
+  workspaceId   String
+  brandId       String   @unique
+  websiteUrl    String?
   /// What the owner said they mainly want to create (mobile onboarding A04): social-plan | marketing-videos | fashion-photoshoot | product-photoshoot
-  goal         String?
+  goal          String?
   /// Typed by owners without a website (mobile onboarding A07); Research looks the business up from these
-  about        String?
-  location     String?
+  about         String?
+  location      String?
   /// Logo, colours, fonts and product photos read from the website by Research (server/research/brand-assets.ts)
-  assets       Json?
+  assets        Json?
   /// Tagline, tags, audience, strengths drafted by Research; fields people edited are kept (server/research/brand-summary.ts)
-  summary      Json?
+  summary       Json?
   /// Creative tones the owner picked (mobile A10); the content language lives in `locales`
-  preferences  Json?
+  preferences   Json?
   /// The Google Maps listing the owner picked in onboarding (server/integrations/places.ts PlaceListing)
-  place        Json?
+  place         Json?
   /// Photos the owner added to the brand's library (mobile Business M08): [{ key, title, addedAt }]; Research never touches it
-  uploads      Json?
+  uploads       Json?
   /// The owner's automations (mobile Business M10): { monthlyPlan, autoPublish } (server/services/automations.ts)
-  automations  Json?
+  automations   Json?
   /// Last product catalogue sync: { at, source, count, error } (server/catalog/sync.ts)
-  catalogSync  Json?
+  catalogSync   Json?
   /// IANA zone every campaign time is entered and shown in (server/content/offer-checks.ts zonedInstant/wallTime)
-  timeZone     String?
-  voiceSummary String?
-  pillars      Json?
-  locales      Json?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  timeZone      String?
+  /// The Shopify blog articles go to (server/blog/shopify-articles.ts); null = the store's first blog
+  shopifyBlogId String?
+  voiceSummary  String?
+  pillars       Json?
+  locales       Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 

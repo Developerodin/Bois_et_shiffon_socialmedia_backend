@@ -71,8 +71,9 @@ describe("digest job and email", () => {
     expect(sent.text).toContain("Sales: no orders");
     expect(sent.headers["List-Unsubscribe"]).toMatch(/^<https:\/\/app\.test\/api\/v1\/digest\/unsubscribe\?token=[\w-]+\.[\w-]+>$/);
     expect(sent.headers["List-Unsubscribe-Post"]).toBe("List-Unsubscribe=One-Click");
-    const [row] = await outboxOf("admin");
-    expect(row).toMatchObject({ status: "SENT", text: "[digest]", html: null, ref: `digest:${(await digestsOf("admin"))[0]!.id}` });
+    const row = await prisma.emailOutbox.findFirst({ where: { ref: `digest:${(await digestsOf("admin"))[0]!.id}` } });
+    expect(row).toMatchObject({ status: "SENT", to: "", text: "[digest]", html: null });
+    expect(sent.subject).toBe("Your weekly digest: 2026-11-16 to 2026-11-22");
   });
 
   it("opted out by default → a row in the app, no email", async () => {
