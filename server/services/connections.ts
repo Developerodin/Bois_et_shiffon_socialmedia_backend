@@ -7,6 +7,7 @@ import { prisma } from "@/server/db/prisma";
 import { PROVIDERS, ProviderError, providerConfig, type ConnectedAccount, type OAuthProvider } from "@/server/integrations/providers";
 import { postedCount, storyTargetOf } from "@/server/services/publishing";
 import { askCartConfig } from "@/server/shopify/askcart";
+import { catalogMcpProfileUrl, isShopifyMcp } from "@/server/shopify/catalog-mcp";
 
 const STATE_TTL_MS = 10 * 60_000; // DEC-017: ≤10 min
 
@@ -101,8 +102,9 @@ export function listProviders() {
   return [
     ...(Object.keys(PROVIDERS) as OAuthProvider[]).map((p) => ({ provider: p, label: PROVIDERS[p].label, configured: providerConfig(p) !== null, kind: "oauth" as const })),
     // askCart: how this deployment can read a store through AskCart: "per-brand" (each brand connects its own store),
-    // "single-store" (INTERIM: one store, one brand per deployment) or null (not set up).
-    { provider: "SHOPIFY" as const, label: "Shopify", configured: true, kind: "token" as const, askCart: askCartConfig()?.mode ?? null },
+    // "single-store" (INTERIM: one store, one brand per deployment) or null (not set up). mcp: Shopify MCP can connect
+    // (a public https agent profile URL is set; server/shopify/catalog-mcp.ts).
+    { provider: "SHOPIFY" as const, label: "Shopify", configured: true, kind: "token" as const, askCart: askCartConfig()?.mode ?? null, mcp: catalogMcpProfileUrl() !== null },
   ];
 }
 
@@ -114,6 +116,8 @@ export const toConnectionDto = (c: IntegrationConnection) => ({
   lastError: c.lastError,
   tokenExpiresAt: c.tokenExpiresAt?.toISOString() ?? null,
   connectedAt: c.createdAt.toISOString(),
+  // A Shopify store read through the Catalog MCP: products only, no orders.
+  ...(c.provider === "SHOPIFY" && isShopifyMcp(c) && { via: "mcp" as const }),
 });
 
 export const listConnections = (workspaceId: string, brandId: string) =>

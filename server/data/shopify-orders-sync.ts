@@ -5,6 +5,7 @@ import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/c
 import { accessToken, markReconnect } from "@/server/services/connections";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import { AskCartError, askCartReason, askCartShop, isAskCart } from "@/server/shopify/askcart";
+import { isShopifyMcp } from "@/server/shopify/catalog-mcp";
 import { askCartToken } from "@/server/shopify/askcart-token";
 import { fetchAskCartOrders, fetchOrders, type ShopOrderRow } from "./shopify-orders";
 import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from "./sources";
@@ -59,6 +60,8 @@ export async function syncShopifyOrders(
 ): Promise<SyncOutcome> {
   const conn = ctx.connection;
   if (!conn) return { count: 0, reason: stopReason("reconnect") };
+  // The Catalog MCP has no orders (turnOnShopifyOrders refuses it); a source left on a store reconnected that way stops.
+  if (isShopifyMcp(conn)) return { count: 0, reason: stopReason("missing_scope") };
   const since = ctx.source.cursor ? new Date(ctx.source.cursor) : new Date(now.getTime() - FIRST_RUN_DAYS * 86_400_000);
   const read = isAskCart(conn)
     ? await (async () => fetchAskCartOrders(await askCartToken(conn), since, ctx.signal))().catch(async (e: unknown) => {
@@ -86,7 +89,7 @@ registerSync("SHOPIFY_ORDERS", (ctx) => syncShopifyOrders(ctx));
 export type TurnOn =
   | { ok: true; sourceId: string }
   /** askCart: the connection reads through AskCart, so the problem is worded without tokens. */
-  | { ok: false; problem: "not-connected" | "missing-scope" | "refused" | "unreachable"; askCart?: true };
+  | { ok: false; problem: "not-connected" | "missing-scope" | "refused" | "unreachable" | "needs-askcart"; askCart?: true };
 
 /**
  * Turn the orders sync on for one of the brand's Shopify connections: its stored token only (a token never comes in a
@@ -102,6 +105,8 @@ export async function turnOnShopifyOrders(scope: { workspaceId: string; brandId:
   });
   if (!conn) return { ok: false, problem: "not-connected" };
   const shop = conn.externalAccountId;
+  // Shopify MCP reads the catalogue only: orders need AskCart (or a token).
+  if (isShopifyMcp(conn)) return { ok: false, problem: "needs-askcart" };
   if (isAskCart(conn)) {
     // AskCart holds the scopes; asking for the shop proves it answers. access_denied on orders shows on the first run.
     try {

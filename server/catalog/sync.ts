@@ -10,6 +10,7 @@ import { htmlText, safeFetch, safeFetchBytes } from "@/server/research/crawl";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { AskCartError, askCartCatalog, askCartReason, isAskCart } from "@/server/shopify/askcart";
 import { askCartToken } from "@/server/shopify/askcart-token";
+import { CatalogMcpError, catalogMcpProfileUrl, isShopifyMcp, mcpCatalog } from "@/server/shopify/catalog-mcp";
 
 /**
  * Product catalogue sync (docs/superpowers/specs/2026-11-05-product-catalogue-design.md).
@@ -251,7 +252,8 @@ export async function websiteFeed(websiteUrl: string, signal?: AbortSignal): Pro
 
 /**
  * The connection's store (its account id is the shop domain), token via accessToken(), which throws ReconnectNeeded.
- * An AskCart connection reads through AskCart instead (no token here; it throws ReconnectNeeded the same way).
+ * An AskCart connection reads through AskCart instead (no token here; it throws ReconnectNeeded the same way), a
+ * Shopify MCP one through the store's public Catalog MCP (never ReconnectNeeded: its failures are retried).
  */
 async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, walk: Walk | undefined, at: string): Promise<Fetched> {
   if (isAskCart(conn)) {
@@ -260,6 +262,13 @@ async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, wal
     const rows = shopifyRows(read.variants, read.currency);
     if (read.complete) return { rows, complete: true, seenSince: walk && new Date(walk.startedAt) };
     return { rows, complete: false, note: PARTIAL, walk: read.cursor ? { cursor: read.cursor, startedAt: walk?.startedAt ?? at, connectionId: conn.id } : undefined };
+  }
+  if (isShopifyMcp(conn)) {
+    // Storefront Catalog MCP: public, no token; the account id is the store's host. Products only.
+    const profile = catalogMcpProfileUrl();
+    if (!profile) throw new CatalogMcpError(0, "no_profile_url");
+    const read = await mcpCatalog(conn.externalAccountId, profile, MAX_ROWS, signal);
+    return capRows({ rows: shopifyRows(read.variants, read.currency), complete: read.complete, note: read.complete ? undefined : PARTIAL });
   }
   const { variants, currency, complete } = await shopifyVariants(conn.externalAccountId, await accessToken(conn), signal);
   return capRows({ rows: shopifyRows(variants, currency), complete, note: complete ? undefined : PARTIAL });

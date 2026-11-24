@@ -17,6 +17,7 @@ const PROBLEMS: Record<Extract<TurnOn, { ok: false }>["problem"], { status: numb
   "missing-scope": { status: 422, title: "Shopify needs order access", detail: "Add read_orders to the app in Shopify, reinstall it and paste the new token." },
   refused: { status: 422, title: "Shopify refused the token", detail: "Shopify refused the stored token. Reconnect Shopify with a new token." },
   unreachable: { status: 502, title: "Couldn't reach Shopify", detail: "Couldn't reach Shopify. Try again in a minute." },
+  "needs-askcart": { status: 422, title: "Orders need our app (AskCart)", detail: "This store is connected through Shopify MCP, which reads products only. Orders need our app (AskCart): connect Shopify with AskCart in Connections." },
 };
 /** The same problems for a store read through AskCart: there is no token to paste. */
 const ASKCART_PROBLEMS: typeof PROBLEMS = {
