@@ -5,6 +5,7 @@ import { closeQuoteReminders, reminderKey } from "@/server/quotes/quotes";
 import { target } from "@/server/quotes/shopify-draft-orders";
 import { TX } from "@/server/services/publishing";
 import { askCartWriteAdapter, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
+import { shopifyMcpOnly } from "@/server/shopify/writes";
 import { canBeAssigned } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
 import { isUniqueViolation } from "@/server/tasks/errors";
@@ -73,6 +74,8 @@ async function remind(scope: Scope, q: Quote, sentDay: string, days: number) {
 }
 
 export async function syncQuoteStatus(scope: Scope, adapter: ShopifyWriteAdapter = askCartWriteAdapter, now = new Date()): Promise<SyncOutcome> {
+  // Shopify MCP reads the catalogue only: draft orders can't be read back, so nothing is asked and nothing expires.
+  if (await shopifyMcpOnly(scope)) return { count: 0, reason: "permission" };
   const zone = await brandTimeZone(scope);
   const today = zoneToday(zone, now);
   const where = { workspaceId: scope.workspaceId, brandId: scope.brandId, shopifyId: { not: null } };

@@ -42,7 +42,7 @@ export type SyncedRow = {
   stockQuantity: number | null;
   imageUrl: string | null;
 };
-type Fetched = { rows: SyncedRow[]; complete: boolean; note?: Note; walk?: Walk; seenSince?: Date };
+type Fetched = { rows: SyncedRow[]; complete: boolean; note?: Note; walk?: Walk; seenSince?: Date; emptyRuns?: number };
 /**
  * An AskCart walk that spans runs: the cursor to resume from, when the walk began, and the connection it reads (a
  * walk of another connection, e.g. another store after a reconnect, is ignored). Kept in catalogSync, server only
@@ -71,6 +71,7 @@ const BLOCKED: Note = { error: "Your website blocks our product reader, so we ca
 const PARTIAL: Note = { error: "Only part of the catalogue could be read, so no products were archived.", reason: "partial" };
 const FAILED: Note = { error: "The last sync couldn't read the products. Press Sync now to try again.", reason: "failed" };
 const REFUSED: Note = { error: SHOPIFY_REFUSED, reason: "shopify-refused" };
+const EMPTY_ONCE: Note = { error: "Your store listed no products. We'll check again before removing any.", reason: "partial" };
 export const READING: Note = { error: null, reason: "reading" };
 // A website whose feed worked answered "not a feed" once (a deploy, a hiccup): kept a day before reading its pages.
 const FEED_MISSING: Note = { error: "Your website's product feed didn't answer today. We'll check again tomorrow.", reason: "feed-missing" };
@@ -255,7 +256,7 @@ export async function websiteFeed(websiteUrl: string, signal?: AbortSignal): Pro
  * An AskCart connection reads through AskCart instead (no token here; it throws ReconnectNeeded the same way), a
  * Shopify MCP one through the store's public Catalog MCP (never ReconnectNeeded: its failures are retried).
  */
-async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, walk: Walk | undefined, at: string): Promise<Fetched> {
+async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, walk: Walk | undefined, at: string, last: CatalogSync | null): Promise<Fetched> {
   if (isAskCart(conn)) {
     // A walk carries on from the last run's cursor, so a store past one run's MAX_ROWS completes over several runs.
     const read = await askCartCatalog(await askCartToken(conn), walk?.cursor ?? null, MAX_ROWS, signal);
@@ -268,7 +269,19 @@ async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, wal
     const profile = catalogMcpProfileUrl();
     if (!profile) throw new CatalogMcpError(0, "no_profile_url");
     const read = await mcpCatalog(conn.externalAccountId, profile, MAX_ROWS, signal);
-    return capRows({ rows: shopifyRows(read.variants, read.currency), complete: read.complete, note: read.complete ? undefined : PARTIAL });
+    const rows = shopifyRows(read.variants, read.currency);
+    if (read.skipped) {
+      console.warn("[catalog] Shopify MCP sent products or variants that couldn't be read", conn.brandId, read.skipped);
+      return capRows({ rows, complete: false, note: { error: `${read.skipped} products or variants from your store couldn't be read, so no products were archived.`, reason: "partial" } });
+    }
+    // A store that suddenly lists nothing is more likely a hiccup than an emptied shop: archive only on the second
+    // empty run in a row (emptyRuns, kept in catalogSync beside an AskCart walk).
+    if (read.complete && !rows.length) {
+      const had = await prisma.product.count({ where: { workspaceId: conn.workspaceId, brandId: conn.brandId, source: "SHOPIFY", archivedAt: null } });
+      const before = last?.source === "SHOPIFY" ? ((last as CatalogSync & { emptyRuns?: number }).emptyRuns ?? 0) : 0;
+      if (had && before < 1) return { rows, complete: false, note: EMPTY_ONCE, emptyRuns: before + 1 };
+    }
+    return capRows({ rows, complete: read.complete, note: read.complete ? undefined : PARTIAL });
   }
   const { variants, currency, complete } = await shopifyVariants(conn.externalAccountId, await accessToken(conn), signal);
   return capRows({ rows: shopifyRows(variants, currency), complete, note: complete ? undefined : PARTIAL });
@@ -494,7 +507,7 @@ const archiveShopifyRows = (scope: Scope) =>
 const lastSync = async (scope: Scope) =>
   ((await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { catalogSync: true } }))?.catalogSync ?? null) as CatalogSync | null;
 
-export const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count" | "pages"> & { walk?: Walk }, note: Note | null, db: Db = prisma) =>
+export const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count" | "pages"> & { walk?: Walk; emptyRuns?: number }, note: Note | null, db: Db = prisma) =>
   db.brandProfile.updateMany({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId },
     data: { catalogSync: { ...sync, error: note?.error ?? null, reason: note?.reason ?? null } },
@@ -519,11 +532,11 @@ export async function runCatalogSync(payload: unknown) {
     return void (await record(scope, { at, source: "SHOPIFY", count: 0 }, { ...REFUSED, error: found.shop.lastError ?? SHOPIFY_REFUSED }));
   }
   const signal = AbortSignal.timeout(DEADLINE_MS);
-  const shopLast = found.source === "SHOPIFY" && isAskCart(found.shop) ? await lastSync(scope) : null;
+  const shopLast = found.source === "SHOPIFY" && (isAskCart(found.shop) || isShopifyMcp(found.shop)) ? await lastSync(scope) : null;
   const walk = found.source === "SHOPIFY" ? walkOf(shopLast, found.shop.id) : undefined;
   try {
     // A SITE brand's feed is checked every day too: once the site has one, the feed takes over (and archives SITE rows).
-    const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal, walk, at) : await websiteFeed(found.websiteUrl, signal);
+    const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal, walk, at, shopLast) : await websiteFeed(found.websiteUrl, signal);
     // A SITE brand stays one when its feed URL turns readers away for a day: only a feed that answers moves it.
     // A feed that worked must say "not a feed" on two different days before its products are left for the pages.
     const last = found.source === "WEBSITE" ? found.last : null;
@@ -543,10 +556,10 @@ export async function runCatalogSync(payload: unknown) {
     await withCatalogLock(scope, 120_000, async (tx) => {
       const { seen } = await saveRows(tx, scope, source, fetched, { seenSince: fetched.seenSince });
       // A walk over several runs counts what it has so far, not just this run's part.
-      const count = fetched.walk || fetched.seenSince ? await tx.product.count({ where: { ...scope, source, archivedAt: null } }) : seen;
+      const count = fetched.walk || fetched.seenSince || fetched.emptyRuns ? await tx.product.count({ where: { ...scope, source, archivedAt: null } }) : seen;
       // A complete save archived any SITE rows: forget what the site reader read, so a switch back reads every page again.
       if (fetched.complete) await tx.catalogPage.updateMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { readAt: null, etag: null, modifiedAt: null } });
-      await record(scope, { at, source, count, ...(fetched.walk && { walk: fetched.walk }) }, fetched.note ?? null, tx);
+      await record(scope, { at, source, count, ...(fetched.walk && { walk: fetched.walk }), ...(fetched.emptyRuns && { emptyRuns: fetched.emptyRuns }) }, fetched.note ?? null, tx);
     });
   } catch (error) {
     if (error instanceof CatalogBusy) throw error;

@@ -5,7 +5,7 @@ import { articleLinks, externalLinks, renderArticleHtml, renderSummaryHtml } fro
 import { prisma } from "@/server/db/prisma";
 import { PublishingError } from "@/server/services/publishing";
 import { askCartWriteAdapter, type Article, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
-import { confirmWrite, previewWrite, ShopifyWriteError } from "@/server/shopify/writes";
+import { confirmWrite, MCP_ONLY, previewWrite, shopifyMcpOnly, ShopifyWriteError } from "@/server/shopify/writes";
 import type { ArticlePublishPreview, ArticleShopifyAction, ArticleWritePreview, ShopifyBlogsDto } from "@/shared";
 
 /**
@@ -19,10 +19,11 @@ const ACTION: Record<ArticleShopifyAction, ShopifyWriteAction> = { create: "ARTI
 type Payload = ArticleWritePreview | ArticlePublishPreview;
 const target = (scope: { workspaceId: string; brandId: string }) => ({ workspaceId: scope.workspaceId, brandId: scope.brandId });
 
-/** The store's blogs and the brand's pick. Not connected → no blogs. */
+/** The store's blogs and the brand's pick. Not connected (or Shopify MCP only, never asked) → no blogs. */
 export async function shopifyBlogs(scope: { workspaceId: string; brandId: string }, adapter: ShopifyWriteAdapter = askCartWriteAdapter): Promise<ShopifyBlogsDto> {
+  const mcpOnly = await shopifyMcpOnly(scope);
   const [res, profile] = await Promise.all([
-    adapter.listBlogs(target(scope)),
+    mcpOnly ? ({ ok: false, reason: "NOT_CONNECTED" } as const) : adapter.listBlogs(target(scope)),
     prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { shopifyBlogId: true } }),
   ]);
   const blogs = res.ok ? res.value : [];
@@ -32,6 +33,7 @@ export async function shopifyBlogs(scope: { workspaceId: string; brandId: string
 /** Pick the blog new articles go to (integrations.manage, checked by the route); null = back to the store's first. */
 export async function pickShopifyBlog(scope: { workspaceId: string; brandId: string; userId: string }, blogId: string | null, adapter: ShopifyWriteAdapter = askCartWriteAdapter) {
   if (blogId) {
+    if (await shopifyMcpOnly(scope)) throw new PublishingError(MCP_ONLY, 422, "shopify.mcpOnly");
     const { blogs, connected } = await shopifyBlogs(scope, adapter);
     if (!connected) throw new PublishingError("Shopify writes aren't connected yet", 503);
     if (!blogs.some((b) => b.id === blogId)) throw new PublishingError("That blog isn't in the store", 400);

@@ -16,6 +16,11 @@ vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn(), kickIfDue: vi.fn(a
 vi.mock("@/server/research/crawl", async (orig) => ({ ...(await orig<object>()), safeFetchBytes }));
 
 import { prisma } from "@/server/db/prisma";
+import { pickShopifyBlog, shopifyBlogs } from "@/server/blog/shopify-articles";
+import { syncQuoteStatus } from "@/server/quotes/status-sync";
+import { CrawlError } from "@/server/research/crawl";
+import { MCP_ONLY } from "@/server/shopify/writes";
+import { fakeShopify } from "../fixtures/shopify-fake";
 import { runCatalogSync } from "@/server/catalog/sync";
 import { turnOnShopifyOrders } from "@/server/data/shopify-orders-sync";
 import { listConnections, toConnectionDto } from "@/server/services/connections";
@@ -91,6 +96,25 @@ describe("connect", () => {
     expect(await prisma.integrationConnection.count()).toBe(0);
   });
 
+  it("a store busy after the retry is 502; a custom domain redirecting elsewhere asks for the myshopify address", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      safeFetchBytes.mockResolvedValueOnce(answer("busy", 503)).mockResolvedValueOnce(answer("busy", 503));
+      const pending = connect("mcp-a", { shop: "bc.myshopify.com" });
+      await vi.advanceTimersByTimeAsync(2000);
+      const busy = await pending;
+      expect(busy.status).toBe(502);
+      expect(((await busy.json()) as { title: string }).title).toBe("The store is busy");
+    } finally {
+      vi.useRealTimers();
+    }
+    safeFetchBytes.mockRejectedValueOnce(new CrawlError("Redirected to another site"));
+    const moved = await connect("mcp-a", { shop: "shop.example.fr" });
+    expect(moved.status).toBe(422);
+    expect(((await moved.json()) as { detail: string }).detail).toMatch(/myshopify\.com address instead/);
+    expect(await prisma.integrationConnection.count()).toBe(0);
+  });
+
   it("without a public https profile URL the option isn't set up (422), and the store isn't called", async () => {
     vi.stubEnv("UCP_PROFILE_URL", "http://localhost:3100/api/v1/ucp/profile");
     expect((await connect("mcp-a", { shop: "bc.myshopify.com" })).status).toBe(422);
@@ -130,6 +154,46 @@ describe("after connecting", () => {
     safeFetchBytes.mockResolvedValueOnce(TOOLS).mockResolvedValueOnce(search(RECORDED_SEARCH.products)).mockResolvedValueOnce(search([]));
     await runCatalogSync({ workspaceId: ws, brandId: "mcp-a" });
     expect(await live("mcp-a")).toEqual(["gid://shopify/ProductVariant/44096216924336"]);
+  });
+
+  it("an empty catalogue archives nothing the first time, and only on the second empty run in a row", async () => {
+    await connected();
+    const sync = (products: unknown[]) => {
+      safeFetchBytes.mockResolvedValueOnce(TOOLS).mockResolvedValueOnce(search(products)).mockResolvedValueOnce(search([]));
+      return runCatalogSync({ workspaceId: ws, brandId: "mcp-a" });
+    };
+    const reason = async () => ((await prisma.brandProfile.findFirstOrThrow({ where: { brandId: "mcp-a" } })).catalogSync as { reason: string | null; count: number });
+    await sync(RECORDED_SEARCH.products);
+    await sync([]);
+    expect(await live("mcp-a")).toHaveLength(1);
+    expect(await reason()).toMatchObject({ reason: "partial", count: 1 });
+    // A full run in between resets the count: the next empty one is a first again.
+    await sync(RECORDED_SEARCH.products);
+    await sync([]);
+    expect(await live("mcp-a")).toHaveLength(1);
+    await sync([]);
+    expect(await live("mcp-a")).toEqual([]);
+  });
+
+  it("a product the store sends that can't be read archives nothing, and the note says how many", async () => {
+    await connected();
+    safeFetchBytes.mockResolvedValueOnce(TOOLS).mockResolvedValueOnce(search(RECORDED_SEARCH.products)).mockResolvedValueOnce(search([]));
+    await runCatalogSync({ workspaceId: ws, brandId: "mcp-a" });
+    safeFetchBytes.mockResolvedValueOnce(TOOLS).mockResolvedValueOnce(search([{ title: 5 }])).mockResolvedValueOnce(search([]));
+    await runCatalogSync({ workspaceId: ws, brandId: "mcp-a" });
+    expect(await live("mcp-a")).toHaveLength(1);
+    expect((await prisma.brandProfile.findFirstOrThrow({ where: { brandId: "mcp-a" } })).catalogSync).toMatchObject({ reason: "partial", error: expect.stringMatching(/^1 products or variants/) });
+  });
+
+  it("blog and quote writes stop before the write adapter, asking for AskCart", async () => {
+    await connected();
+    const shop = fakeShopify({ scopes: ["write_content", "write_draft_orders"] });
+    const calls = [vi.spyOn(shop.adapter, "listBlogs"), vi.spyOn(shop.adapter, "lookupDraftOrder")];
+    const scope = { workspaceId: ws, brandId: "mcp-a" };
+    expect(await shopifyBlogs(scope, shop.adapter)).toMatchObject({ blogs: [], connected: false });
+    await expect(pickShopifyBlog({ ...scope, userId: user }, "gid://shopify/Blog/1", shop.adapter)).rejects.toMatchObject({ message: MCP_ONLY, status: 422 });
+    expect(await syncQuoteStatus(scope, shop.adapter)).toEqual({ count: 0, reason: "permission" });
+    for (const c of calls) expect(c).not.toHaveBeenCalled();
   });
 
   it("a failed read archives nothing and leaves the connection connected", async () => {

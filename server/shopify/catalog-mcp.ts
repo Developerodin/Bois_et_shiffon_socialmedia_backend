@@ -44,6 +44,10 @@ export class CatalogMcpError extends Error {
   constructor(readonly status: number, readonly code: string | null) {
     super(`Catalog MCP ${status}${code ? ` ${code}` : ""}`);
   }
+  /** The store answered 429 or 5xx (after the retry): busy or down for now, worth trying again later. */
+  get busy() {
+    return this.code === "upstream_busy";
+  }
   /** Shopify couldn't fetch or read our agent profile: our setup, not the store's. */
   get profileProblem() {
     return this.code === "profile_unreachable" || this.code === "invalid_profile_url" || this.code === "invalid_profile";
@@ -102,6 +106,8 @@ async function rpc(host: string, profile: string, method: string, params: Record
     try {
       res = await safeFetchBytes(`https://${host}/api/ucp/mcp`, "application/json", MAX_BYTES, signal, TIMEOUT_MS, { body });
     } catch (e) {
+      // A redirect off the store's site (a custom domain pointing elsewhere), or too many: the address isn't the MCP's.
+      if (e instanceof CrawlError && /redirect/i.test(e.message)) throw new CatalogMcpError(0, "redirected");
       if (e instanceof CrawlError || signal?.aborted || attempt > 0) throw e;
       await sleep(2000, undefined, { signal });
       continue;
@@ -110,6 +116,8 @@ async function rpc(host: string, profile: string, method: string, params: Record
       await sleep(2000, undefined, { signal });
       continue;
     }
+    // Still busy after the retry: say so, whatever the body (often an HTML error page, which isn't "not a store").
+    if (res.status === 429 || res.status >= 500) throw new CatalogMcpError(res.status, "upstream_busy");
     if (res.truncated) throw new CatalogMcpError(res.status, "too_large");
     let parsed;
     try {
@@ -167,7 +175,10 @@ export async function searchCatalog(host: string, profile: string, catalog: Reco
   }
   const page = Page.safeParse(content);
   if (!page.success) throw new CatalogMcpError(200, "bad_result");
-  return { products: page.data.products, cursor: page.data.pagination?.has_next_page ? (page.data.pagination.cursor ?? null) : null };
+  // More pages whenever there is a cursor, unless has_next_page says false; "more" without a cursor can't be followed.
+  const { cursor, has_next_page: more } = page.data.pagination ?? {};
+  if (more === true && !cursor) throw new CatalogMcpError(200, "bad_pagination");
+  return { products: page.data.products, cursor: cursor && more !== false ? cursor : null };
 }
 
 const Money = z.object({ amount: z.number().int().nonnegative(), currency: z.string().regex(/^[A-Z]{3}$/) });
@@ -209,20 +220,27 @@ const imageOf = (media: z.infer<typeof Media> | undefined) => {
 /**
  * Catalog MCP products → the variant shape shopifyRows maps (as AskCart's are), so all three ways of reading Shopify
  * write the same rows: the variant GID is the row's id, prices in major units, compare-at only when above the price.
- * A malformed product or variant is skipped. No stock count (the MCP gives availability only) and no product type.
+ * A malformed product or variant is skipped and counted (`skipped`). No stock count (the MCP gives availability only) and no product type.
  */
-export function mcpVariants(products: unknown[]): { variants: ShopifyVariant[]; currency: string | null } {
+export function mcpVariants(products: unknown[]): { variants: ShopifyVariant[]; currency: string | null; skipped: number } {
   const variants: ShopifyVariant[] = [];
   let currency: string | null = null;
+  let skipped = 0;
   for (const raw of products) {
     const p = Product.safeParse(raw);
-    if (!p.success) continue;
+    if (!p.success) {
+      skipped++;
+      continue;
+    }
     const d = p.data.description;
     const description = d?.plain ?? (d?.html ? htmlText(d.html) : "");
     const productImage = imageOf(p.data.media);
     for (const rawVariant of p.data.variants) {
       const v = Variant.safeParse(rawVariant);
-      if (!v.success) continue;
+      if (!v.success) {
+        skipped++;
+        continue;
+      }
       const price = v.data.price;
       currency ??= price?.currency ?? null;
       const list = v.data.list_price;
@@ -247,7 +265,7 @@ export function mcpVariants(products: unknown[]): { variants: ShopifyVariant[]; 
       });
     }
   }
-  return { variants, currency };
+  return { variants, currency, skipped };
 }
 
 /**
@@ -258,31 +276,36 @@ export function mcpVariants(products: unknown[]): { variants: ShopifyVariant[]; 
  * published to the Online Store, or hidden from search. Shopify gives no total to check against. Caps: MAX_PAGES pages
  * of PAGE_SIZE per walk and `maxVariants` overall, all within the caller's deadline (`signal`); a bigger catalogue
  * stays incomplete (no resume across runs as AskCart's walk has; add one if a store needs it).
- * A store whose search_catalog takes no `available` filter can't be walked: nothing read, incomplete.
+ * A store whose search_catalog takes no `available` filter can't be walked: nothing read, incomplete. A walk in which
+ * any product or variant failed validation is incomplete too (`skipped` counts them).
  */
 export async function mcpCatalog(host: string, profile: string, maxVariants: number, signal?: AbortSignal) {
   const { names, enumerable } = await catalogTools(host, profile, signal);
   if (!names.has("search_catalog")) throw new CatalogMcpError(200, "no_search_catalog");
-  if (!enumerable) return { variants: [], currency: null, complete: false };
+  if (!enumerable) return { variants: [], currency: null, complete: false, skipped: 0 };
   const byId = new Map<string, ShopifyVariant>();
   let currency: string | null = null;
+  let skipped = 0;
+  const partial = () => ({ variants: [...byId.values()], currency, complete: false, skipped });
   for (const available of [true, false]) {
     let cursor: string | null = null;
     const seen = new Set<string>();
     for (let page = 0; ; page++) {
-      if (page >= MAX_PAGES || byId.size > maxVariants) return { variants: [...byId.values()], currency, complete: false };
+      if (page >= MAX_PAGES || byId.size > maxVariants) return partial();
       const res = await searchCatalog(host, profile, { filters: { available }, pagination: { limit: PAGE_SIZE, ...(cursor && { cursor }) } }, signal);
       const read = mcpVariants(res.products);
       currency ??= read.currency;
+      skipped += read.skipped;
       for (const v of read.variants) byId.set(v.id, v);
       if (!res.cursor) break;
       // A cursor seen before would loop forever: stop as partial.
-      if (seen.has(res.cursor)) return { variants: [...byId.values()], currency, complete: false };
+      if (seen.has(res.cursor)) return partial();
       seen.add(res.cursor);
       cursor = res.cursor;
     }
   }
-  return { variants: [...byId.values()], currency, complete: true };
+  // Something the store sent couldn't be read: what it was can't be told from a removed product, so nothing is archived.
+  return skipped ? partial() : { variants: [...byId.values()], currency, complete: true, skipped };
 }
 
 /** The connect check: the store answers tools/list with search_catalog and one filtered search succeeds. */

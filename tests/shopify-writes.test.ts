@@ -1,9 +1,10 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/server/db/prisma", () => ({ prisma: {} }));
+const conns = vi.hoisted(() => ({ rows: [] as { scopes: string[] }[] }));
+vi.mock("@/server/db/prisma", () => ({ prisma: { integrationConnection: { findMany: vi.fn(async () => conns.rows) } } }));
 
 import { askCartWriteAdapter } from "@/server/shopify/adapter";
-import { confirmToken, payloadHash, readConfirmToken, writesReady } from "@/server/shopify/writes";
+import { confirmToken, MCP_ONLY, payloadHash, readConfirmToken, ShopifyWriteError, writesReady } from "@/server/shopify/writes";
 import { fakeShopify } from "./fixtures/shopify-fake";
 
 const NOW = new Date("2026-11-24T12:00:00Z");
@@ -81,5 +82,22 @@ describe("write adapters", () => {
     const shop = fakeShopify({ scopes: ["write_draft_orders"] });
     expect(await writesReady(shop.adapter, scope, "DRAFT_ORDER_INVOICE_SEND")).toEqual({ ready: true });
     expect(await writesReady(shop.adapter, scope, "ARTICLE_PUBLISH")).toEqual({ ready: false, reason: "MISSING_SCOPE", scope: "write_content" });
+  });
+
+  it("a brand connected only through Shopify MCP is refused before the adapter is asked", async () => {
+    const shop = fakeShopify({ scopes: ["write_draft_orders"] });
+    const capabilities = vi.spyOn(shop.adapter, "capabilities");
+    conns.rows = [{ scopes: ["mcp"] }];
+    try {
+      const e = await writesReady(shop.adapter, scope, "DRAFT_ORDER_CREATE").catch((x: unknown) => x);
+      expect(e).toBeInstanceOf(ShopifyWriteError);
+      expect(e).toMatchObject({ message: MCP_ONLY, status: 422, code: "NOT_CONNECTED" });
+      expect(capabilities).not.toHaveBeenCalled();
+      // An AskCart connection beside it: writes go on as usual.
+      conns.rows = [{ scopes: ["mcp"] }, { scopes: ["askcart"] }];
+      expect(await writesReady(shop.adapter, scope, "DRAFT_ORDER_CREATE")).toEqual({ ready: true });
+    } finally {
+      conns.rows = [];
+    }
   });
 });

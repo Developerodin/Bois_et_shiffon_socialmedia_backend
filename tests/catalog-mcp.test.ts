@@ -118,6 +118,33 @@ describe("the JSON-RPC client", () => {
     }
   });
 
+  it("429 or 5xx still there after the retry is upstream_busy, whatever the body", async () => {
+    vi.useFakeTimers();
+    try {
+      safeFetchBytes.mockResolvedValueOnce(answer("<html>busy</html>", 429)).mockResolvedValueOnce(answer("<html>busy</html>", 502));
+      const e = catalogTools("shop.example", PROFILE).catch((x: unknown) => x);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(await e).toMatchObject({ code: "upstream_busy", busy: true, status: 502 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a redirect off the store's site is CatalogMcpError redirected", async () => {
+    safeFetchBytes.mockRejectedValueOnce(new CrawlError("Redirected to another site"));
+    await expect(catalogTools("shop.example", PROFILE)).rejects.toMatchObject({ code: "redirected" });
+  });
+
+  it("pagination: more without a cursor throws; a cursor counts unless has_next_page is false", async () => {
+    const page = (pagination: unknown) => rpcResult({ structuredContent: { products: [], pagination } });
+    safeFetchBytes.mockResolvedValueOnce(page({ has_next_page: true }));
+    await expect(searchCatalog("shop.example", PROFILE, {})).rejects.toMatchObject({ code: "bad_pagination" });
+    safeFetchBytes.mockResolvedValueOnce(page({ cursor: "c9" }));
+    expect((await searchCatalog("shop.example", PROFILE, {})).cursor).toBe("c9");
+    safeFetchBytes.mockResolvedValueOnce(page({ cursor: "c9", has_next_page: false }));
+    expect((await searchCatalog("shop.example", PROFILE, {})).cursor).toBeNull();
+  });
+
   it("the connect check needs search_catalog and one search", async () => {
     safeFetchBytes.mockResolvedValueOnce(TOOLS).mockResolvedValueOnce(search([], null));
     await checkCatalogMcp("shop.example", PROFILE);
@@ -154,9 +181,19 @@ describe("mcpCatalog", () => {
     expect(safeFetchBytes).toHaveBeenCalledTimes(2);
   });
 
+  it("a product or variant that fails validation is counted and makes the walk incomplete", async () => {
+    safeFetchBytes
+      .mockResolvedValueOnce(TOOLS)
+      .mockResolvedValueOnce(search([product(1), { title: 7 }, product(2, [variant(2), { id: "nope" }])], null))
+      .mockResolvedValueOnce(search([], null));
+    const read = await mcpCatalog("shop.example", PROFILE, 5000);
+    expect(read).toMatchObject({ complete: false, skipped: 2 });
+    expect(read.variants).toHaveLength(2);
+  });
+
   it("a search_catalog without an available filter can't be walked: nothing read, incomplete", async () => {
     safeFetchBytes.mockResolvedValueOnce(rpcResult({ tools: [{ name: "search_catalog", inputSchema: { properties: { catalog: { properties: { query: {} } } } } }] }));
-    expect(await mcpCatalog("shop.example", PROFILE, 5000)).toEqual({ variants: [], currency: null, complete: false });
+    expect(await mcpCatalog("shop.example", PROFILE, 5000)).toEqual({ variants: [], currency: null, complete: false, skipped: 0 });
     expect(safeFetchBytes).toHaveBeenCalledTimes(1);
   });
 });

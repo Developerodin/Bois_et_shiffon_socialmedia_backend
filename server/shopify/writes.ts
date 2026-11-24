@@ -6,6 +6,7 @@ import { subKey } from "@/server/crypto/credentials";
 import { prisma } from "@/server/db/prisma";
 import { problemResponse } from "@/server/api/http-error";
 import { isUniqueViolation } from "@/server/tasks/errors";
+import { isShopifyMcp } from "@/server/shopify/catalog-mcp";
 import { askCartWriteAdapter, type ShopifyRefusal, type ShopifyResult, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
 import { SHOPIFY_WRITE_SCOPE, type PermissionKey, type ShopifyWriteCode, type ShopifyWritePreview, type ShopifyWritesReady } from "@/shared";
 
@@ -77,8 +78,23 @@ export function readConfirmToken(token: string, now = new Date()): Claims | null
   return { brandId, entityType: entityType as ShopifyWriteEntity, entityId, version: Number(version), action: action as ShopifyWriteAction, attempt: Number(attempt), hash, userId, exp: Number(exp) };
 }
 
-/** Whether this brand's writes for `action` can run now. */
+export const MCP_ONLY = "This store is connected through Shopify MCP, which reads products only. Reconnect it through the AskCart app to enable this.";
+
+/**
+ * The brand's Shopify is connected only through Shopify MCP (catalogue reads): nothing can be written or read back
+ * through the write adapter, so callers stop before reaching it. A brand with no Shopify connection isn't MCP-only.
+ */
+export async function shopifyMcpOnly(scope: { workspaceId: string; brandId: string }) {
+  const conns = await prisma.integrationConnection.findMany({
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, provider: "SHOPIFY", status: { not: "REVOKED" } },
+    select: { scopes: true },
+  });
+  return conns.length > 0 && conns.every(isShopifyMcp);
+}
+
+/** Whether this brand's writes for `action` can run now. An MCP-only brand is refused (422) before the adapter. */
 export async function writesReady(adapter: ShopifyWriteAdapter, scope: WriteScope, action: ShopifyWriteAction): Promise<ShopifyWritesReady> {
+  if (await shopifyMcpOnly(scope)) throw new ShopifyWriteError(MCP_ONLY, 422, "NOT_CONNECTED");
   const caps = await adapter.capabilities({ workspaceId: scope.workspaceId, brandId: scope.brandId });
   if (!caps.connected) return { ready: false, reason: "NOT_CONNECTED" };
   const needed = SHOPIFY_WRITE_SCOPE[action];

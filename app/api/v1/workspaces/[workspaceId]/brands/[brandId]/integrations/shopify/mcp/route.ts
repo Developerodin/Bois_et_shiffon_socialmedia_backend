@@ -46,6 +46,10 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
       if (e instanceof CatalogMcpError && e.profileProblem) {
         return problem(502, "Shopify couldn't read our profile", "Shopify couldn't read this platform's agent profile. Ask your platform admin to check UCP_PROFILE_URL.");
       }
+      if (e instanceof CatalogMcpError && e.code === "redirected") {
+        return problem(422, "Use your myshopify address", `${host} redirects somewhere else. Enter your store's your-store.myshopify.com address instead (Shopify admin → Settings → Domains).`);
+      }
+      if (e instanceof CatalogMcpError && e.busy) return problem(502, "The store is busy", "Your store is busy or down right now. Try again in a few minutes.");
       if (e instanceof CrawlError || (e instanceof CatalogMcpError && (e.code === "not_mcp" || e.code === "no_search_catalog"))) {
         return problem(422, "No Shopify catalogue there", `${host} doesn't answer as a Shopify store's catalogue. Check the address (your .myshopify.com address works too).`);
       }
