@@ -242,6 +242,7 @@ model Brand {
   shopOrders    ShopOrder[]
   searchDays    SearchDay[]
   adDays        AdDay[]
+  shopifyWrites ShopifyWrite[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1795,4 +1796,58 @@ model AdDay {
 
   @@unique([brandId, platform, accountId, campaignId, day])
   @@index([brandId, platform, accountId, day])
+}
+
+enum ShopifyWriteEntity {
+  QUOTE
+  BLOG_ARTICLE
+}
+
+enum ShopifyWriteAction {
+  DRAFT_ORDER_CREATE
+  DRAFT_ORDER_UPDATE
+  DRAFT_ORDER_INVOICE_SEND
+  ARTICLE_CREATE
+  ARTICLE_UPDATE
+  ARTICLE_PUBLISH
+}
+
+/// PENDING: being sent. DONE: Shopify has it. FAILED: Shopify refused it (nothing written; the row is reused on the
+/// next confirm). UNKNOWN: no answer, so it may have been written; reconciled before anything is sent again.
+enum ShopifyWriteStatus {
+  PENDING
+  DONE
+  FAILED
+  UNKNOWN
+}
+
+/// One confirmed write to Shopify (server/shopify/writes.ts): at most one per entity version, action and attempt.
+model ShopifyWrite {
+  id          String             @id @default(cuid())
+  workspaceId String
+  brandId     String
+  entityType  ShopifyWriteEntity
+  entityId    String
+  /// the entity version that was confirmed
+  version     Int
+  action      ShopifyWriteAction
+  /// a deliberate re-send (invoice, or "Send again" after an unconfirmed attempt) takes the next attempt
+  attempt     Int                @default(1)
+  payloadHash String
+  status      ShopifyWriteStatus @default(PENDING)
+  /// times this row was sent (a FAILED row is sent again); the request id is "<id>.<runs>"
+  runs        Int                @default(1)
+  /// when the latest send started: PENDING goes stale and UNKNOWN may be sent again from here
+  startedAt   DateTime           @default(now())
+  shopifyId   String?
+  actorUserId String
+  /// fixed text per reason, never Shopify's or the customer's words
+  error       String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([entityType, entityId, version, action, attempt])
+  @@index([status, startedAt])
 }

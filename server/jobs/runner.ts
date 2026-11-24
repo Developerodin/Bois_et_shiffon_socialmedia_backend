@@ -35,6 +35,7 @@ import { ReconnectNeeded, refreshExpiringTokens } from "@/server/services/connec
 import { executePublication, onPublishJobLost, PUBLISH_JOB, PublishingError } from "@/server/services/publishing";
 import { runMonthlyPlans } from "@/server/services/automations";
 import { renewDuePlans } from "@/server/services/subscriptions";
+import { expireStaleWrites } from "@/server/shopify/writes";
 
 type Handler = {
   run: (payload: unknown, lease: Lease) => Promise<void>;
@@ -175,7 +176,7 @@ async function dailySweep() {
   const now = new Date();
   // "data" only queues each data source's sync (no provider calls), spread over the next two hours; "post-metric
   // sources" first gives each brand with published posts its POST_METRICS source.
-  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications]] as const) {
+  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites]] as const) {
     try {
       await step(now);
     } catch (e) {
