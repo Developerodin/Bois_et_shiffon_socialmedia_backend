@@ -1553,6 +1553,21 @@ functional brief against the code (built, partial or missing). Use it to pick th
 - Dev DB (Neon) has all Phase 2 migrations (four were applied early by mistake during the build, the last three on purpose at merge).
 - Not done / open: FX rate, VAT, budgets and pacing (waiting on owner answers, plan "Held" section); live data needs Meta app review (`ads_read`, insights), Google verification and Shopify `read_orders` (add `META_ADS_REDIRECT_URI` to the Meta app); confirm on one live free-shipping order whether Shopify's total discount includes shipping (gross sales caveat); unchecked in browser: date presets, the Sync now limit message, print layout, ad account picker. Skipped review items: S15 one problem mapper, S17 zone parameter in sales/insights SQL, S3 dropping `PostMetric_brandId_idx`, S11 POST code exchange.
 
+## Phase 2 owner answers (2026-11-24)
+- All 8 open questions in `docs/superpowers/plans/2026-11-23-phase-2-data.md` answered; see "Owner answers (2026-11-24)" there. H1 is unblocked with changes: daily ECB rate instead of one hand rate, net sales ex-VAT (20 % VAT incl. assumed, to confirm), budgets for Meta and Google. New work: System User token paste for Meta Ads, story metrics within 24 h, new Shopify app with `read_orders` + `read_all_orders`.
+
+## Product import merged (2026-11-24)
+- Part A of `docs/superpowers/plans/2026-11-24-product-import.md` merged to main in all three repos (not pushed): server `e805615`, web `f4a6cca`, mobile `7bf9692`. Products page has "Import file" (CSV comma/semicolon/tab, UTF-8/UTF-16/Windows-1252, .xlsx first sheet; 5 MB, 5,000 rows, 50 columns). Columns auto-matched (en + fr headers) with a preview; re-import matches by SKU → link → name, keeps ids, links and typed facts, archives IMPORT rows missing from the file. Price/stock/facts columns need `rules.approve`. New `ProductSource` values `IMPORT` and `SITE` (SITE is for Part B). Also: a 401/403 product feed now says "Your website blocks our product reader" (reason `blocked`).
+- Checks at merge: server 1655 unit + 151 DB tests, web 638, mobile typecheck; four-lens plan and branch reviews done, all Critical/Important fixed (quadratic htmlText, xlsx scanner, Unicode name keys, Excel float prices, ambiguous "1.299" prices flagged, sync lock timeout). Browser check with Playwright on local DB `sma_p2_browser` (owner@p2.test): French CSV, re-import (update + archive), xlsx with Greek/CJK names.
+- **Open:** (dev DB migrated 2026-11-24.) Web copy is English only (the web app has no i18n). Known limits: text price "1299.999" reads as 1,299,999 (pre-existing amountOf behaviour); per-process parse cap 2; server lint has 3 pre-existing errors in tests/db (crm-ads-read, task-assignment).
+- Next: Part B (website product-page reader, Tasks 5–9) on a new branch.
+
+## Website product reader merged (2026-11-24)
+- Part B of `docs/superpowers/plans/2026-11-24-product-import.md` merged to main in all three repos (not pushed): server `50586da`, web `0afe6bf`, mobile `6344c43`.
+- What it does: a brand whose website isn't a Shopify store (feed says "not a feed") gets its products from the product pages in its sitemap (schema.org Product JSON-LD). Job `catalog.pages` (own cap: 1 runner) reads ≤ 1,000 pages per brand per UTC day and ≤ 1,500 per host, one request at a time per host (≥ 1 s, Crawl-delay ≤ 10 s), robots.txt respected (5xx = stop for the reader; crawlSite stays lenient), 5,000-page cap per brand, re-read when lastmod changes or after 7 days with ETag/If-Modified-Since. Products archived only after a complete discovery, a second 404 on a later day, or 3 failed days; a burst of emptied pages pauses the run. Every outside fetch now uses a pinned DNS lookup (undici Agent) against rebinding. Products page shows "Reading your website's product pages: N of M"; Sync now limited to 6/h.
+- Checks at merge: server 1713 unit + 188 DB tests, web 645, mobile typecheck; four-lens plan + per-task + branch reviews, all Critical/Important fixed. Live check on camif.fr (local DB `sma_p2_browser`, brand "Camif live check"): sitemap → 5,000 pages (capped), one 3.5-min run read 123 pages → 123 products with SKU, EUR price, link; Camif publishes no availability, so stock is unknown (correct).
+- **Open:** (dev DB migrated 2026-11-24.) A worker (or RUN_JOBS_IN_API) must be running for the daily chain to progress. Known limits: one runner serves ~55 brands/day at full budget; pages without JSON-LD produce nothing (no microdata fallback).
+
 ## Phase 3 CRM, Task 1 (branch `phase-3-crm`, 2026-11-24)
 - Web flags `crm` (Sales & CRM screens; the Sales & CRM tab on Tasks, shown only to people holding `inbox.read` or `crm.manage`), `blog` (articles to Shopify) and `digest` (weekly digest), all off by default (`WEB_FEATURES` / `WEB_FEATURE_WORKSPACES`).
 - Permission `crm.manage` (customer records, notes, quotes) on Owner, Admin, Project admin and Manager; task area `CRM`, whose tasks only `inbox.read`/`crm.manage` holders see or can be given. Migrations `20261125126000_task_area_crm`, `20261125127000_crm_manage`: not yet on the dev DB (apply at merge).
@@ -1568,3 +1583,51 @@ functional brief against the code (built, partial or missing). Use it to pick th
 - Agent profile: `GET /api/v1/ucp/profile` (catalogue search + lookup only). Env `UCP_PROFILE_URL`, default `AUTH_URL` + `/api/v1/ucp/profile`. Shopify fetches it on every request and refuses http ("Https required") and anything it can't reach ("profile_unreachable"), so in dev set `UCP_PROFILE_URL` to a public https copy (a tunnel, or the JSON hosted anywhere public); without an https URL the option shows "Not set up".
 - Sync: `search_catalog` with no query, `filters.available` true then false, 50 a page, until `has_next_page` is false; complete → archives what it didn't see. Ceiling: products not on the Online Store or hidden from search are never seen (and archived); no total to check against; 100 pages per walk and 5,000 variants, else partial (nothing archived); no resume across runs. No stock count (availability only), no product type.
 - Live check 2026-11-24 on boisetchiffons.fr with Shopify's example profile (ours isn't public yet): the custom domain answers; tools/list and filter-only searches work; recorded in `tests/fixtures/catalog-mcp.ts`. Not yet tried with our own catalogue-only profile: check that its tools/list still offers `search_catalog` on the first live connect.
+
+## End of day 2026-11-24: Phase 3 Tier 1 almost ready to merge
+
+**Branch `phase-3-crm`:**
+- **Committed tips:** server `3768bd9` (Shopify MCP fixes), web `eb08e88`. Mobile has only the synced shared copies.
+- **Built:** crm.manage, the weekly digest, confirmed Shopify writes (ShopifyWrite, HMAC confirm token, adapter), the AskCart PKCE connect (adapter is a stub until AskCart ships the partner token endpoints), the blog that publishes to Shopify articles, quotes as draft orders (validity counted from send, reminders on day 7 and 21, status sync, cancel) and the read-only Shopify Catalog MCP connection (`/api/v1/ucp/profile`).
+- **Review fixes:** the quotes review fixes and the MCP review fixes are committed.
+
+**Stopped mid-work (session usage limit):**
+- One combined four-lens branch review was done on Sonnet and found 3 important and 9 minor issues.
+- The fix agent was stopped partway. Its edits sit **uncommitted** on `phase-3-crm` in the server repo, about 20 files; it was on the digest change.
+- The uncommitted `docs/HANDOVER.md` and `docs/superpowers/plans/2026-11-23-phase-2-data.md` changes are from the main session, not the agent.
+- **Fix list:**
+  1. `editQuote` refuses while a PENDING or UNKNOWN write exists.
+  2. `deleteArticle` gets the same guard.
+  3. The digest enqueues with chunked `createMany({ skipDuplicates })` and runs last in `runner.ts`.
+  4. Connection DELETE disconnects first, then revokes at AskCart with a 5 s abort.
+  5. Existing reminder `requestId`s are read once in status-sync.
+  6. ~~MCP connect warns if the store host ≠ the brand's `websiteUrl` host.~~ Done 2026-11-24: server `eb972d7`, web `e66983c`.
+  7. A brand's quote currency is persisted when it has no Shopify products; this may add a migration.
+  8. Discount values are validated by kind: PERCENT has at most 2 decimals and stays within 0–100.
+  9. The PKCE `codeVerifier` is encrypted.
+  10. A shared settle helper from `writes.ts` is used in `earlierCreates`, and `target()` is defined once.
+  11. ~~`shopifyMcpOnly` is computed once per request, and the two `hitRateLimit` calls run in parallel.~~ Done in the uncommitted fix-agent edits (`writes.ts`, `blog/shopify-articles.ts`); commits with them.
+- **Deferred:** unifying error codes and problem helpers across the quotes, blog and shopify-write routes, and caching `listBlogs`.
+
+**Next steps:**
+1. Finish fixes 1–11 on top of the uncommitted edits (check `git diff` first), with a test per behaviour change.
+2. Run the full checks: server unit and DB tests (on a throwaway DB), web tests and lint, mobile tsc.
+3. Merge `phase-3-crm` to main in all three repos.
+4. With the owner's OK, `npx prisma migrate deploy` on the dev DB. The new migrations are `20261125135000_oauth_state_pkce`, `20261125142000_quote_valid_from_send` and any from fix 7.
+
+**Rules learnt today:**
+- Run one agent at a time; the owner asked to keep usage slow.
+- Commit through a temporary index (`GIT_INDEX_FILE=$(mktemp)`).
+- Never run npm install or npm ci without `--prefix .` in an app folder.
+
+**Waiting on others:**
+- **Tier 2 (stored inbox, customers, follow-ups):** Meta app review and AskCart customer access.
+- **Tier 3:** the Google Ads developer token.
+- **AskCart:** a public app with per-brand links, with write scopes to be added later.
+- **Phase 2 follow-up plan:** about 8.5 days, reviewed, not built.
+
+## Phase 3 Tier 1 merged (2026-11-24, late)
+- Fixes 1–11 done: server `eb972d7` (MCP store-address warning, fix 6), `228fb02` (fixes 1–5, 7–11); web `e66983c`. Fix 2 was widened: deleting a blog article is refused while *any* write of it is PENDING or UNKNOWN (code `blog.writeInFlight`, was `blog.createInFlight`).
+- Checks before merge: server tsc, 1830 unit tests, 317 DB tests (throwaway `sma-testdb`, port 55432); web tsc, 675 tests, eslint; mobile tsc. All clean.
+- `phase-3-crm` merged to main in server, web and mobile. Not pushed.
+- **Still open:** `npx prisma migrate deploy` on the dev DB (owner's OK): `20261125135000_oauth_state_pkce`, `20261125142000_quote_valid_from_send`, `20261125143000_brand_quote_currency`. Shopify MCP live check with our own profile (needs a public https `UCP_PROFILE_URL`). The web quote form still asks for a currency each time for brands without a Shopify catalogue; the server uses the saved one and refuses another, but the form doesn't show it yet. Leftover double blank line in `server/blog/shopify-articles.ts`.
