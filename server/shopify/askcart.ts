@@ -4,24 +4,40 @@ import type { ShopifyVariant } from "@/server/catalog/shopify";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 
 /**
- * Read client for AskCart's partner API (contract: the AskCart repo's docs/partner-api.md; plan 2026-11-24-phase-3-crm,
- * "Shopify access through AskCart"). AskCart holds B&C's Shopify install and serves its catalogue and order totals;
- * no Shopify token ever reaches this platform. Env: ASKCART_URL (base, e.g. https://askcart.example) and ASKCART_SECRET.
+ * Client for AskCart's partner API (contract: the AskCart repo's docs/partner-api.md; plan 2026-11-24-phase-3-crm,
+ * "Shopify access through AskCart"). AskCart holds the store's Shopify install and serves its catalogue and order
+ * totals; no Shopify token ever reaches this platform. Two modes, chosen by env (askCartConfig):
  *
- * A brand reads through AskCart when its SHOPIFY connection's account id is ASKCART_ACCOUNT (never a valid
- * .myshopify.com domain, so it can't collide with a pasted-token connection). That connection stores no secret: the
- * secret stays in env and is only ever put in the Authorization header, never in a message, a log or a job payload.
+ * - per-brand (the target): AskCart is a public Shopify app. A brand connects from our Connections (portal-initiated,
+ *   PKCE; server/shopify/askcart-connect.ts) and gets its own AskCart token, stored encrypted on its SHOPIFY
+ *   connection like any provider token (account id = the shop domain, ASKCART_SCOPE among its scopes). Env:
+ *   ASKCART_URL, ASKCART_CLIENT_ID, ASKCART_CLIENT_SECRET.
+ * - single-store (INTERIM, until AskCart ships the per-brand connect): AskCart serves B&C's store only, behind one
+ *   shared secret (ASKCART_SECRET). One brand per deployment attaches it (account id ASKCART_ACCOUNT, no token stored).
+ *   Remove this mode, ASKCART_ACCOUNT and guardAskCartBrand once every deployment has a client id.
  *
- * Plain fetch, not the crawler's safeFetch: ASKCART_URL is set by the operator, not taken from a person, so there is no
- * SSRF to guard (and safeFetch's public-address check would refuse a dev AskCart on localhost). Redirects are refused
- * (fetch would carry the Authorization header along), each call has a 30 s timeout and the body is capped at 10 MB.
+ * The secret and tokens only ever go in the Authorization header or the token request body: never in a message, a log
+ * or a job payload. Plain fetch, not the crawler's safeFetch: ASKCART_URL is set by the operator, not taken from a
+ * person, so there is no SSRF to guard (and safeFetch's public-address check would refuse a dev AskCart on localhost).
+ * Redirects are refused (fetch would carry the Authorization header along), each call has a 30 s timeout and the body
+ * is capped at 10 MB.
  */
+/** INTERIM single-store mode: the account id of the one connection that reads through ASKCART_SECRET. */
 export const ASKCART_ACCOUNT = "askcart";
-export const isAskCart = (conn: { externalAccountId: string }) => conn.externalAccountId === ASKCART_ACCOUNT;
+/** Marks a SHOPIFY connection that reads through AskCart (kept in `scopes`, so no schema change; see isAskCart). */
+export const ASKCART_SCOPE = "askcart";
+/**
+ * A SHOPIFY connection that reads through AskCart rather than a pasted Admin token.
+ * ponytail: a marker in `scopes` rather than a column or a provider value (no migration, no enum fan-out); a
+ * token connect of the same shop replaces the scopes and so turns it back into a token connection. Move it to a
+ * column if anything else starts writing scopes.
+ */
+export const isAskCart = (conn: { externalAccountId: string; scopes?: string[] }) =>
+  conn.externalAccountId === ASKCART_ACCOUNT || (conn.scopes ?? []).includes(ASKCART_SCOPE);
 
 export const ASKCART_REFUSED = "AskCart can't reach the store. Open AskCart in Shopify admin to reconnect it, then connect Shopify via AskCart again.";
-export const ASKCART_KEY_REFUSED = "AskCart refused this platform's key. An admin must check ASKCART_SECRET, then connect Shopify via AskCart again.";
-/** The reason shown in Connections for a ReconnectNeeded thrown here: our key (401) or the store's install (503). */
+export const ASKCART_KEY_REFUSED = "AskCart no longer accepts this platform's access to the store. Connect Shopify via AskCart again.";
+/** The reason shown in Connections for a ReconnectNeeded thrown here: our access (401) or the store's install (503). */
 export const askCartReason = (e: Error) => (e.message.startsWith("AskCart 401") ? ASKCART_KEY_REFUSED : ASKCART_REFUSED);
 
 /** Any other non-2xx answer, a body that isn't JSON or one over the cap. Carries the status and AskCart's code only. */
@@ -35,10 +51,20 @@ export class AskCartError extends Error {
   }
 }
 
-export function askCartConfig(): { url: string; secret: string } | null {
-  const url = process.env.ASKCART_URL?.trim().replace(/\/+$/, "");
-  const secret = process.env.ASKCART_SECRET?.trim();
-  return url && secret ? { url, secret } : null;
+export type AskCartConfig =
+  | { mode: "per-brand"; url: string; clientId: string; clientSecret: string }
+  | { mode: "single-store"; url: string; secret: string };
+
+/** per-brand when the client id and secret are set; else single-store (INTERIM) when ASKCART_SECRET is; else null. */
+export function askCartConfig(): AskCartConfig | null {
+  const env = (k: string) => process.env[k]?.trim() || null;
+  const url = env("ASKCART_URL")?.replace(/\/+$/, "");
+  if (!url) return null;
+  const clientId = env("ASKCART_CLIENT_ID");
+  const clientSecret = env("ASKCART_CLIENT_SECRET");
+  if (clientId) return clientSecret ? { mode: "per-brand", url, clientId, clientSecret } : null;
+  const secret = env("ASKCART_SECRET");
+  return secret ? { mode: "single-store", url, secret } : null;
 }
 
 export type AskCartMoney = { amount: string; currencyCode: string };
@@ -111,21 +137,34 @@ async function cappedText(res: Response) {
 }
 
 /**
- * One GET. 429 and 503 shopify_throttled wait Retry-After (at most 30 s) and retry, twice; then AskCartError.
- * 401 (our secret) and 503 store_not_connected / store_reconnect_needed throw ReconnectNeeded: a person has to act.
- * Everything else that isn't 200 throws AskCartError (403 read_all_orders_pending carries visibleSince).
+ * One call to `${ASKCART_URL}/api/partner/<path>`. `bearer` is the brand's token (or the INTERIM shared secret); the
+ * token endpoint takes none. 429 and 503 shopify_throttled wait Retry-After (at most 30 s) and retry, twice; then
+ * AskCartError. A bearer call answered 401, or 503 store_not_connected / store_reconnect_needed, throws ReconnectNeeded:
+ * a person has to act. Everything else that isn't 2xx throws AskCartError (403 read_all_orders_pending carries
+ * visibleSince). 204 → null.
  */
-export async function askCartGet<T>(path: string, params: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
+export async function askCartRequest<T>(
+  path: string,
+  opts: { bearer?: string; method?: "GET" | "POST" | "DELETE"; params?: Record<string, string>; body?: unknown; signal?: AbortSignal } = {},
+): Promise<T> {
   const cfg = askCartConfig();
   if (!cfg) throw new AskCartError(0, "not_configured");
+  const { params = {}, signal } = opts;
   const url = `${cfg.url}/api/partner/${path}${Object.keys(params).length ? `?${new URLSearchParams(params)}` : ""}`;
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(url, {
+      method: opts.method ?? "GET",
       redirect: "error",
-      headers: { accept: "application/json", authorization: `Bearer ${cfg.secret}` },
+      headers: {
+        accept: "application/json",
+        ...(opts.bearer !== undefined && { authorization: `Bearer ${opts.bearer}` }),
+        ...(opts.body !== undefined && { "content-type": "application/json" }),
+      },
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
     });
     const text = await cappedText(res);
+    if (res.status === 204) return null as T;
     let body: unknown = null;
     try {
       body = JSON.parse(text);
@@ -136,9 +175,8 @@ export async function askCartGet<T>(path: string, params: Record<string, string>
     const { error, visibleSince } = (body ?? {}) as { error?: unknown; visibleSince?: unknown };
     // AskCart's codes are short identifiers; anything else (an HTML page) is dropped rather than echoed.
     const code = typeof error === "string" && /^[a-z_]{1,60}$/.test(error) ? error : null;
-    if (res.status === 401 || (res.status === 503 && (code === "store_not_connected" || code === "store_reconnect_needed"))) {
-      throw new ReconnectNeeded(`AskCart ${res.status}${code ? ` ${code}` : ""}`);
-    }
+    const storeGone = res.status === 503 && (code === "store_not_connected" || code === "store_reconnect_needed");
+    if (opts.bearer !== undefined && (res.status === 401 || storeGone)) throw new ReconnectNeeded(`AskCart ${res.status}${code ? ` ${code}` : ""}`);
     const err = new AskCartError(res.ok ? 502 : res.status, res.ok ? "bad_body" : code, typeof visibleSince === "string" ? visibleSince : null);
     const wait = Number(res.headers.get("retry-after") ?? 2);
     if (err.rateLimited && attempt < RETRIES && Number.isFinite(wait) && wait >= 0 && wait <= MAX_RETRY_WAIT_S) {
@@ -149,17 +187,22 @@ export async function askCartGet<T>(path: string, params: Record<string, string>
   }
 }
 
-export const askCartShop = (signal?: AbortSignal) => askCartGet<{ name: string; currencyCode: string }>("shop", {}, signal);
+export const askCartShop = (bearer: string, signal?: AbortSignal) =>
+  askCartRequest<{ name: string; currencyCode: string; domain?: string }>("shop", { bearer, signal });
 
 /** One page of orders; pass the previous page's nextCursor with the same query. */
-export function askCartOrders(query: OrdersQuery, cursor: string | null, signal?: AbortSignal) {
+export function askCartOrders(bearer: string, query: OrdersQuery, cursor: string | null, signal?: AbortSignal) {
   const params: Record<string, string> =
     "updatedSince" in query ? { updatedSince: query.updatedSince.toISOString() } : { createdFrom: query.createdFrom, createdTo: query.createdTo };
   if (cursor) params.cursor = cursor;
-  return askCartGet<AskCartPage<AskCartOrder>>("orders", params, signal);
+  return askCartRequest<AskCartPage<AskCartOrder>>("orders", { bearer, params, signal });
 }
 
-/** An AskCart product's variants in the Admin GraphQL shape the catalogue sync maps (shopifyRows), so it doesn't change. */
+/**
+ * An AskCart product's variants in the Admin GraphQL shape the catalogue sync maps (shopifyRows), so it doesn't change.
+ * availableForSale is always a boolean, so every row a walk sees reports stock and gets stockCheckedAt: a walk that
+ * resumes across runs archives by that (saveRows' seenSince).
+ */
 export const askCartVariants = (p: AskCartProduct): ShopifyVariant[] =>
   p.variants.map((v) => ({
     id: v.id,
@@ -168,7 +211,7 @@ export const askCartVariants = (p: AskCartProduct): ShopifyVariant[] =>
     price: v.price?.amount ?? null,
     compareAtPrice: v.compareAtPrice?.amount ?? null,
     inventoryQuantity: v.inventoryQuantity,
-    availableForSale: v.availableForSale,
+    availableForSale: v.availableForSale === true,
     product: {
       title: p.title,
       handle: p.handle,
@@ -183,33 +226,58 @@ export const askCartVariants = (p: AskCartProduct): ShopifyVariant[] =>
 const MAX_PAGES = 50;
 
 /**
- * Every variant of the store's active products, shaped like shopifyVariants' answer. `complete` only when AskCart said
- * so on the last page: a page cut short by Shopify's throttle (rateLimited) or the page cap stops the walk as partial
- * (nothing archived) and returns AskCart's cursor. Currency is the prices' (always the shop's).
- * ponytail: 50 pages × 100 products a run, one walk from the start each time; a bigger store stays partial until the
- * cursor is kept between runs.
+ * The store's active variants from `cursor` on (null = the start), shaped like shopifyVariants' answer. `complete` only
+ * when AskCart said so: a page cut short by Shopify's throttle (rateLimited), the page cap or `maxVariants` (checked
+ * between pages) stops the walk and returns the cursor to resume from next run. Currency is the prices' (the shop's).
+ * ponytail: one page can hold up to 100 products' variants past `maxVariants`.
  */
-export async function askCartCatalog(signal?: AbortSignal) {
+export async function askCartCatalog(bearer: string, cursor: string | null, maxVariants: number, signal?: AbortSignal) {
   const variants: ShopifyVariant[] = [];
   let currency: string | null = null;
-  let cursor: string | null = null;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const res: AskCartPage<AskCartProduct> = await askCartGet("products", cursor ? { cursor } : {}, signal);
+  for (let page = 0; page < MAX_PAGES && variants.length < maxVariants; page++) {
+    const res: AskCartPage<AskCartProduct> = await askCartRequest("products", { bearer, params: cursor ? { cursor } : {}, signal });
     for (const p of res.items ?? []) {
       variants.push(...askCartVariants(p).filter((v) => v.product.status === "ACTIVE"));
       currency ??= p.variants.find((v) => v.price)?.price?.currencyCode ?? null;
     }
     if (res.complete && !res.rateLimited) return { variants, currency, complete: true, cursor: null };
+    // rateLimited with no cursor: nothing on this page was read, so the same cursor is asked again next run
     if (res.rateLimited || !res.nextCursor) return { variants, currency, complete: false, cursor: res.nextCursor ?? cursor };
     cursor = res.nextCursor;
   }
   return { variants, currency, complete: false, cursor };
 }
 
+/** What AskCart's token endpoint answers: a long-lived opaque token, or an access token with a refresh token. */
+export type AskCartToken = {
+  access_token: string;
+  refresh_token?: string | null;
+  expires_in?: number | null;
+  shop?: { domain: string; name: string; currencyCode?: string };
+  scopes?: string[];
+};
+
 /**
- * Only one brand per deployment may attach AskCart: its secret is locked to one store (B&C's) on AskCart's side, so
- * a second brand attached to it would read B&C's products and sales as its own. Run inside the transaction that saves
- * the connection (saveConnections' `guard`); the advisory lock makes two connects at once take turns.
+ * POST /api/partner/token with our client id and secret: `grant` is the code exchange (code, redirect_uri,
+ * code_verifier) or a refresh (refresh_token). Per-brand mode only. A 4xx is an AskCartError (the code or refresh token
+ * was refused); the body is never echoed.
+ */
+export async function askCartTokenRequest(grant: { grant_type: "authorization_code"; code: string; redirect_uri: string; code_verifier: string } | { grant_type: "refresh_token"; refresh_token: string }) {
+  const cfg = askCartConfig();
+  if (cfg?.mode !== "per-brand") throw new AskCartError(0, "not_configured");
+  const tok = await askCartRequest<AskCartToken>("token", { method: "POST", body: { ...grant, client_id: cfg.clientId, client_secret: cfg.clientSecret } });
+  if (typeof tok?.access_token !== "string" || !tok.access_token) throw new AskCartError(502, "bad_body");
+  return tok;
+}
+
+/** Per-brand mode: tell AskCart to forget this brand's token (Disconnect). Best effort: the caller ignores failures. */
+export const askCartRevoke = (bearer: string) => askCartRequest<null>("token", { method: "DELETE", bearer });
+
+/**
+ * INTERIM single-store mode only. One brand per deployment may attach AskCart: its secret is locked to one store
+ * (B&C's) on AskCart's side, so a second brand attached to it would read B&C's products and sales as its own. Run
+ * inside the transaction that saves the connection (saveConnections' `guard`); the advisory lock makes two connects
+ * at once take turns.
  */
 export class AskCartTaken extends Error {}
 export async function guardAskCartBrand(tx: Prisma.TransactionClient, brandId: string) {

@@ -187,12 +187,12 @@ export const mapAskCartOrder = (o: AskCartOrder): ShopOrderRow =>
  * fetchOrders for a brand reading through AskCart (server/shopify/askcart.ts): AskCart's incremental mode
  * (`updatedSince`, oldest update first, 100 a page) with the same overlap, caps and stops, so the runner can't tell
  * them apart. A page AskCart cut short (`rateLimited`), its 429 after the client's retries, or Shopify's throttle →
- * `rate_limited` with the pages before it (a sorted prefix). 401 / store not connected → `reconnect`; 403 access_denied →
+ * `rate_limited` with the pages before it (a sorted prefix). 401 / store not connected throw ReconnectNeeded; 403 access_denied →
  * `missing_scope`; anything else → `failed`. Orders seen twice (same updatedAt at a page edge) keep their last read.
  * AskCart's read_all_orders_pending warning (orders created before visibleSince left out) is logged only: the
  * pasted-token path has the same 60-day reach.
  */
-export async function fetchAskCartOrders(sinceUpdatedAt: Date, signal?: AbortSignal): Promise<FetchOrdersResult> {
+export async function fetchAskCartOrders(bearer: string, sinceUpdatedAt: Date, signal?: AbortSignal): Promise<FetchOrdersResult> {
   const updatedSince = new Date(sinceUpdatedAt.getTime() - OVERLAP_MS);
   const started = Date.now();
   const byId = new Map<string, ShopOrderRow>();
@@ -211,9 +211,10 @@ export async function fetchAskCartOrders(sinceUpdatedAt: Date, signal?: AbortSig
     if (page > 0 && (Date.now() - started > MAX_MS || signal?.aborted)) return done("capped");
     let res: AskCartPage<AskCartOrder>;
     try {
-      res = await askCartOrders({ updatedSince }, cursor, signal);
+      res = await askCartOrders(bearer, { updatedSince }, cursor, signal);
     } catch (err) {
-      if (err instanceof ReconnectNeeded) return none("reconnect");
+      // The caller marks the connection with AskCart's own reason (our access vs the store's install).
+      if (err instanceof ReconnectNeeded) throw err;
       if (signal?.aborted) return done("capped");
       if (err instanceof AskCartError && err.rateLimited) return done("rate_limited");
       if (err instanceof AskCartError && err.code === "access_denied") return none("missing_scope");

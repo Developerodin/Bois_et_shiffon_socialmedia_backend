@@ -4,7 +4,8 @@ import { prisma } from "@/server/db/prisma";
 import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
 import { accessToken, markReconnect } from "@/server/services/connections";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
-import { ASKCART_REFUSED, AskCartError, askCartReason, askCartShop, isAskCart } from "@/server/shopify/askcart";
+import { AskCartError, askCartReason, askCartShop, isAskCart } from "@/server/shopify/askcart";
+import { askCartToken } from "@/server/shopify/askcart-token";
 import { fetchAskCartOrders, fetchOrders, type ShopOrderRow } from "./shopify-orders";
 import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from "./sources";
 
@@ -59,14 +60,16 @@ export async function syncShopifyOrders(
   const conn = ctx.connection;
   if (!conn) return { count: 0, reason: stopReason("reconnect") };
   const since = ctx.source.cursor ? new Date(ctx.source.cursor) : new Date(now.getTime() - FIRST_RUN_DAYS * 86_400_000);
-  const askCart = isAskCart(conn);
-  const read = askCart
-    ? await fetchAskCartOrders(since, ctx.signal)
+  const read = isAskCart(conn)
+    ? await fetchAskCartOrders(await askCartToken(conn), since, ctx.signal).catch(async (e: unknown) => {
+        // AskCart refused our access or lost the store: the connection's fault, like a refused token.
+        if (e instanceof ReconnectNeeded) await markReconnect(conn.id, askCartReason(e));
+        throw e;
+      })
     : await fetchOrders({ shop: conn.externalAccountId, accessToken: await accessToken(conn) }, since, ctx.signal);
   const stop = read.stoppedReason;
   // A refused token is the connection's fault (products stop too); a missing scope or permission is not.
-  // ponytail: an AskCart refusal is always shown as the store's install; a wrong ASKCART_SECRET shows in the log.
-  if (stop === "reconnect") await markReconnect(conn.id, askCart ? ASKCART_REFUSED : SHOPIFY_REFUSED);
+  if (stop === "reconnect") await markReconnect(conn.id, SHOPIFY_REFUSED);
   if (stop === "reconnect" || stop === "failed" || stop === "permission" || stop === "missing_scope") {
     return { count: 0, reason: stopReason(stop) };
   }
@@ -81,7 +84,8 @@ registerSync("SHOPIFY_ORDERS", (ctx) => syncShopifyOrders(ctx));
 
 export type TurnOn =
   | { ok: true; sourceId: string }
-  | { ok: false; problem: "not-connected" | "missing-scope" | "refused" | "unreachable" };
+  /** askCart: the connection reads through AskCart, so the problem is worded without tokens. */
+  | { ok: false; problem: "not-connected" | "missing-scope" | "refused" | "unreachable"; askCart?: true };
 
 /**
  * Turn the orders sync on for one of the brand's Shopify connections: its stored token only (a token never comes in a
@@ -100,14 +104,14 @@ export async function turnOnShopifyOrders(scope: { workspaceId: string; brandId:
   if (isAskCart(conn)) {
     // AskCart holds the scopes; asking for the shop proves it answers. access_denied on orders shows on the first run.
     try {
-      await askCartShop();
+      await askCartShop(await askCartToken(conn));
     } catch (e) {
       console.warn("[askcart] orders turn-on check failed", scope.brandId, e instanceof Error ? e.message : e);
       if (e instanceof ReconnectNeeded) {
         await markReconnect(conn.id, askCartReason(e));
-        return { ok: false, problem: "refused" };
+        return { ok: false, problem: "refused", askCart: true };
       }
-      return { ok: false, problem: e instanceof AskCartError && e.code === "access_denied" ? "missing-scope" : "unreachable" };
+      return { ok: false, problem: e instanceof AskCartError && e.code === "access_denied" ? "missing-scope" : "unreachable", askCart: true };
     }
     return { ok: true, sourceId: await startOrders(scope, conn, shop, conn.displayName) };
   }

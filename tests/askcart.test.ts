@@ -7,7 +7,8 @@ import { shopifyRows } from "@/server/catalog/sync";
 import { fetchAskCartOrders } from "@/server/data/shopify-orders";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import {
-  ASKCART_KEY_REFUSED, ASKCART_REFUSED, AskCartError, askCartCatalog, askCartGet, askCartOrders, askCartReason, askCartShop, isAskCart,
+  ASKCART_KEY_REFUSED, ASKCART_REFUSED, AskCartError, askCartCatalog, askCartConfig, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
+  askCartShop, askCartTokenRequest, isAskCart,
 } from "@/server/shopify/askcart";
 
 // Shapes from the AskCart repo's docs/partner-api.md (2026-11-24).
@@ -65,7 +66,7 @@ async function thrown(p: Promise<unknown>) {
 describe("askCartGet", () => {
   it("sends the secret as a Bearer header, refuses redirects and returns the body", async () => {
     const f = stubFetch({ body: { name: "B&C", currencyCode: "INR" } });
-    expect(await askCartShop()).toEqual({ name: "B&C", currencyCode: "INR" });
+    expect(await askCartShop(SECRET)).toEqual({ name: "B&C", currencyCode: "INR" });
     expect(urlOf(f.mock.calls[0]).toString()).toBe("https://askcart.test/api/partner/shop");
     const init = f.mock.calls[0][1] as RequestInit & { headers: Record<string, string> };
     expect(init.headers.authorization).toBe(`Bearer ${SECRET}`);
@@ -75,7 +76,7 @@ describe("askCartGet", () => {
   it("without ASKCART_URL or ASKCART_SECRET calls nothing", async () => {
     vi.stubEnv("ASKCART_SECRET", "");
     const f = stubFetch();
-    expect(await thrown(askCartShop())).toMatchObject({ code: "not_configured" });
+    expect(await thrown(askCartShop(SECRET))).toMatchObject({ code: "not_configured" });
     expect(f).not.toHaveBeenCalled();
   });
 
@@ -85,53 +86,53 @@ describe("askCartGet", () => {
     [error(503, "store_reconnect_needed"), ASKCART_REFUSED],
   ])("%j → ReconnectNeeded with a readable reason", async (res, reason) => {
     stubFetch(res);
-    const e = await thrown(askCartShop());
+    const e = await thrown(askCartShop(SECRET));
     expect(e).toBeInstanceOf(ReconnectNeeded);
     expect(askCartReason(e)).toBe(reason);
   });
 
   it("429 waits Retry-After and retries, then succeeds", async () => {
     const f = stubFetch(error(429, "rate_limited", {}, { "retry-after": "0" }), { body: { name: "B&C", currencyCode: "INR" } });
-    expect(await askCartShop()).toMatchObject({ name: "B&C" });
+    expect(await askCartShop(SECRET)).toMatchObject({ name: "B&C" });
     expect(f).toHaveBeenCalledTimes(2);
   });
 
   it("429 or shopify_throttled still there after two retries → rateLimited AskCartError", async () => {
     const f = stubFetch(...Array.from({ length: 3 }, () => error(503, "shopify_throttled", {}, { "retry-after": "0" })));
-    expect(await thrown(askCartShop())).toMatchObject({ rateLimited: true, status: 503 });
+    expect(await thrown(askCartShop(SECRET))).toMatchObject({ rateLimited: true, status: 503 });
     expect(f).toHaveBeenCalledTimes(3);
   });
 
   it("a Retry-After longer than 30 s isn't waited for", async () => {
     const f = stubFetch(error(429, "rate_limited", {}, { "retry-after": "120" }));
-    expect(await thrown(askCartShop())).toMatchObject({ rateLimited: true, status: 429 });
+    expect(await thrown(askCartShop(SECRET))).toMatchObject({ rateLimited: true, status: 429 });
     expect(f).toHaveBeenCalledTimes(1);
   });
 
   it("403 read_all_orders_pending carries visibleSince; 502 and 400 are plain errors", async () => {
     stubFetch(error(403, "read_all_orders_pending", { visibleSince: "2026-09-25T00:00:00Z" }), error(502, "upstream_error"), error(400, "one_mode_only"));
-    expect(await thrown(askCartShop())).toMatchObject({ status: 403, code: "read_all_orders_pending", visibleSince: "2026-09-25T00:00:00Z" });
-    expect(await thrown(askCartShop())).toMatchObject({ status: 502, code: "upstream_error", rateLimited: false });
-    expect(await thrown(askCartShop())).toMatchObject({ status: 400, code: "one_mode_only" });
+    expect(await thrown(askCartShop(SECRET))).toMatchObject({ status: 403, code: "read_all_orders_pending", visibleSince: "2026-09-25T00:00:00Z" });
+    expect(await thrown(askCartShop(SECRET))).toMatchObject({ status: 502, code: "upstream_error", rateLimited: false });
+    expect(await thrown(askCartShop(SECRET))).toMatchObject({ status: 400, code: "one_mode_only" });
   });
 
   it("an HTML error page or a non-JSON 200 never reaches the message", async () => {
     stubFetch({ status: 500, body: "<html>secret stuff</html>" }, { body: "not json" });
-    expect((await thrown(askCartShop())).message).toBe("AskCart 500");
-    expect(await thrown(askCartShop())).toMatchObject({ status: 502, code: "bad_body" });
+    expect((await thrown(askCartShop(SECRET))).message).toBe("AskCart 500");
+    expect(await thrown(askCartShop(SECRET))).toMatchObject({ status: 502, code: "bad_body" });
   });
 
   it("a body over 10 MB is refused", async () => {
     stubFetch({ body: "x".repeat(10_000_001) });
-    expect(await thrown(askCartGet("shop"))).toMatchObject({ code: "too_large" });
+    expect(await thrown(askCartRequest("shop", { bearer: SECRET }))).toMatchObject({ code: "too_large" });
   });
 });
 
 describe("askCartOrders", () => {
   it("sends exactly one mode, and the cursor with the same filters", async () => {
     const f = stubFetch({ body: page([]) }, { body: page([]) });
-    await askCartOrders({ updatedSince: new Date("2026-11-01T00:00:00Z") }, null);
-    await askCartOrders({ createdFrom: "2026-10-01", createdTo: "2026-10-31" }, "abc");
+    await askCartOrders(SECRET, { updatedSince: new Date("2026-11-01T00:00:00Z") }, null);
+    await askCartOrders(SECRET, { createdFrom: "2026-10-01", createdTo: "2026-10-31" }, "abc");
     expect(Object.fromEntries(urlOf(f.mock.calls[0]).searchParams)).toEqual({ updatedSince: "2026-11-01T00:00:00.000Z" });
     expect(Object.fromEntries(urlOf(f.mock.calls[1]).searchParams)).toEqual({ createdFrom: "2026-10-01", createdTo: "2026-10-31", cursor: "abc" });
   });
@@ -142,7 +143,7 @@ describe("fetchAskCartOrders", () => {
 
   it("maps an order to the ShopOrder row the token path writes", async () => {
     const f = stubFetch({ body: page([ORDER]) });
-    const { orders, cursorEnd, stoppedReason } = await fetchAskCartOrders(SINCE);
+    const { orders, cursorEnd, stoppedReason } = await fetchAskCartOrders(SECRET, SINCE);
     expect(stoppedReason).toBeUndefined();
     expect(urlOf(f.mock.calls[0]).searchParams.get("updatedSince")).toBe("2026-11-01T23:00:00.000Z"); // 1 h overlap
     expect(orders).toEqual([{
@@ -159,7 +160,7 @@ describe("fetchAskCartOrders", () => {
       { body: page([order(1, "2026-11-03T10:00:00Z"), order(2, "2026-11-04T10:00:00Z")], { complete: false, nextCursor: "c1", warning: { code: "read_all_orders_pending", visibleSince: "2026-09-25T00:00:00Z" } }) },
       { body: page([order(2, "2026-11-04T10:00:00Z"), order(3, "2026-11-05T10:00:00Z")]) },
     );
-    const { orders, cursorEnd, stoppedReason } = await fetchAskCartOrders(SINCE);
+    const { orders, cursorEnd, stoppedReason } = await fetchAskCartOrders(SECRET, SINCE);
     expect(stoppedReason).toBeUndefined();
     expect(orders.map((o) => o.name)).toEqual(["#1", "#2", "#3"]);
     expect(cursorEnd).toEqual(new Date("2026-11-05T10:00:00Z"));
@@ -169,7 +170,7 @@ describe("fetchAskCartOrders", () => {
 
   it("a page AskCart cut short (rateLimited) keeps the orders read so far", async () => {
     stubFetch({ body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1", rateLimited: true }) });
-    const { orders, cursorEnd, stoppedReason } = await fetchAskCartOrders(SINCE);
+    const { orders, cursorEnd, stoppedReason } = await fetchAskCartOrders(SECRET, SINCE);
     expect(stoppedReason).toBe("rate_limited");
     expect(orders).toHaveLength(1);
     expect(cursorEnd).toEqual(new Date("2026-11-03T10:00:00Z"));
@@ -180,35 +181,40 @@ describe("fetchAskCartOrders", () => {
       { body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1" }) },
       error(429, "rate_limited", {}, { "retry-after": "120" }),
     );
-    const { orders, stoppedReason } = await fetchAskCartOrders(SINCE);
+    const { orders, stoppedReason } = await fetchAskCartOrders(SECRET, SINCE);
     expect(stoppedReason).toBe("rate_limited");
     expect(orders).toHaveLength(1);
   });
 
+  it.each([error(401, "unauthorized"), error(503, "store_reconnect_needed"), error(503, "store_not_connected")])(
+    "%j throws ReconnectNeeded for the caller to mark the connection",
+    async (res) => {
+      stubFetch({ body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1" }) }, res);
+      expect(await thrown(fetchAskCartOrders(SECRET, SINCE))).toBeInstanceOf(ReconnectNeeded);
+    },
+  );
+
   it.each([
-    [error(401, "unauthorized"), "reconnect"],
-    [error(503, "store_reconnect_needed"), "reconnect"],
-    [error(503, "store_not_connected"), "reconnect"],
     [error(403, "access_denied"), "missing_scope"],
     [error(502, "upstream_error"), "failed"],
     [error(404, "not_found"), "failed"],
   ])("%j → %s with no orders", async (res, reason) => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     stubFetch({ body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1" }) }, res);
-    expect(await fetchAskCartOrders(SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: reason });
+    expect(await fetchAskCartOrders(SECRET, SINCE)).toEqual({ orders: [], cursorEnd: SINCE, stoppedReason: reason });
   });
 
   it("a network failure is failed, not a crash", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed")));
-    expect(await fetchAskCartOrders(SINCE)).toMatchObject({ orders: [], stoppedReason: "failed" });
+    expect(await fetchAskCartOrders(SECRET, SINCE)).toMatchObject({ orders: [], stoppedReason: "failed" });
   });
 });
 
 describe("askCartCatalog", () => {
   it("maps products to the rows the token path writes, complete only on AskCart's complete", async () => {
     const f = stubFetch({ body: page([PRODUCT], { complete: false, nextCursor: "p1" }) }, { body: page([{ ...PRODUCT, id: "gid://shopify/Product/2", variants: [] }]) });
-    const { variants, currency, complete } = await askCartCatalog();
+    const { variants, currency, complete } = await askCartCatalog(SECRET, null, 5000);
     expect(complete).toBe(true);
     expect(urlOf(f.mock.calls[1]).searchParams.get("cursor")).toBe("p1");
     expect(shopifyRows(variants, currency)).toEqual([
@@ -227,13 +233,13 @@ describe("askCartCatalog", () => {
 
   it("a page cut short by Shopify's throttle stops as partial and keeps the cursor", async () => {
     const f = stubFetch({ body: page([PRODUCT], { complete: false, nextCursor: "p1", rateLimited: true }) });
-    expect(await askCartCatalog()).toMatchObject({ complete: false, cursor: "p1" });
+    expect(await askCartCatalog(SECRET, null, 5000)).toMatchObject({ complete: false, cursor: "p1" });
     expect(f).toHaveBeenCalledOnce();
   });
 
   it("a refused store throws ReconnectNeeded, as the token path does", async () => {
     stubFetch(error(503, "store_reconnect_needed"));
-    expect(await thrown(askCartCatalog())).toBeInstanceOf(ReconnectNeeded);
+    expect(await thrown(askCartCatalog(SECRET, null, 5000))).toBeInstanceOf(ReconnectNeeded);
   });
 
   it("an AskCart connection is told apart by its account id", () => {
@@ -244,4 +250,69 @@ describe("askCartCatalog", () => {
 
 it("AskCartError's message is the status and code only", () => {
   expect(new AskCartError(502, "upstream_error").message).toBe("AskCart 502 upstream_error");
+});
+
+describe("modes and the token endpoint", () => {
+  it("per-brand when the client id and secret are set; single-store (interim) on ASKCART_SECRET alone; a lone client id is nothing", () => {
+    expect(askCartConfig()).toEqual({ mode: "single-store", url: "https://askcart.test", secret: SECRET });
+    vi.stubEnv("ASKCART_CLIENT_ID", "portal");
+    expect(askCartConfig()).toBeNull();
+    vi.stubEnv("ASKCART_CLIENT_SECRET", "client_secret_abc");
+    expect(askCartConfig()).toEqual({ mode: "per-brand", url: "https://askcart.test", clientId: "portal", clientSecret: "client_secret_abc" });
+  });
+
+  it("exchanges a code with our client credentials and the PKCE verifier; a refused code is an AskCartError, never a reconnect", async () => {
+    vi.stubEnv("ASKCART_CLIENT_ID", "portal");
+    vi.stubEnv("ASKCART_CLIENT_SECRET", "client_secret_abc");
+    const f = stubFetch(
+      { body: { access_token: "tok_1", refresh_token: "ref_1", expires_in: 3600, shop: { domain: "bc.myshopify.com", name: "B&C" }, scopes: ["read_orders"] } },
+      error(400, "invalid_grant"),
+      { body: { shop: { domain: "bc.myshopify.com" } } },
+    );
+    const grant = { grant_type: "authorization_code" as const, code: "c1", redirect_uri: "http://localhost:3100/cb", code_verifier: "v1" };
+    expect(await askCartTokenRequest(grant)).toMatchObject({ access_token: "tok_1" });
+    const init = f.mock.calls[0][1] as RequestInit & { headers: Record<string, string> };
+    expect(urlOf(f.mock.calls[0]).pathname).toBe("/api/partner/token");
+    expect(init.method).toBe("POST");
+    expect(init.headers.authorization).toBeUndefined();
+    expect(JSON.parse(init.body as string)).toEqual({ ...grant, client_id: "portal", client_secret: "client_secret_abc" });
+    const refused = await thrown(askCartTokenRequest(grant));
+    expect(refused).toBeInstanceOf(AskCartError);
+    expect(refused.message).not.toContain("client_secret_abc");
+    expect(await thrown(askCartTokenRequest(grant))).toMatchObject({ code: "bad_body" });
+  });
+
+  it("single-store mode has no token endpoint", async () => {
+    const f = stubFetch();
+    expect(await thrown(askCartTokenRequest({ grant_type: "refresh_token", refresh_token: "r" }))).toMatchObject({ code: "not_configured" });
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("revoke sends DELETE with the brand's token; 204 is fine", async () => {
+    const f = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", f);
+    expect(await askCartRevoke("tok_1")).toBeNull();
+    const init = f.mock.calls[0][1] as RequestInit & { headers: Record<string, string> };
+    expect(init.method).toBe("DELETE");
+    expect(init.headers.authorization).toBe("Bearer tok_1");
+  });
+});
+
+describe("askCartCatalog across runs", () => {
+  it("starts from a saved cursor and stops between pages once it holds maxVariants, returning where to resume", async () => {
+    const f = stubFetch({ body: page([PRODUCT], { complete: false, nextCursor: "p2" }) }, { body: page([PRODUCT], { complete: false, nextCursor: "p3" }) });
+    expect(await askCartCatalog(SECRET, "p1", 3)).toMatchObject({ complete: false, cursor: "p3" });
+    expect(f).toHaveBeenCalledTimes(2);
+    expect(urlOf(f.mock.calls[0]).searchParams.get("cursor")).toBe("p1");
+  });
+
+  it("a throttled first page with no cursor keeps the cursor it started from", async () => {
+    stubFetch({ body: page([], { complete: false, nextCursor: null, rateLimited: true }) });
+    expect(await askCartCatalog(SECRET, "p7", 5000)).toMatchObject({ complete: false, cursor: "p7" });
+  });
+
+  it("an AskCart connection is marked in its scopes (per-brand) or by the interim account id", () => {
+    expect(isAskCart({ externalAccountId: "bc.myshopify.com", scopes: ["askcart", "read_orders"] })).toBe(true);
+    expect(isAskCart({ externalAccountId: "bc.myshopify.com", scopes: ["read_products"] })).toBe(false);
+  });
 });

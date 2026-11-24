@@ -100,8 +100,9 @@ export async function refreshExpiringTokens() {
 export function listProviders() {
   return [
     ...(Object.keys(PROVIDERS) as OAuthProvider[]).map((p) => ({ provider: p, label: PROVIDERS[p].label, configured: providerConfig(p) !== null, kind: "oauth" as const })),
-    // askCart: this deployment can read a store through AskCart (env set); only one brand can attach it.
-    { provider: "SHOPIFY" as const, label: "Shopify", configured: true, kind: "token" as const, askCart: askCartConfig() !== null },
+    // askCart: how this deployment can read a store through AskCart: "per-brand" (each brand connects its own store),
+    // "single-store" (INTERIM: one store, one brand per deployment) or null (not set up).
+    { provider: "SHOPIFY" as const, label: "Shopify", configured: true, kind: "token" as const, askCart: askCartConfig()?.mode ?? null },
   ];
 }
 
@@ -132,29 +133,31 @@ export async function startConnect(input: {
 }) {
   const cfg = providerConfig(input.provider);
   if (!cfg) throw new ConnectionError(`${PROVIDERS[input.provider].label} isn't set up yet (missing app keys)`);
-  const { raw, hash } = newToken();
-  await prisma.oAuthStateTransaction.create({
-    data: { ...input, client: input.client ?? "web", stateHash: hash, expiresAt: new Date(Date.now() + STATE_TTL_MS) },
-  });
   return PROVIDERS[input.provider].authorizeUrl({
     clientId: cfg.clientId,
     redirectUri: cfg.redirectUri,
-    state: raw,
+    state: await createConnectState(input),
     scope: PROVIDERS[input.provider].scopes.join(","),
   });
 }
 
-/**
- * Step 2 (callback): consume the state atomically *before* the code exchange, so a replayed
- * or concurrent callback gets nothing. Re-checks access at callback time — a role revoked
- * mid-flow must not still connect.
- */
-export async function completeConnect(input: {
-  provider: OAuthProvider;
-  state: string;
-  code: string;
-  userId: string;
+/** A single-use connect state (DEC-017: only its hash is stored, ≤10 min); returns the raw state for the URL. */
+export async function createConnectState(input: {
+  workspaceId: string; brandId: string; userId: string; provider: IntegrationProvider; client?: "web" | "mobile"; codeVerifier?: string;
 }) {
+  const { raw, hash } = newToken();
+  await prisma.oAuthStateTransaction.create({
+    data: { ...input, client: input.client ?? "web", stateHash: hash, expiresAt: new Date(Date.now() + STATE_TTL_MS) },
+  });
+  return raw;
+}
+
+/**
+ * Consume the state atomically *before* any code exchange, so a replayed or concurrent callback gets nothing, then
+ * re-check access (a role revoked mid-flow must not still connect). A repeat of a callback that already connected
+ * returns `replay` instead.
+ */
+export async function claimConnectState(input: { provider: IntegrationProvider; state: string; userId: string }) {
   const stateHash = hashToken(input.state);
   const consumed = await prisma.oAuthStateTransaction.updateMany({
     where: {
@@ -168,13 +171,29 @@ export async function completeConnect(input: {
   });
   if (consumed.count !== 1) {
     const replay = await replayedConnect(stateHash, input);
-    if (replay) return replay;
+    if (replay) return { replay };
     throw new ConnectionError("This connect link expired or was already used. Try again.");
   }
-  const st =await prisma.oAuthStateTransaction.findUniqueOrThrow({ where: { stateHash } });
-
+  const st = await prisma.oAuthStateTransaction.findUniqueOrThrow({ where: { stateHash } });
   await requireBrandAccess(st.workspaceId, st.brandId, input.userId);
   await requirePermission(st.workspaceId, input.userId, "integrations.manage", st.brandId);
+  return { st };
+}
+
+/**
+ * Step 2 (callback): consume the state atomically *before* the code exchange, so a replayed
+ * or concurrent callback gets nothing. Re-checks access at callback time — a role revoked
+ * mid-flow must not still connect.
+ */
+export async function completeConnect(input: {
+  provider: OAuthProvider;
+  state: string;
+  code: string;
+  userId: string;
+}) {
+  const claimed = await claimConnectState(input);
+  if (claimed.replay) return claimed.replay;
+  const { st } = claimed;
 
   const cfg = providerConfig(input.provider);
   if (!cfg) throw new ConnectionError("Provider keys were removed during connect");
@@ -243,7 +262,7 @@ export async function saveConnections(input: {
  * same success, not "already used". Only the same user, the same state, within 2 minutes, and it
  * never issues or touches tokens. Waits briefly in case the first request is still exchanging.
  */
-async function replayedConnect(stateHash: string, input: { provider: OAuthProvider; userId: string }) {
+async function replayedConnect(stateHash: string, input: { provider: IntegrationProvider; userId: string }) {
   const st = await prisma.oAuthStateTransaction.findUnique({ where: { stateHash } });
   if (!st?.consumedAt || st.userId !== input.userId || st.provider !== input.provider) return null;
   if (Date.now() - st.consumedAt.getTime() > 2 * 60_000) return null;

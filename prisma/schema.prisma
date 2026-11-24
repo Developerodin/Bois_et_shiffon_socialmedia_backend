@@ -761,17 +761,19 @@ model IntegrationConnection {
  * Single-use OAuth state (DEC-017): only the hash is stored; consumed atomically on callback.
  */
 model OAuthStateTransaction {
-  id          String              @id @default(cuid())
-  stateHash   String              @unique
-  workspaceId String
-  brandId     String
-  userId      String
-  provider    IntegrationProvider
+  id           String              @id @default(cuid())
+  stateHash    String              @unique
+  workspaceId  String
+  brandId      String
+  userId       String
+  provider     IntegrationProvider
   /// "mobile": the callback hands the code back to the app, which completes with its own token (never by state alone)
-  client      String              @default("web")
-  expiresAt   DateTime
-  consumedAt  DateTime?
-  createdAt   DateTime            @default(now())
+  client       String              @default("web")
+  /// PKCE code_verifier for a connect that uses one (AskCart); sent once with the code, never to the browser
+  codeVerifier String?
+  expiresAt    DateTime
+  consumedAt   DateTime?
+  createdAt    DateTime            @default(now())
 
   @@index([expiresAt])
 }

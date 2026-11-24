@@ -9,6 +9,7 @@ import { shopifySized } from "@/server/research/brand-assets";
 import { htmlText, safeFetch, safeFetchBytes } from "@/server/research/crawl";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { askCartCatalog, askCartReason, isAskCart } from "@/server/shopify/askcart";
+import { askCartToken } from "@/server/shopify/askcart-token";
 
 /**
  * Product catalogue sync (docs/superpowers/specs/2026-11-05-product-catalogue-design.md).
@@ -40,7 +41,13 @@ export type SyncedRow = {
   stockQuantity: number | null;
   imageUrl: string | null;
 };
-type Fetched = { rows: SyncedRow[]; complete: boolean; note?: Note };
+type Fetched = { rows: SyncedRow[]; complete: boolean; note?: Note; walk?: Walk; seenSince?: Date };
+/**
+ * An AskCart walk that spans runs: the cursor to resume from and when the walk began. Kept in catalogSync (server
+ * only; the products route passes it through, an opaque cursor and a time). Its final, complete run archives the rows
+ * no run of the walk saw (saveRows' seenSince).
+ */
+type Walk = { cursor: string; startedAt: string };
 /** What saveRows writes: IMPORT rows also carry the person fields from the file (null = empty cell, keeps the stored value). */
 export type SavedRow = SyncedRow & { materials?: string | null; dimensions?: string | null; certifications?: string | null };
 
@@ -177,14 +184,18 @@ const AUTOMATIC: ProductSource[] = ["SHOPIFY", "WEBSITE", "SITE"];
  * IMPORT archives only its own unseen rows. An empty `seen` after a complete fetch archives every row of that source:
  * the store (or the file) really is empty.
  */
-export function archiveWhere(scope: Scope, source: ProductSource, seen: string[], complete: boolean): Prisma.ProductWhereInput | null {
+export function archiveWhere(scope: Scope, source: ProductSource, seen: string[], complete: boolean, seenSince?: Date): Prisma.ProductWhereInput | null {
   if (!complete || source === "MANUAL") return null;
+  // A walk over several runs (AskCart): every row it saw got stockCheckedAt ≥ its start, so the rest are gone.
+  const unseen: Prisma.ProductWhereInput = seenSince
+    ? { source, OR: [{ stockCheckedAt: null }, { stockCheckedAt: { lt: seenSince } }] }
+    : { source, externalId: { notIn: seen } };
   const others = AUTOMATIC.includes(source) ? AUTOMATIC.filter((s) => s !== source) : [];
   return {
     workspaceId: scope.workspaceId,
     brandId: scope.brandId,
     archivedAt: null,
-    OR: [...(others.length ? [{ source: { in: others } }] : []), { source, externalId: { notIn: seen } }],
+    OR: [...(others.length ? [{ source: { in: others } }] : []), unseen],
   };
 }
 
@@ -237,10 +248,16 @@ export async function websiteFeed(websiteUrl: string, signal?: AbortSignal): Pro
  * The connection's store (its account id is the shop domain), token via accessToken(), which throws ReconnectNeeded.
  * An AskCart connection reads through AskCart instead (no token here; it throws ReconnectNeeded the same way).
  */
-async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal): Promise<Fetched> {
-  const { variants, currency, complete } = isAskCart(conn)
-    ? await askCartCatalog(signal)
-    : await shopifyVariants(conn.externalAccountId, await accessToken(conn), signal);
+async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, last: CatalogSync | null, at: string): Promise<Fetched> {
+  if (isAskCart(conn)) {
+    // A walk carries on from the last run's cursor, so a store past one run's MAX_ROWS completes over several runs.
+    const walk = last?.source === "SHOPIFY" ? (last as CatalogSync & { walk?: Walk }).walk : undefined;
+    const read = await askCartCatalog(await askCartToken(conn), walk?.cursor ?? null, MAX_ROWS, signal);
+    const rows = shopifyRows(read.variants, read.currency);
+    if (read.complete) return { rows, complete: true, seenSince: walk && new Date(walk.startedAt) };
+    return { rows, complete: false, note: PARTIAL, walk: read.cursor ? { cursor: read.cursor, startedAt: walk?.startedAt ?? at } : undefined };
+  }
+  const { variants, currency, complete } = await shopifyVariants(conn.externalAccountId, await accessToken(conn), signal);
   return capRows({ rows: shopifyRows(variants, currency), complete, note: complete ? undefined : PARTIAL });
 }
 
@@ -303,6 +320,8 @@ type SaveOptions = {
    * contradicts a written one.
    */
   keep?: KeptField[];
+  /** A walk over several runs ended complete: archive this source's rows not stock-checked since it began (archiveWhere). */
+  seenSince?: Date;
 };
 type KeptField = "price" | "compareAtPrice" | "inStock" | "stockQuantity";
 const kept = (p: Stored, f: KeptField) => (f === "price" || f === "compareAtPrice" ? (p[f]?.toFixed(2) ?? null) : p[f]);
@@ -424,7 +443,7 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
     })).count;
   }
   for (const part of chunks(unchangedReporting)) await db.product.updateMany({ where: { ...where, id: { in: part } }, data: { stockCheckedAt: now } });
-  const gone = archiveWhere(scope, source, rows.map((r) => r.externalId), fetched.complete);
+  const gone = archiveWhere(scope, source, rows.map((r) => r.externalId), fetched.complete, opts.seenSince);
   const archived = gone ? (await db.product.updateMany({ where: gone, data: { archivedAt: now } })).count : 0;
   return { seen: rows.length, created: added, updated: changed.length, unchanged: rows.length - created.length - changed.length, archived };
 }
@@ -459,7 +478,10 @@ export function withCatalogLock<T>(scope: Scope, lockWaitMs: number, fn: (tx: Db
 const archiveShopifyRows = (scope: Scope) =>
   prisma.product.updateMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, source: "SHOPIFY", archivedAt: null }, data: { archivedAt: new Date() } });
 
-export const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count" | "pages">, note: Note | null, db: Db = prisma) =>
+const lastSync = async (scope: Scope) =>
+  ((await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { catalogSync: true } }))?.catalogSync ?? null) as CatalogSync | null;
+
+export const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count" | "pages"> & { walk?: Walk }, note: Note | null, db: Db = prisma) =>
   db.brandProfile.updateMany({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId },
     data: { catalogSync: { ...sync, error: note?.error ?? null, reason: note?.reason ?? null } },
@@ -484,9 +506,12 @@ export async function runCatalogSync(payload: unknown) {
     return void (await record(scope, { at, source: "SHOPIFY", count: 0 }, { ...REFUSED, error: found.shop.lastError ?? SHOPIFY_REFUSED }));
   }
   const signal = AbortSignal.timeout(DEADLINE_MS);
+  const shopLast = found.source === "SHOPIFY" && isAskCart(found.shop) ? await lastSync(scope) : null;
+  // A failed run keeps an AskCart walk's cursor, so the next run carries on rather than starting over.
+  const walk = (shopLast as (CatalogSync & { walk?: Walk }) | null)?.walk;
   try {
     // A SITE brand's feed is checked every day too: once the site has one, the feed takes over (and archives SITE rows).
-    const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal) : await websiteFeed(found.websiteUrl, signal);
+    const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal, shopLast, at) : await websiteFeed(found.websiteUrl, signal);
     // A SITE brand stays one when its feed URL turns readers away for a day: only a feed that answers moves it.
     // A feed that worked must say "not a feed" on two different days before its products are left for the pages.
     const last = found.source === "WEBSITE" ? found.last : null;
@@ -504,10 +529,12 @@ export async function runCatalogSync(payload: unknown) {
     // The save and the record share the catalogue lock's transaction: the site reader checks the source under the
     // same lock, so it never writes SITE rows (or archives these) after the brand moved.
     await withCatalogLock(scope, 120_000, async (tx) => {
-      const { seen: count } = await saveRows(tx, scope, source, fetched, {});
+      const { seen } = await saveRows(tx, scope, source, fetched, { seenSince: fetched.seenSince });
+      // A walk over several runs counts what it has so far, not just this run's part.
+      const count = fetched.walk || fetched.seenSince ? await tx.product.count({ where: { ...scope, source, archivedAt: null } }) : seen;
       // A complete save archived any SITE rows: forget what the site reader read, so a switch back reads every page again.
       if (fetched.complete) await tx.catalogPage.updateMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { readAt: null, etag: null, modifiedAt: null } });
-      await record(scope, { at, source, count }, fetched.note ?? null, tx);
+      await record(scope, { at, source, count, ...(fetched.walk && { walk: fetched.walk }) }, fetched.note ?? null, tx);
     });
   } catch (error) {
     if (error instanceof CatalogBusy) throw error;
@@ -518,7 +545,7 @@ export async function runCatalogSync(payload: unknown) {
     console.warn("[catalog] sync failed", scope.brandId, found.source, error instanceof Error ? error.message : error);
     // A SITE brand keeps its reader's progress on screen.
     const kept = found.source === "SITE" ? await siteProgress(scope, found.capped) : { count: 0 };
-    await record(scope, { at, source: found.source, ...kept }, refused ? { ...REFUSED, error: refusal } : FAILED);
+    await record(scope, { at, source: found.source, ...kept, ...(walk && { walk }) }, refused ? { ...REFUSED, error: refusal } : FAILED);
     throw error;
   }
 }
