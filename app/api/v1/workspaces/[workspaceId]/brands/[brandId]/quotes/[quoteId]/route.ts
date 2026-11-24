@@ -43,14 +43,14 @@ export async function POST(request: Request, context: { params: Promise<Params> 
   }
 }
 
-/** Delete a draft never sent to Shopify; cancel any other (Shopify's draft order is left alone). */
+/** Delete a draft never sent to Shopify (204); cancel any other open one (200 with the quote, and a notice when its invoice stays payable in Shopify). */
 export async function DELETE(request: Request, context: { params: Promise<Params> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "crm.manage");
     if (scope instanceof Response) return scope;
     const { quoteId } = await context.params;
-    await deleteQuote(scope, quoteId);
-    return new Response(null, { status: 204 });
+    const cancelled = await deleteQuote(scope, quoteId);
+    return cancelled ? Response.json(cancelled, { headers: NO_STORE }) : new Response(null, { status: 204 });
   } catch (error) {
     return quoteProblem(error);
   }

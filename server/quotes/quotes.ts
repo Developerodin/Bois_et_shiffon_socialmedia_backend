@@ -16,14 +16,15 @@ import { OPEN_TASK_STATUSES, QUOTE_LIMITS, quoteNumber, type PermissionKey, type
  */
 export type QuoteScope = { workspaceId: string; brandId: string; userId: string; perms: Set<PermissionKey> };
 
-const PRICE = /^\d{1,9}(\.\d{1,2})?$/;
+const PRICE = /^\d{1,9}(\.\d{1,3})?$/;
 const price = z.string().trim().regex(PRICE, "Write prices like 1250 or 1250.50");
+const percent = z.string().trim().regex(/^\d{1,3}(\.\d{1,2})?$/, "Write a percentage like 10 or 12.5");
 const LineInput = z.union([
   z.object({ productId: z.string().min(1).max(40), quantity: z.number().int().min(1).max(QUOTE_LIMITS.quantity), title: z.string().trim().min(1).max(QUOTE_LIMITS.title).optional(), unitPrice: price.optional() }),
   z.object({ productId: z.null().optional(), title: z.string().trim().min(1).max(QUOTE_LIMITS.title), quantity: z.number().int().min(1).max(QUOTE_LIMITS.quantity), unitPrice: price }),
 ]);
 const Discount = z
-  .object({ kind: z.enum(["PERCENT", "AMOUNT"]), value: price })
+  .object({ kind: z.enum(["PERCENT", "AMOUNT"]), value: price.or(percent) })
   .refine((d) => d.kind !== "PERCENT" || Number(d.value) <= 100, "A percentage discount is at most 100");
 const fields = {
   contactName: z.string().trim().max(QUOTE_LIMITS.name).nullable().optional(),
@@ -38,24 +39,32 @@ export const QuoteCreate = z.object({ ...fields, lines: fields.lines.default([])
 export const QuoteEdit = z.object({ ...fields, lines: fields.lines.optional(), version: z.number().int().positive() });
 export const QuoteAction = z.object({ action: z.enum(["revise", "acceptSubtotal"]), version: z.number().int().positive() });
 
-// ---- money, in cents ---------------------------------------------------------------------------------------------
+// ---- money, in the currency's minor unit -----------------------------------------------------------------------
 
-/** "12.5" → 1250. Amounts are at most 9 digits before the point, so cents stay well inside a safe integer. */
-export const toCents = (s: string) => {
+/** ISO 4217 currencies without the usual two decimals; every other one has two. */
+const ZERO_DECIMALS = new Set(["BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX", "UYI", "VND", "VUV", "XAF", "XOF", "XPF"]);
+const THREE_DECIMALS = new Set(["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"]);
+export const minorDigits = (currency: string) => (ZERO_DECIMALS.has(currency) ? 0 : THREE_DECIMALS.has(currency) ? 3 : 2);
+
+/** "12.5" → 1250 with 2 digits. Digits past `digits` are dropped (callers refuse non-zero ones first: tooPrecise). At most 9 digits before the point, so this stays a safe integer. */
+export const toMinor = (s: string, digits = 2) => {
   const [whole, frac = ""] = s.split(".");
-  return Number(whole) * 100 + Number(frac.padEnd(2, "0"));
+  return Number(whole) * 10 ** digits + Number(frac.padEnd(digits, "0").slice(0, digits) || "0");
 };
-export const fromCents = (c: number) => `${Math.floor(c / 100)}.${String(c % 100).padStart(2, "0")}`;
+export const fromMinor = (n: number, digits = 2) => (digits ? `${Math.floor(n / 10 ** digits)}.${String(n % 10 ** digits).padStart(digits, "0")}` : String(n));
+/** More decimals than the currency has (non-zero ones): "1200.5" in JPY. */
+const tooPrecise = (s: string, digits: number) => /[1-9]/.test((s.split(".")[1] ?? "").slice(digits));
 
 /**
- * Subtotal of the lines, the discount (a percentage rounded half up to the cent, or an amount capped at the subtotal)
- * and what is left before shipping and tax. Shopify may round a percentage differently: the draft order's own
- * subtotal is compared with `total` after every write and a difference shown.
+ * Subtotal of the lines, the discount (a percentage rounded half up to the minor unit, or an amount capped at the
+ * subtotal) and what is left before shipping and tax, in `currency`'s decimals. Shopify may round a percentage
+ * differently: the draft order's own subtotal is compared with `total` after every write and a difference shown.
  */
-export function quoteTotals(lines: Pick<QuoteLine, "quantity" | "unitPrice">[], discount: QuoteDiscount | null): QuoteTotals {
-  const subtotal = lines.reduce((n, l) => n + l.quantity * toCents(l.unitPrice), 0);
-  const off = !discount ? 0 : discount.kind === "PERCENT" ? Math.round((subtotal * toCents(discount.value)) / 10_000) : Math.min(toCents(discount.value), subtotal);
-  return { subtotal: fromCents(subtotal), discount: fromCents(off), total: fromCents(subtotal - off) };
+export function quoteTotals(lines: Pick<QuoteLine, "quantity" | "unitPrice">[], discount: QuoteDiscount | null, currency = "EUR"): QuoteTotals {
+  const d = minorDigits(currency);
+  const subtotal = lines.reduce((n, l) => n + l.quantity * toMinor(l.unitPrice, d), 0);
+  const off = !discount ? 0 : discount.kind === "PERCENT" ? Math.round((subtotal * toMinor(discount.value, 2)) / 10_000) : Math.min(toMinor(discount.value, d), subtotal);
+  return { subtotal: fromMinor(subtotal, d), discount: fromMinor(off, d), total: fromMinor(subtotal - off, d) };
 }
 
 // ---- reading -----------------------------------------------------------------------------------------------------
@@ -65,8 +74,9 @@ export const quoteDiscount = (json: unknown): QuoteDiscount | null => (json && t
 const day = (d: Date) => d.toISOString().slice(0, 10);
 
 export function toQuoteDto(q: Quote): QuoteDto {
-  const totals = quoteTotals(quoteLines(q.lines), quoteDiscount(q.discount));
-  const differs = q.shopifySubtotal !== null && toCents(q.shopifySubtotal) !== toCents(totals.total);
+  const totals = quoteTotals(quoteLines(q.lines), quoteDiscount(q.discount), q.currency);
+  const d = minorDigits(q.currency);
+  const differs = q.shopifySubtotal !== null && toMinor(q.shopifySubtotal, d) !== toMinor(totals.total, d);
   return {
     id: q.id,
     number: quoteNumber(q.number),
@@ -128,21 +138,27 @@ async function snapshotLines(scope: { workspaceId: string; brandId: string }, in
     ? await prisma.product.findMany({ where: { id: { in: ids }, workspaceId: scope.workspaceId, brandId: scope.brandId, archivedAt: null }, select: { id: true, source: true, externalId: true, title: true, price: true, currency: true } })
     : [];
   const byId = new Map(products.map((p) => [p.id, p]));
+  const d = minorDigits(currency);
   return input.map((l, i) => {
-    const unit = (s: string) => fromCents(toCents(s));
+    const unit = (s: string) => {
+      if (tooPrecise(s, d)) throw new PublishingError(`Line ${i + 1}: ${currency} prices have ${d === 0 ? "no decimals" : `at most ${d} decimals`}`, 400, "quote.decimals");
+      return fromMinor(toMinor(s, d), d);
+    };
     if (l.productId == null) return { productId: null, variantId: null, title: l.title, quantity: l.quantity, unitPrice: unit(l.unitPrice) };
     const p = byId.get(l.productId);
     if (!p) throw new PublishingError("Product not found", 404);
     if (p.currency && p.currency !== currency) throw new PublishingError(`Line ${i + 1} is priced in ${p.currency}; this quote is in ${currency}`, 400, "quote.currency");
-    const given = l.unitPrice ?? (p.price !== null ? p.price.toFixed(2) : null);
+    const given = l.unitPrice ?? (p.price !== null ? p.price.toFixed() : null);
     if (given === null) throw new PublishingError(`Give a price for line ${i + 1}: the product has none`, 400, "quote.noPrice");
     return { productId: p.id, variantId: p.source === "SHOPIFY" ? p.externalId : null, title: l.title ?? p.title.slice(0, QUOTE_LIMITS.title), quantity: l.quantity, unitPrice: unit(given) };
   });
 }
 
 /** An amount discount can't take more than the lines are worth. */
-function checkDiscount(lines: QuoteLine[], discount: QuoteDiscount | null | undefined) {
-  if (discount?.kind === "AMOUNT" && toCents(discount.value) > toCents(quoteTotals(lines, null).subtotal)) {
+function checkDiscount(lines: QuoteLine[], discount: QuoteDiscount | null | undefined, currency: string) {
+  const d = minorDigits(currency);
+  if (discount?.kind === "AMOUNT" && tooPrecise(discount.value, d)) throw new PublishingError(`${currency} amounts have ${d === 0 ? "no decimals" : `at most ${d} decimals`}`, 400, "quote.decimals");
+  if (discount?.kind === "AMOUNT" && toMinor(discount.value, d) > toMinor(quoteTotals(lines, null, currency).subtotal, d)) {
     throw new PublishingError("The discount is more than the quote's lines", 400, "quote.discount");
   }
 }
@@ -152,14 +168,15 @@ const audit = (db: Prisma.TransactionClient | typeof prisma, scope: { workspaceI
 
 /**
  * A new DRAFT quote, numbered from the brand's counter in the same transaction (one row update, so two creates at once
- * get distinct numbers). It has no validity until its invoice is sent (then 30 brand days, shopify-draft-orders.ts). The brand's first quote also turns on its SHOPIFY_QUOTES source (daily
+ * get distinct numbers). It has no validity until its invoice is sent (then 30 brand days, shopify-draft-orders.ts).
+ * The brand's first quote also turns on its SHOPIFY_QUOTES source (daily
  * status, expiry and payment reminders: server/quotes/status-sync.ts).
  */
 export async function createQuote(scope: QuoteScope, input: z.infer<typeof QuoteCreate>) {
   const currency = (await shopCurrency(scope)) ?? input.currency;
   if (!currency) throw new PublishingError("Say which currency the quote is in", 400, "quote.currency");
   const lines = await snapshotLines(scope, input.lines, currency);
-  checkDiscount(lines, input.discount);
+  checkDiscount(lines, input.discount, currency);
   const quote = await prisma.$transaction(async (tx) => {
     const [{ number }] = await tx.$queryRaw<{ number: number }[]>`
       INSERT INTO "BrandProfile" ("id", "workspaceId", "brandId", "nextQuoteNumber", "updatedAt") VALUES (${randomUUID()}, ${scope.workspaceId}, ${scope.brandId}, 2, now())
@@ -191,7 +208,7 @@ export async function editQuote(scope: QuoteScope, id: string, patch: z.infer<ty
   }
   const lines = lineInput ? await snapshotLines(scope, lineInput, q.currency) : quoteLines(q.lines);
   const nextDiscount = discount === undefined ? quoteDiscount(q.discount) : discount;
-  checkDiscount(lines, nextDiscount);
+  checkDiscount(lines, nextDiscount, q.currency);
   const blank = (v: string | null | undefined) => (v === undefined ? undefined : v || null);
   const { count } = await prisma.quote.updateMany({
     where: { id, workspaceId: scope.workspaceId, brandId: scope.brandId, version, status: { in: EDITABLE } },
@@ -236,27 +253,42 @@ export async function quoteAction(scope: QuoteScope, id: string, input: z.infer<
   return toQuoteDto(await loadQuote(scope, id));
 }
 
+const CANCELLABLE: QuoteStatus[] = ["DRAFT", "CREATED", "SENT", "EXPIRED"];
+/** Told to whoever cancels a quote whose invoice went out: cancelling here doesn't stop the customer paying it. */
+export const INVOICE_STAYS_PAYABLE = "Shopify's invoice stays payable until you delete the draft order in Shopify. If the customer pays it, the quote shows as accepted again.";
+
 /**
- * Remove a quote: a DRAFT never in Shopify is deleted; any other is CANCELLED here (its Shopify draft order is left
- * for a person: deleting it there is their call).
+ * Remove a quote: a DRAFT never in Shopify is deleted (refused while its create is being sent or unconfirmed, so no
+ * draft order is left in Shopify without its quote); a DRAFT, CREATED, SENT or EXPIRED one in Shopify is CANCELLED
+ * here, its Shopify draft order left for a person (deleting it there is their call; a payment after the cancel is
+ * still noticed by status-sync.ts). Returns the cancelled quote, with a notice when its invoice was sent; null when deleted.
  */
-export async function deleteQuote(scope: QuoteScope, id: string) {
+export async function deleteQuote(scope: QuoteScope, id: string): Promise<{ quote: QuoteDto; notice: string | null } | null> {
   const q = await loadQuote(scope, id);
+  if (!CANCELLABLE.includes(q.status)) throw new PublishingError("This quote is already closed", 409, "quote.closed");
+  const where = { id, workspaceId: scope.workspaceId, brandId: scope.brandId, status: q.status };
+  const deleting = !q.shopifyId && q.status === "DRAFT";
+  if (deleting) {
+    const inFlight = await prisma.shopifyWrite.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, entityType: "QUOTE", entityId: id, action: "DRAFT_ORDER_CREATE", status: { in: ["PENDING", "UNKNOWN"] } }, select: { id: true } });
+    if (inFlight) throw new PublishingError("Shopify hasn't confirmed this quote's draft order yet. Check it again before deleting the quote.", 409, "quote.createInFlight");
+  }
+  // ponytail: the in-flight check and the delete aren't one lock; a create confirmed in that instant leaves a draft in Shopify with no quote here (its tag names the id).
   await prisma.$transaction(async (tx) => {
-    if (!q.shopifyId && q.status === "DRAFT") {
-      await tx.quote.deleteMany({ where: { id, workspaceId: scope.workspaceId, brandId: scope.brandId, shopifyId: null, status: "DRAFT" } });
-    } else {
-      await tx.quote.updateMany({ where: { id, workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { status: "CANCELLED" } });
-      if (q.status === "SENT") await closeQuoteReminders(tx, q, "The quote was cancelled");
-    }
-    await audit(tx, scope, q.shopifyId || q.status !== "DRAFT" ? "quote.cancelled" : "quote.deleted", id, { number: q.number });
+    const { count } = deleting
+      ? await tx.quote.deleteMany({ where: { ...where, shopifyId: null } })
+      : await tx.quote.updateMany({ where, data: { status: "CANCELLED" } });
+    if (!count) throw changed();
+    if (q.status === "SENT") await closeQuoteReminders(tx, q, "The quote was cancelled");
+    await audit(tx, scope, deleting ? "quote.deleted" : "quote.cancelled", id, { number: q.number, from: q.status });
   });
+  if (deleting) return null;
+  return { quote: toQuoteDto(await loadQuote(scope, id)), notice: q.status === "SENT" ? INVOICE_STAYS_PAYABLE : null };
 }
 
 // ---- payment reminders ------------------------------------------------------------------------------------------
 
-/** A reminder task's requestId: one per quote, send day and day count (server/quotes/status-sync.ts makes them). */
-export const reminderKey = (quoteId: string, sentDay: string, days: number) => `quote:${quoteId}:${sentDay}:${days}`;
+/** A reminder task's requestId: one per quote, invoice send (its instant) and day count (server/quotes/status-sync.ts makes them). */
+export const reminderKey = (quoteId: string, sentAt: Date, days: number) => `quote:${quoteId}:${sentAt.getTime()}:${days}`;
 
 /** Closes the quote's open payment reminders (it left SENT) with a system comment saying why. */
 export async function closeQuoteReminders(tx: Prisma.TransactionClient, q: Pick<Quote, "id" | "workspaceId" | "brandId">, why: string) {

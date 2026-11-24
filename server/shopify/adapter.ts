@@ -35,6 +35,10 @@ export type DraftOrder = {
   invoiceSentAt: string | null;
   /** The order a completed draft became (status "COMPLETED") */
   orderId: string | null;
+  /** What the draft holds now, as DraftOrderInput sends it: how an unanswered update is recognised as having landed */
+  lines: DraftOrderLine[];
+  discount: DraftOrderInput["discount"];
+  note: string | null;
   updatedAt: string;
 };
 export type InvoiceInput = { to: string; subject: string; message: string };

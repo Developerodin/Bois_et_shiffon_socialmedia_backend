@@ -2,7 +2,7 @@ import type { Quote, ShopifyWriteAction } from "@prisma/client";
 import { AccessDeniedError } from "@/server/auth/errors";
 import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
-import { loadQuote, quoteDiscount, quoteLines, quoteTotals, toQuoteDto, type QuoteScope } from "@/server/quotes/quotes";
+import { closeQuoteReminders, loadQuote, minorDigits, quoteDiscount, quoteLines, quoteTotals, toMinor, toQuoteDto, type QuoteScope } from "@/server/quotes/quotes";
 import { PublishingError } from "@/server/services/publishing";
 import { askCartWriteAdapter, type DraftOrder, type DraftOrderInput, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
 import { confirmWrite, previewWrite, ShopifyWriteError } from "@/server/shopify/writes";
@@ -39,7 +39,7 @@ function build(q: Quote, action: DraftAction): DraftOrderWritePreview {
     discount,
     note: q.note,
     tag: quoteTag(q.id),
-    total: quoteTotals(lines, discount).total,
+    total: quoteTotals(lines, discount, q.currency).total,
   };
 }
 
@@ -71,20 +71,36 @@ function refusedLine(fields: string[] = []) {
  * A refused update of a draft that was completed in Shopify meanwhile (the customer paid): the quote is ACCEPTED with
  * its order, and the person is told. Returns whether that was it.
  */
-export async function completedInShopify(scope: { workspaceId: string; brandId: string }, q: Quote, adapter: ShopifyWriteAdapter) {
+export async function completedInShopify(scope: QuoteScope, q: Quote, adapter: ShopifyWriteAdapter) {
   if (!q.shopifyId) return false;
   const found = await adapter.lookupDraftOrder(target(scope), { id: q.shopifyId });
   if (!found.ok || found.value?.status !== "COMPLETED") return false;
-  await prisma.quote.updateMany({
-    where: { id: q.id, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["DRAFT", "CREATED", "SENT"] } },
-    data: { status: "ACCEPTED", orderId: found.value.orderId },
+  const orderId = found.value.orderId;
+  await prisma.$transaction(async (tx) => {
+    const { count } = await tx.quote.updateMany({
+      where: { id: q.id, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["DRAFT", "CREATED", "SENT"] } },
+      data: { status: "ACCEPTED", orderId },
+    });
+    if (!count) return;
+    if (q.status === "SENT") await closeQuoteReminders(tx, q, "The customer paid: the quote is accepted");
+    await tx.auditEvent.create({ data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "quote.accepted", entityType: "Quote", entityId: q.id, metadata: { from: q.status, orderId, source: "update-refused" } } });
   });
   return true;
+}
+
+/** Whether the draft holds exactly the lines, discount and note a payload sends (an update that landed). */
+export function holdsPayload(d: Pick<DraftOrder, "lines" | "discount" | "note">, p: DraftOrderWritePreview) {
+  const sent = input(p);
+  const digits = minorDigits(p.currency);
+  const line = (l: DraftOrder["lines"][number]) => [l.variantId ?? null, l.variantId ? null : l.title, l.quantity, toMinor(l.unitPrice, digits)];
+  const disc = (x: DraftOrder["discount"]) => (x ? [x.kind, x.kind === "PERCENT" ? toMinor(x.value, 2) : toMinor(x.value, digits)] : null);
+  return JSON.stringify([d.lines.map(line), disc(d.discount), d.note ?? null]) === JSON.stringify([sent.lines.map(line), disc(sent.discount), sent.note ?? null]);
 }
 
 /** Writes what the person confirmed, at most once; the quote follows Shopify's answer. Returns the quote. */
 export async function confirmDraftOrderWrite(scope: QuoteScope, quoteId: string, action: DraftAction, token: string, adapter: ShopifyWriteAdapter = askCartWriteAdapter) {
   let q = await loadQuote(scope, quoteId);
+  let built: DraftOrderWritePreview | null = null;
   const where = { id: q.id, workspaceId: scope.workspaceId, brandId: scope.brandId };
   try {
     await confirmWrite<DraftOrderWritePreview, DraftOrder>(
@@ -95,17 +111,19 @@ export async function confirmDraftOrderWrite(scope: QuoteScope, quoteId: string,
         permission: "crm.manage",
         rebuild: async () => {
           q = await loadQuote(scope, quoteId);
-          return { version: q.version, payload: build(q, action) };
+          built = build(q, action);
+          return { version: q.version, payload: built };
         },
         run: (a, payload, requestId) =>
           action === "create" ? a.createDraftOrder(target(scope), requestId, input(payload)) : a.updateDraftOrder(target(scope), requestId, q.shopifyId!, input(payload)),
-        reconcile: async (a, write) => {
+        reconcile: async (a) => {
           // A create by our tag (Shopify's search lags a few minutes: confirmWrite waits before a "Send again").
           if (action === "create") return a.lookupDraftOrder(target(scope), { tag: quoteTag(q.id) });
-          // An update by the draft having changed since the send started.
+          // An update by the draft holding what was confirmed (the rebuilt payload: confirmWrite checked it hashes the
+          // same), never by timestamps, which an edit in Shopify's admin or clock skew would fool.
           const found = await a.lookupDraftOrder(target(scope), { id: q.shopifyId! });
           if (!found.ok || !found.value) return found;
-          return { ok: true, value: new Date(found.value.updatedAt) >= write.startedAt ? found.value : null };
+          return { ok: true, value: built && holdsPayload(found.value, built) ? found.value : null };
         },
         onDone: async (tx, result, write) => {
           // Shopify's draft now holds the confirmed version; its subtotal is kept to compare with ours.
@@ -188,17 +206,22 @@ export async function confirmInvoice(scope: QuoteScope, quoteId: string, email: 
         return { version: q.version, payload: await buildInvoice(scope, q, email) };
       },
       run: (a, p, requestId) => a.sendInvoice(target(scope), requestId, q.shopifyId!, { to: p.to, subject: p.subject, message: p.message }),
-      reconcile: async (a, write) => {
-        // Sent when Shopify's invoiceSentAt is from this attempt on.
+      reconcile: async (a) => {
+        // Sent when Shopify records a send after the last one we know of (q.sentAt holds Shopify's own invoiceSentAt
+        // from the last confirmed send; none before the first): Shopify's clock against Shopify's clock.
+        // ponytail: a send from Shopify's admin also counts; an adapter answering without invoiceSentAt leaves our clock in sentAt.
         const found = await a.lookupDraftOrder(target(scope), { id: q.shopifyId! });
         if (!found.ok || !found.value) return found;
         const sentAt = found.value.invoiceSentAt;
-        return { ok: true, value: sentAt && new Date(sentAt) >= write.startedAt ? found.value : null };
+        return { ok: true, value: sentAt && (!q.sentAt || new Date(sentAt) > q.sentAt) ? found.value : null };
       },
       onDone: async (tx, result, write) => {
         // The sender owns the payment reminders (server/quotes/status-sync.ts).
         const sentAt = result.invoiceSentAt ? new Date(result.invoiceSentAt) : new Date();
+        // Valid through the send day + 30 (that day included); expired from the next brand day (status-sync.ts).
         const validUntil = new Date(`${addDays(zoneToday(zone, sentAt), QUOTE_LIMITS.validDays)}T00:00:00Z`);
+        // A re-send starts its own reminders: the last send's open ones close.
+        await closeQuoteReminders(tx, q, "The invoice was sent again");
         await tx.quote.updateMany({
           where: { ...where, status: { in: ["CREATED", "SENT"] } },
           data: { status: "SENT", sentAt, validUntil, sentById: write.actorUserId, invoiceUrl: result.invoiceUrl },

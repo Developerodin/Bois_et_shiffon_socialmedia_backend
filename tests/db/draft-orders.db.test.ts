@@ -97,6 +97,21 @@ describe("quotes as Shopify draft orders", () => {
     expect(shop.calls.filter((c) => c.method === "updateDraftOrder")).toHaveLength(1);
   });
 
+  it("a lost update isn't taken as landed when Shopify's draft holds something else (an admin edit)", async () => {
+    const shop = fakeShopify();
+    const q = await quote();
+    await send(q.id, "create", shop);
+    await editQuote(scope, q.id, QuoteEdit.parse({ version: 1, note: "Delivery in June" }));
+    const p = await previewDraftOrderWrite(scope, q.id, "update", {}, shop.adapter);
+    shop.fail("throw");
+    await refusal(confirmDraftOrderWrite(scope, q.id, "update", p.confirmToken, shop.adapter));
+    // Changed in Shopify's admin since: newer, but not what was confirmed.
+    Object.assign(shop.drafts.get("gid://shopify/DraftOrder/1")!, { note: "Changed by hand", updatedAt: new Date(Date.now() + 60_000).toISOString() });
+    const again = await previewDraftOrderWrite(scope, q.id, "update", {}, shop.adapter);
+    expect(await refusal(confirmDraftOrderWrite(scope, q.id, "update", again.confirmToken, shop.adapter))).toMatchObject({ status: 409, code: "NOT_CONFIRMED_YET" });
+    expect(await prisma.quote.findUniqueOrThrow({ where: { id: q.id } })).toMatchObject({ syncedVersion: 1 });
+  });
+
   it("without write_draft_orders the preview says so and the confirm is a 422", async () => {
     const shop = fakeShopify({ scopes: ["write_content"] });
     const q = await quote();

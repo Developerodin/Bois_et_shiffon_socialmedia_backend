@@ -85,8 +85,22 @@ describe("quotes", () => {
     expect(await prisma.quote.findUnique({ where: { id: a.id } })).toBeNull();
     const b = await create({ lines: [] });
     await prisma.quote.update({ where: { id: b.id }, data: { status: "CREATED", shopifyId: "gid://shopify/DraftOrder/2" } });
-    await deleteQuote(scope, b.id);
-    expect((await prisma.quote.findUniqueOrThrow({ where: { id: b.id } })).status).toBe("CANCELLED");
+    expect(await deleteQuote(scope, b.id)).toMatchObject({ quote: { status: "CANCELLED" }, notice: null });
+    // Closed quotes stay closed.
+    expect(await refusal(deleteQuote(scope, b.id))).toMatchObject({ status: 409, code: "quote.closed" });
+  });
+
+  it("a draft whose create in Shopify is unconfirmed can't be deleted", async () => {
+    const q = await create({ lines: [] });
+    await prisma.shopifyWrite.create({ data: { workspaceId: ws, brandId: brand, entityType: "QUOTE", entityId: q.id, version: 1, action: "DRAFT_ORDER_CREATE", payloadHash: "h", status: "UNKNOWN", actorUserId: scope.userId } });
+    expect(await refusal(deleteQuote(scope, q.id))).toMatchObject({ status: 409, code: "quote.createInFlight" });
+  });
+
+  it("prices follow the currency's decimals: none for JPY, three for KWD", async () => {
+    const s2 = { ...scope, brandId: other };
+    expect(await createQuote(s2, QuoteCreate.parse({ currency: "JPY", lines: [{ title: "Chair", quantity: 3, unitPrice: "1200" }], discount: { kind: "PERCENT", value: "10" } }))).toMatchObject({ totals: { subtotal: "3600", discount: "360", total: "3240" } });
+    expect(await refusal(createQuote(s2, QuoteCreate.parse({ currency: "JPY", lines: [{ title: "Chair", quantity: 1, unitPrice: "1200.5" }] })))).toMatchObject({ status: 400, code: "quote.decimals" });
+    expect(await createQuote(s2, QuoteCreate.parse({ currency: "KWD", lines: [{ title: "Chair", quantity: 2, unitPrice: "1.255" }] }))).toMatchObject({ totals: { total: "2.510" } });
   });
 
   it("a brand without a Shopify catalogue gives the currency; a line in another currency is refused", async () => {

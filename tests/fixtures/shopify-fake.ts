@@ -15,6 +15,7 @@ export function fakeShopify(opts: { connected?: boolean; scopes?: string[] } = {
   let roundingCents = 0;
   const at = () => new Date().toISOString();
   const cents = (s: string) => Math.round(Number(s) * 100);
+  const held = (input: DraftOrderInput) => ({ lines: input.lines, discount: input.discount ?? null, note: input.note ?? null });
   const subtotal = (input: DraftOrderInput) => {
     const sum = input.lines.reduce((n, l) => n + l.quantity * cents(l.unitPrice), 0);
     const off = !input.discount ? 0 : input.discount.kind === "PERCENT" ? Math.round((sum * Number(input.discount.value)) / 100) : Math.min(cents(input.discount.value), sum);
@@ -37,11 +38,11 @@ export function fakeShopify(opts: { connected?: boolean; scopes?: string[] } = {
     createDraftOrder: (_t, requestId, input) =>
       write("createDraftOrder", requestId, () => {
         const n = drafts.size + 1;
-        const d = { shopifyId: `gid://shopify/DraftOrder/${n}`, name: `#D${n}`, status: "OPEN", subtotal: subtotal(input), invoiceUrl: `https://shop.test/invoices/${n}`, invoiceSentAt: null, orderId: null, updatedAt: at(), tags: [input.tag] };
+        const d = { shopifyId: `gid://shopify/DraftOrder/${n}`, name: `#D${n}`, status: "OPEN", subtotal: subtotal(input), invoiceUrl: `https://shop.test/invoices/${n}`, invoiceSentAt: null, orderId: null, updatedAt: at(), tags: [input.tag], ...held(input) };
         drafts.set(d.shopifyId, d);
         return d;
       }),
-    updateDraftOrder: (_t, requestId, id, input) => write("updateDraftOrder", requestId, () => Object.assign(drafts.get(id)!, { subtotal: subtotal(input), updatedAt: at() })),
+    updateDraftOrder: (_t, requestId, id, input) => write("updateDraftOrder", requestId, () => Object.assign(drafts.get(id)!, { subtotal: subtotal(input), updatedAt: at(), ...held(input) })),
     sendInvoice: (_t, requestId, id) => write("sendInvoice", requestId, () => Object.assign(drafts.get(id)!, { invoiceSentAt: at() })),
     lookupDraftOrder: async (_t, by) => {
       calls.push({ method: "lookupDraftOrder" });

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
 import { listDataSources, runSync } from "@/server/data/sources";
-import { createQuote, QuoteCreate, quoteAction, type QuoteScope } from "@/server/quotes/quotes";
+import { createQuote, deleteQuote, INVOICE_STAYS_PAYABLE, QuoteCreate, quoteAction, type QuoteScope } from "@/server/quotes/quotes";
 import { confirmDraftOrderWrite, confirmInvoice, previewDraftOrderWrite, previewInvoice } from "@/server/quotes/shopify-draft-orders";
 import { syncQuoteStatus } from "@/server/quotes/status-sync";
 import type { PermissionKey } from "@/shared";
@@ -109,5 +109,65 @@ describe("quote status", () => {
     const source = await prisma.dataSource.findFirstOrThrow({ where: { brandId: brand, kind: "SHOPIFY_QUOTES" } });
     const out = await runSync("SHOPIFY_QUOTES", { source, connection: null, mode: "daily", lease: { jobId: "j", leasedBy: "w" }, signal: AbortSignal.timeout(10_000) } as never);
     expect(out.reason).toBeNull();
+  });
+
+  it("a quote paid on its last day is ACCEPTED, not EXPIRED, even after a day of failed reads", async () => {
+    const shop = fakeShopify();
+    const q = await sentQuote(shop);
+    const n = Number(q.shopifyName!.slice(2));
+    Object.assign(draftOf(shop, n), { status: "COMPLETED", orderId: "gid://shopify/Order/31" });
+    const real = shop.adapter.lookupDraftOrder;
+    const lookup = vi.spyOn(shop.adapter, "lookupDraftOrder").mockImplementation((t, by) => ("id" in by && by.id === `gid://shopify/DraftOrder/${n}` ? Promise.reject(new Error("timeout")) : real(t, by)));
+    // Day 31: the read fails, so the quote isn't expired on a guess; the run says it is partial.
+    const out = await syncQuoteStatus(scope, shop.adapter, new Date(Date.now() + 31 * DAY));
+    expect(out.reason).toBe("partial");
+    expect(await status(q.id)).toBe("SENT");
+    lookup.mockRestore();
+    await syncQuoteStatus(scope, shop.adapter, new Date(Date.now() + 32 * DAY));
+    expect(await prisma.quote.findUniqueOrThrow({ where: { id: q.id } })).toMatchObject({ status: "ACCEPTED", orderId: "gid://shopify/Order/31" });
+  });
+
+  it("one failed read skips only that quote: the others are read and reminded", async () => {
+    const shop = fakeShopify();
+    const a = await sentQuote(shop);
+    const b = await sentQuote(shop);
+    const real = shop.adapter.lookupDraftOrder;
+    vi.spyOn(shop.adapter, "lookupDraftOrder").mockImplementation((t, by) => ("id" in by && by.id === `gid://shopify/DraftOrder/${Number(a.shopifyName!.slice(2))}` ? Promise.reject(new Error("boom")) : real(t, by)));
+    shop.drafts.delete(`gid://shopify/DraftOrder/${Number(b.shopifyName!.slice(2))}`);
+    await syncQuoteStatus(scope, shop.adapter, new Date(Date.now() + 7 * DAY));
+    expect(await status(b.id)).toBe("CANCELLED");
+    expect(await reminders(a.id)).toHaveLength(1);
+  });
+
+  it("a cancelled quote later paid in Shopify becomes ACCEPTED, with a note for the team", async () => {
+    const shop = fakeShopify();
+    const q = await sentQuote(shop);
+    const out = await deleteQuote(scope, q.id);
+    expect(out).toMatchObject({ quote: { status: "CANCELLED" }, notice: INVOICE_STAYS_PAYABLE });
+    Object.assign(draftOf(shop, Number(q.shopifyName!.slice(2))), { status: "COMPLETED", orderId: "gid://shopify/Order/8" });
+    await syncQuoteStatus(scope, shop.adapter);
+    expect(await prisma.quote.findUniqueOrThrow({ where: { id: q.id } })).toMatchObject({ status: "ACCEPTED", orderId: "gid://shopify/Order/8", internalNote: "Paid in Shopify after it was cancelled here." });
+  });
+
+  it("a re-send of the invoice closes the last send's reminders and starts its own", async () => {
+    const shop = fakeShopify();
+    const q = await sentQuote(shop);
+    await syncQuoteStatus(scope, shop.adapter, new Date(Date.now() + 7 * DAY));
+    expect(await reminders(q.id)).toHaveLength(1);
+    const again = await previewInvoice(scope, q.id, {}, { again: true }, shop.adapter);
+    await confirmInvoice(scope, q.id, {}, again.confirmToken, shop.adapter);
+    expect((await reminders(q.id)).map((t) => t.status)).toEqual(["DONE"]);
+    await syncQuoteStatus(scope, shop.adapter, new Date(Date.now() + 7 * DAY + 1000));
+    expect((await reminders(q.id)).map((t) => t.status)).toEqual(["DONE", "TODO"]);
+  });
+
+  it("past 250 reads a run is partial", async () => {
+    const other = (await prisma.brand.create({ data: { workspaceId: ws, slug: "many", displayName: "Many" } })).id;
+    await prisma.quote.createMany({
+      data: Array.from({ length: 251 }, (_, i) => ({ workspaceId: ws, brandId: other, number: i + 1, status: "CREATED" as const, currency: "EUR", lines: [], shopifyId: `gid://shopify/DraftOrder/m${i}` })),
+    });
+    const adapter = { ...fakeShopify().adapter, lookupDraftOrder: vi.fn(async () => ({ ok: true as const, value: { status: "OPEN" } as never })) };
+    expect(await syncQuoteStatus({ workspaceId: ws, brandId: other }, adapter)).toEqual({ count: 0, reason: "partial" });
+    expect(adapter.lookupDraftOrder).toHaveBeenCalledTimes(250);
   });
 });
