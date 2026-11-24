@@ -45,6 +45,8 @@ export async function enqueueJob(input: EnqueueInput, db: Db = prisma) {
  * is about fairness, not correctness. The count uses the (status, runAt) index's RUNNING rows, a handful at most.
  */
 export const DATA_RUNNING_MAX = 2;
+/** The site reader (catalog.pages, server/catalog/page-reader.ts) runs on one runner at a time, outside the data.% pool. Same unlocked count. */
+export const PAGES_RUNNING_MAX = 1;
 
 export async function claimNextJob(workerId: string): Promise<Job | null> {
   const rows = await prisma.$queryRaw<Job[]>`
@@ -63,6 +65,10 @@ export async function claimNextJob(workerId: string): Promise<Job | null> {
           SELECT count(*) FROM "Job" r
           WHERE r.type LIKE 'data.%' AND r.status = 'RUNNING' AND r."leasedUntil" >= now()
         ) < ${DATA_RUNNING_MAX})
+        AND (type <> 'catalog.pages' OR (
+          SELECT count(*) FROM "Job" r
+          WHERE r.type = 'catalog.pages' AND r.status = 'RUNNING' AND r."leasedUntil" >= now()
+        ) < ${PAGES_RUNNING_MAX})
       ORDER BY "runAt"
       FOR UPDATE SKIP LOCKED
       LIMIT 1

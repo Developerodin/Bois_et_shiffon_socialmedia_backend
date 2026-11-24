@@ -17,9 +17,12 @@ import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/c
  * rows of the other synced source, are archived only after a complete fetch.
  */
 export const CATALOG_SYNC_JOB = "catalog.sync";
+/** The site reader (server/catalog/page-reader.ts): a brand whose website has no feed has its product pages read. */
+export const CATALOG_PAGES_JOB = "catalog.pages";
 
 type Scope = { workspaceId: string; brandId: string };
-type Note = { error: string; reason: SyncReason };
+/** `error` null: a status, not a failure ("reading"). */
+export type Note = { error: string | null; reason: SyncReason };
 
 /** What a sync writes: every field it owns, except stockCheckedAt and archivedAt, which saving sets. */
 export type SyncedRow = {
@@ -54,6 +57,7 @@ const BLOCKED: Note = { error: "Your website blocks our product reader, so we ca
 const PARTIAL: Note = { error: "Only part of the catalogue could be read, so no products were archived.", reason: "partial" };
 const FAILED: Note = { error: "The last sync couldn't read the products. Press Sync now to try again.", reason: "failed" };
 const REFUSED: Note = { error: SHOPIFY_REFUSED, reason: "shopify-refused" };
+export const READING: Note = { error: null, reason: "reading" };
 
 export const str = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
 
@@ -232,15 +236,22 @@ async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal): Pr
   return capRows({ rows: shopifyRows(variants, currency), complete, note: complete ? undefined : PARTIAL });
 }
 
-/** Which source a brand syncs from: its newest working Shopify connection, else a broken one, else the website. */
+/**
+ * Which source a brand syncs from: its newest working Shopify connection, else a broken one, else the website: its
+ * product pages (SITE) once its last sync found no feed there (catalogSync.source), else its feed (WEBSITE).
+ */
 export async function catalogSource(scope: Scope) {
   const shop = await prisma.integrationConnection.findFirst({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId, provider: "SHOPIFY", status: { not: "REVOKED" } },
     orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
   });
   if (shop) return { source: "SHOPIFY" as const, shop };
-  const profile = await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { websiteUrl: true } });
-  return profile?.websiteUrl ? { source: "WEBSITE" as const, websiteUrl: profile.websiteUrl } : { source: null };
+  const profile = await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { websiteUrl: true, catalogSync: true } });
+  if (!profile?.websiteUrl) return { source: null };
+  const last = profile.catalogSync as CatalogSync | null;
+  return last?.source === "SITE"
+    ? { source: "SITE" as const, websiteUrl: profile.websiteUrl, capped: last.pages?.capped ?? false }
+    : { source: "WEBSITE" as const, websiteUrl: profile.websiteUrl };
 }
 
 /** The fields a save writes (SavedRow's keys), read back to tell changed rows from unchanged ones. */
@@ -388,6 +399,11 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
  */
 export class CatalogBusy extends Error {}
 export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL">, fetched: { rows: SavedRow[]; complete: boolean }, opts: SaveOptions, lockWaitMs: number) {
+  return withCatalogLock(scope, lockWaitMs, (tx) => saveRows(tx, scope, source, fetched, opts));
+}
+
+/** `fn` in a transaction holding the brand's catalogue lock (lockedSave's lock, wait and timeout), for saves that write more than saveRows. */
+export function withCatalogLock<T>(scope: Scope, lockWaitMs: number, fn: (tx: Db) => Promise<T>) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('lock_timeout', ${String(lockWaitMs)}, true)`;
     try {
@@ -397,7 +413,7 @@ export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL"
       throw e;
     }
     await tx.$executeRaw`SELECT set_config('lock_timeout', '0', true)`;
-    return saveRows(tx, scope, source, fetched, opts);
+    return fn(tx);
   }, { timeout: lockWaitMs + 60_000 });
 }
 
@@ -405,7 +421,7 @@ export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL"
 const archiveShopifyRows = (scope: Scope) =>
   prisma.product.updateMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, source: "SHOPIFY", archivedAt: null }, data: { archivedAt: new Date() } });
 
-const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count">, note: Note | null) =>
+export const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count" | "pages">, note: Note | null) =>
   prisma.brandProfile.updateMany({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId },
     data: { catalogSync: { ...sync, error: note?.error ?? null, reason: note?.reason ?? null } },
@@ -431,11 +447,17 @@ export async function runCatalogSync(payload: unknown) {
   }
   const signal = AbortSignal.timeout(DEADLINE_MS);
   try {
+    // A SITE brand's feed is checked every day too: once the site has one, the feed takes over (and archives SITE rows).
     const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal) : await websiteFeed(found.websiteUrl, signal);
-    if (fetched.note === NOT_A_FEED) await archiveShopifyRows(scope);
+    if (fetched.note === NOT_A_FEED) {
+      await archiveShopifyRows(scope);
+      await startPageChain(scope);
+      return void (await record(scope, { at, source: "SITE", ...(await siteProgress(scope, found.source === "SITE" && found.capped)) }, READING));
+    }
+    const source = found.source === "SHOPIFY" ? "SHOPIFY" : "WEBSITE";
     // Up to 2 minutes behind an import or another sync's save; past that the job is retried, nothing recorded.
-    const { seen: count } = await lockedSave(scope, found.source, fetched, {}, 120_000);
-    await record(scope, { at, source: found.source, count }, fetched.note ?? null);
+    const { seen: count } = await lockedSave(scope, source, fetched, {}, 120_000);
+    await record(scope, { at, source, count }, fetched.note ?? null);
   } catch (error) {
     if (error instanceof CatalogBusy) throw error;
     const refused = error instanceof ReconnectNeeded;
@@ -458,13 +480,51 @@ export function enqueueCatalogSync(scope: Scope, key?: string) {
   });
 }
 
-/** True while a sync for this brand is queued or running (what the screens poll for). */
+/** True while a sync or the site reader for this brand is queued or running (what the screens poll for). */
 export async function catalogSyncRunning(scope: Scope) {
   const job = await prisma.job.findFirst({
-    where: { type: CATALOG_SYNC_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["PENDING", "RUNNING"] } },
+    where: { type: { in: [CATALOG_SYNC_JOB, CATALOG_PAGES_JOB] }, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["PENDING", "RUNNING"] } },
     select: { id: true },
   });
   return job !== null;
+}
+
+/** The site reader's job key: one per step of a day's chain; a chain started again by hand that day is `manual:<n>`. */
+export const pagesKey = (brandId: string, day: string, step: number, manual?: number) =>
+  `catalog-pages:${brandId}:${day}:${manual ? `manual:${manual}:` : ""}${step}`;
+
+/**
+ * Starts today's site-reader chain, unless one is queued or running for the brand. When today's chain already ran and
+ * stopped (its budget, the site refused, or it finished), this is Sync now (or a second daily sync): a new `manual:<n>`
+ * chain, since the completed `:0` job would swallow its key. The budgets still hold, so a spent day reads nothing more.
+ * ponytail: check-then-create like requestCatalogSync; two at once can queue two chains, and the second one's
+ * handler exits while the first runs (one chain per brand).
+ */
+export async function startPageChain(scope: Scope, day = new Date().toISOString().slice(0, 10)) {
+  const where = { type: CATALOG_PAGES_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId };
+  if (await prisma.job.findFirst({ where: { ...where, status: { in: ["PENDING", "RUNNING"] } }, select: { id: true } })) return;
+  const ranToday = await prisma.job.findUnique({ where: { idempotencyKey: pagesKey(scope.brandId, day, 0) }, select: { id: true } });
+  const manual = ranToday
+    ? 1 + (await prisma.job.count({ where: { ...where, idempotencyKey: { startsWith: `catalog-pages:${scope.brandId}:${day}:manual:`, endsWith: ":0" } } }))
+    : undefined;
+  await enqueueJob({
+    type: CATALOG_PAGES_JOB,
+    workspaceId: scope.workspaceId,
+    brandId: scope.brandId,
+    payload: { workspaceId: scope.workspaceId, brandId: scope.brandId, day, step: 0, ...(manual && { manual }) },
+    idempotencyKey: pagesKey(scope.brandId, day, 0, manual),
+  });
+}
+
+/** What the site reader has so far: live SITE products, and its pages read of those known. */
+export async function siteProgress(scope: Scope, capped: boolean) {
+  const where = { workspaceId: scope.workspaceId, brandId: scope.brandId };
+  const [count, total, read] = await Promise.all([
+    prisma.product.count({ where: { ...where, source: "SITE", archivedAt: null } }),
+    prisma.catalogPage.count({ where }),
+    prisma.catalogPage.count({ where: { ...where, readAt: { not: null } } }),
+  ]);
+  return { count, pages: { read, total, capped } };
 }
 
 /**

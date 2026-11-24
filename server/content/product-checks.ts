@@ -61,20 +61,23 @@ export type ProductCheckResult = {
 export type GateIssue = { productId: string; kind: "availability" | "price"; message: string; refuses: boolean; overridable: boolean };
 
 const STALE_MS = 50 * 3_600_000; // two missed daily syncs
+// A page the site reader read stays true for a week (it re-reads after 7 days) and a day of slack.
+const SITE_STALE_MS = 8 * 86_400_000;
 /** The product ids a version body links (`body.productIds`). */
 export const linkedIds = (body: unknown) => (body as { productIds?: string[] } | null | undefined)?.productIds ?? [];
 
 /**
  * stockState(group of live variant rows, now) → gone (empty group) / in (a fresh variant claims stock) /
  * unconfirmed (only stale variants claim stock) / out (none claims, one reports) / unknown (none reports).
- * Person-owned rows (MANUAL, IMPORT) are always fresh; a synced row is fresh when its `stockCheckedAt` is null or at most 50 h old.
+ * Person-owned rows (MANUAL, IMPORT) are always fresh; a synced row is fresh when its `stockCheckedAt` is null or at most 50 h old
+ * (8 days for SITE rows, read from product pages once a week).
  * ponytail: rows past the sync's MAX_ROWS cap are never stamped, so their stock turns unconfirmed after 50 h;
  * paging the sync past the cap is the upgrade.
  */
 export function stockState(group: StockFields[], now: Date): StockState {
   if (!group.length) return "gone";
   const claims = (r: StockFields) => (r.stockQuantity !== null && r.stockQuantity > 0) || r.inStock === true;
-  const fresh = (r: StockFields) => personOwned(r.source) || r.stockCheckedAt === null || now.getTime() - r.stockCheckedAt.getTime() <= STALE_MS;
+  const fresh = (r: StockFields) => personOwned(r.source) || r.stockCheckedAt === null || now.getTime() - r.stockCheckedAt.getTime() <= (r.source === "SITE" ? SITE_STALE_MS : STALE_MS);
   if (group.some((r) => claims(r) && fresh(r))) return "in";
   if (group.some(claims)) return "unconfirmed";
   return group.some((r) => r.inStock !== null || r.stockQuantity !== null) ? "out" : "unknown";

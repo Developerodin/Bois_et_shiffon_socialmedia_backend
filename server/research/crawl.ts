@@ -99,14 +99,17 @@ export async function safeFetch(raw: string, accept = "text/html", signal?: Abor
   return { url, status, body: Buffer.from(bytes).toString("utf8"), contentType };
 }
 
-/** Same guard as safeFetch, raw bytes (images). `truncated` = the body hit maxBytes and was cut. `signal` = caller's overall deadline. */
-export async function safeFetchBytes(raw: string, accept: string, maxBytes = MAX_BYTES, signal?: AbortSignal, timeoutMs = TIMEOUT_MS): Promise<{ url: URL; status: number; bytes: Uint8Array; contentType: string; truncated: boolean }> {
+/**
+ * Same guard as safeFetch, raw bytes (images). `truncated` = the body hit maxBytes and was cut. `signal` = caller's overall deadline.
+ * `extra`: more request headers (conditional ones: If-None-Match, If-Modified-Since); `headers` = the final response's.
+ */
+export async function safeFetchBytes(raw: string, accept: string, maxBytes = MAX_BYTES, signal?: AbortSignal, timeoutMs = TIMEOUT_MS, extra: Record<string, string> = {}): Promise<{ url: URL; status: number; bytes: Uint8Array; contentType: string; truncated: boolean; headers: Pick<Headers, "get"> }> {
   let url = await assertPublicUrl(raw);
   for (let hop = 0; hop < 4; hop++) {
     const res = await fetch(url, {
       dispatcher: PINNED,
       redirect: "manual",
-      headers: { "user-agent": USER_AGENT, accept },
+      headers: { ...extra, "user-agent": USER_AGENT, accept },
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
@@ -135,6 +138,7 @@ export async function safeFetchBytes(raw: string, accept: string, maxBytes = MAX
       bytes: Buffer.concat(chunks),
       contentType: res.headers.get("content-type") ?? "",
       truncated,
+      headers: res.headers,
     };
   }
   throw new CrawlError("Too many redirects");

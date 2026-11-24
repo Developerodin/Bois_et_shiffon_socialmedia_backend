@@ -9,7 +9,8 @@ import {
 } from "@/server/agents/engine";
 import { AGENTS } from "@/server/agents/registry";
 import { AiProviderError } from "@/server/ai/provider";
-import { CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
+import { runCatalogPages } from "@/server/catalog/page-reader";
+import { CATALOG_PAGES_JOB, CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
 import { DATA_SYNC_JOB, enqueueDailyDataSyncs, runDataSync } from "@/server/data/sources";
 import { ensurePostMetricSources } from "@/server/data/post-metric-sync"; // also registers the POST_METRICS runner
 import "@/server/data/shopify-orders-sync"; // registers the SHOPIFY_ORDERS runner
@@ -44,6 +45,7 @@ export const DAILY_SWEEP_JOB = "system.daily-sweep";
 
 const HANDLERS: Record<string, Handler> = {
   [AGENT_RUN_JOB]: { run: executeAgentRun, onFailure: onAgentRunFailure },
+  [CATALOG_PAGES_JOB]: { run: runCatalogPages },
   [CATALOG_SYNC_JOB]: { run: runCatalogSync },
   [DAILY_SWEEP_JOB]: { run: dailySweep },
   [DATA_SYNC_JOB]: { run: runDataSync },
