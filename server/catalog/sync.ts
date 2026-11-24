@@ -51,7 +51,7 @@ const DEADLINE_MS = 240_000;
 const NOT_A_FEED: Note = { error: "Your website doesn't publish a product feed we can read (Shopify stores do). Connect Shopify or add products by hand.", reason: "not-a-feed" };
 // 401/403 on the feed: the site turns automated readers away (bot protection), so we can't tell whether it has a feed.
 const BLOCKED: Note = { error: "Your website blocks our product reader, so we can't read its products. Connect Shopify or add products by hand.", reason: "blocked" };
-const PARTIAL: Note ={ error: "Only part of the catalogue could be read, so no products were archived.", reason: "partial" };
+const PARTIAL: Note = { error: "Only part of the catalogue could be read, so no products were archived.", reason: "partial" };
 const FAILED: Note = { error: "The last sync couldn't read the products. Press Sync now to try again.", reason: "failed" };
 const REFUSED: Note = { error: SHOPIFY_REFUSED, reason: "shopify-refused" };
 
@@ -252,10 +252,15 @@ type SaveOptions = {
   keys?: string[];
   /**
    * IMPORT: incoming externalId -> id of a stored row it updates (that row takes the new externalId), asked only for rows
-   * whose own key isn't stored. A stored row is claimed once; a second claim or an unknown id creates a new row instead.
+   * whose own key isn't stored, with the ids already claimed by their own key. A stored row is claimed once; a second
+   * claim or an unknown id creates a new row instead.
    */
-  match?: (rows: SavedRow[], stored: Stored[]) => Map<string, string>;
-  /** IMPORT: stock and price fields the file has no column for: a matched row keeps its stored value, a new row has none. */
+  match?: (rows: SavedRow[], stored: Stored[], claimed: ReadonlySet<string>) => Map<string, string>;
+  /**
+   * IMPORT: stock and price fields the file has no column for: a matched row keeps its stored value, a new row has none.
+   * The caller keeps pairs whole (price with compareAtPrice, inStock with stockQuantity), so a kept value never
+   * contradicts a written one.
+   */
   keep?: KeptField[];
 };
 type KeptField = "price" | "compareAtPrice" | "inStock" | "stockQuantity";
@@ -281,7 +286,7 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
   if (opts.match) {
     const byId = new Map(stored.map((p) => [p.id, p]));
     const claimed = new Set([...target.values()].map((p) => p.id));
-    for (const [key, id] of opts.match(unique.filter((r) => !target.has(r.externalId)), stored)) {
+    for (const [key, id] of opts.match(unique.filter((r) => !target.has(r.externalId)), stored, claimed)) {
       const p = byId.get(id);
       if (p && !claimed.has(id) && !target.has(key)) {
         target.set(key, p);
@@ -355,23 +360,23 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
 
 /**
  * saveRows in a transaction holding the brand's catalogue lock, so an import and a sync of one brand (or two imports)
- * never interleave: the second waits for the first to commit. 60 s covers MAX_ROWS rows (well under 5 s on a test DB).
- * `lockWaitMs` (a request, which has its own time limit): wait at most that long for the lock, then throw CatalogBusy.
- * Prisma's maxWait only covers getting a connection, so the wait is Postgres' lock_timeout, for the lock only.
+ * never interleave: the second waits for the first to commit. It waits at most `lockWaitMs` for the lock (Postgres'
+ * lock_timeout, for the lock only: Prisma's maxWait only covers getting a connection), then throws CatalogBusy; the
+ * save then has 60 s, which covers MAX_ROWS rows (well under 5 s on a test DB).
  */
 export class CatalogBusy extends Error {}
-export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL">, fetched: { rows: SavedRow[]; complete: boolean }, opts: SaveOptions = {}, lockWaitMs?: number) {
+export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL">, fetched: { rows: SavedRow[]; complete: boolean }, opts: SaveOptions, lockWaitMs: number) {
   return prisma.$transaction(async (tx) => {
-    if (lockWaitMs) await tx.$executeRaw`SELECT set_config('lock_timeout', ${String(lockWaitMs)}, true)`;
+    await tx.$executeRaw`SELECT set_config('lock_timeout', ${String(lockWaitMs)}, true)`;
     try {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('catalog:' || ${scope.brandId}))`;
     } catch (e) {
-      if (lockWaitMs && /lock timeout/i.test(String(e))) throw new CatalogBusy("Another import or sync of this catalogue is running");
+      if (/lock timeout/i.test(String(e))) throw new CatalogBusy("Another import or sync of this catalogue is running");
       throw e;
     }
-    if (lockWaitMs) await tx.$executeRaw`SELECT set_config('lock_timeout', '0', true)`;
+    await tx.$executeRaw`SELECT set_config('lock_timeout', '0', true)`;
     return saveRows(tx, scope, source, fetched, opts);
-  }, { timeout: 60_000 });
+  }, { timeout: lockWaitMs + 60_000 });
 }
 
 /** With no Shopify connection and no website feed, nothing updates SHOPIFY rows any more: their stock would go stale. */
@@ -406,9 +411,11 @@ export async function runCatalogSync(payload: unknown) {
   try {
     const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal) : await websiteFeed(found.websiteUrl, signal);
     if (fetched.note === NOT_A_FEED) await archiveShopifyRows(scope);
-    const { seen: count } = await lockedSave(scope, found.source, fetched);
+    // Up to 2 minutes behind an import or another sync's save; past that the job is retried, nothing recorded.
+    const { seen: count } = await lockedSave(scope, found.source, fetched, {}, 120_000);
     await record(scope, { at, source: found.source, count }, fetched.note ?? null);
   } catch (error) {
+    if (error instanceof CatalogBusy) throw error;
     const refused = error instanceof ReconnectNeeded;
     if (refused && found.source === "SHOPIFY") await markReconnect(found.shop.id, SHOPIFY_REFUSED);
     // Messages here carry statuses and Shopify error codes only, never a token.
@@ -441,10 +448,9 @@ export async function catalogSyncRunning(scope: Scope) {
 /**
  * "Sync now": nothing new while this brand's sync is queued or running (a double click, two people), else a new job.
  * ponytail: check-then-create, so two presses in the same instant can queue two syncs. With the worker's parallel
- * loops they (or one with the daily or connect-time sync) can run at the same time; nothing serialises syncs per brand.
- * The overlap is harmless: rows are last-writer-wins, so the slower one's fetch (at most the 4-minute deadline older)
- * can land last, and a product the shop added in between can show archived. No row, credit or connection is lost, and
- * the next sync corrects it. The save itself holds the brand's catalogue lock (lockedSave), so two saves never interleave.
+ * loops they (or one with the daily or connect-time sync) can run at the same time. Saves are serialised per brand by
+ * lockedSave; the two fetches may still run at once, and the later save wins: its fetch can be up to the 4-minute
+ * deadline older, so a product the shop added in between can show archived until the next sync corrects it.
  */
 export async function requestCatalogSync(scope: Scope) {
   if (await catalogSyncRunning(scope)) return { queued: false };

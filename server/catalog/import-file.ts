@@ -261,7 +261,9 @@ function value(attrs: string, body: string, shared: string[]): string {
   const v = unescapeXml(first(body, "v")?.body ?? "");
   if (type === "s") return v === "" ? "" : (shared[Number(v)] ?? "");
   if (type === "e") return "";
-  return v.slice(0, MAX_CELL); // n, str, b ("1"/"0"), dates as their serial number
+  // Numbers (dates too, as their serial) as JavaScript prints them: Excel stores 35.88 as "35.880000000000003".
+  if ((type === undefined || type === "n") && v !== "" && Number.isFinite(Number(v))) return String(Number(v));
+  return v.slice(0, MAX_CELL); // str, b ("1"/"0")
 }
 
 function parseXlsx(bytes: Uint8Array): Sheet {

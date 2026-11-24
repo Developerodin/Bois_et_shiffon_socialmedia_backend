@@ -36,3 +36,13 @@ export function fromAccessError(error: unknown) {
     status: 500,
   });
 }
+
+/**
+ * Upload size guard, before formData() (which buffers the whole body): 411 for a missing Content-Length (a chunked
+ * request) or one that isn't a number, 413 past `maxBytes`, else null. Callers word the problem themselves.
+ */
+export function uploadLengthStatus(request: Request, maxBytes: number): 411 | 413 | null {
+  const length = request.headers.get("content-length");
+  if (length === null || !/^\d+$/.test(length)) return 411;
+  return Number(length) > maxBytes ? 413 : null;
+}

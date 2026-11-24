@@ -77,6 +77,13 @@ describe("product import", () => {
     expect(p.stockCheckedAt!.getTime()).toBeGreaterThan(old.getTime());
   });
 
+  it("a file with only an in-stock column clears the stored quantity, so 'out of stock' isn't contradicted", async () => {
+    await upload("Name,SKU,Stock,Price\nMilo,A,5,10", ["title", "sku", "stockQuantity", "price"]);
+    await upload("Name,SKU,In stock\nMilo,A,no", ["title", "sku", "inStock"]);
+    const p = await prisma.product.findFirstOrThrow({ where: { workspaceId: ws, externalId: "sku:A" } });
+    expect([p.inStock, p.stockQuantity, p.price?.toFixed(2)]).toEqual([false, null, "10.00"]);
+  });
+
   it("a save that can't get the brand's lock in time gives up with CatalogBusy and writes nothing", async () => {
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));

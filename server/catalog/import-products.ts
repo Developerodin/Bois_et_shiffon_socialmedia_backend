@@ -11,8 +11,8 @@ import { htmlText } from "@/server/research/crawl";
  * row given a key that a re-import of the same product finds again.
  */
 
-/** "Prix TTC (€)" → "prix ttc": lowercase, accents and punctuation gone, spaces collapsed. */
-const norm = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+/** "Prix TTC (€)" → "prix ttc": lowercase, accents and punctuation gone, spaces collapsed. ASCII only: never for names (sameName). */
+const norm = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
 /** Header synonyms per field, already normalised. A header matches its field's exact synonym. */
 const SYNONYMS: Record<ImportField, string[]> = {
@@ -44,16 +44,22 @@ export function guessMapping(headers: string[]): (ImportField | null)[] {
   });
 }
 
-/** Fields this mapping writes that need rules.approve (stock, prices, facts). */
-export const vouchedMapped = (mapping: (ImportField | null)[]) => mapping.filter((f): f is ImportField => f !== null && (VOUCHED_FIELDS as readonly string[]).includes(f));
+/** The fields among these that need rules.approve (stock, prices, facts): a mapping's, or every importable one. */
+export const vouchedFields = (fields: readonly (ImportField | null)[]) =>
+  fields.filter((f): f is ImportField => f !== null && (VOUCHED_FIELDS as readonly string[]).includes(f));
 
 const YES = new Set(["yes", "y", "oui", "o", "1", "true", "vrai", "in stock", "en stock", "available", "disponible", "instock"]);
 const NO = new Set(["no", "n", "non", "0", "false", "faux", "out of stock", "rupture", "rupture de stock", "en rupture", "unavailable", "indisponible", "outofstock", "epuise"]);
 const SYMBOL: Record<string, string> = { "€": "EUR", $: "USD", "£": "GBP" };
 
-/** "1 299,00 €" → 1299; empty → null; not an amount (or negative) → NaN, which ProductInput refuses. */
+/**
+ * "1 299,00 €" → 1299; empty → null; not an amount (or negative) → NaN, which ProductInput refuses. A plain number
+ * ("24.995", "35.88": how Excel's number cells arrive) is read as a decimal and rounded to cents; written prices go
+ * through amountOf. ponytail: so a CSV "1.299" meaning 1,299 reads as 1.30; such files write "1.299,00" in practice.
+ */
 function money(cell: string) {
   if (!cell) return null;
+  if (/^\d+(\.\d+)?(e[+-]?\d+)?$/i.test(cell)) return Math.round(Number(cell) * 100) / 100;
   const digits = cell.replace(/[^\d.,\s]/g, "").trim();
   return cell.includes("-") || !/\d/.test(digits) ? NaN : amountOf(digits);
 }
@@ -68,7 +74,15 @@ function count(cell: string) {
 const line = (s: string, max: number) => s.replace(/\s+/g, " ").trim().slice(0, max) || null;
 const block = (s: string, max: number) => s.trim().slice(0, max) || null;
 /** A link without its #fragment or trailing slash, so "…/chair/" and "…/chair#reviews" are one product. */
-const sameLink = (url: string) => { const u = new URL(url); u.hash = ""; return u.toString().replace(/\/+(\?|$)/, "$1"); };
+function sameLink(url: string) {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    return u.toString().replace(/\/+(\?|$)/, "$1");
+  } catch {
+    return url; // a stored link typed before links were checked
+  }
+}
 
 /**
  * "Ava  Chair!" → "ava chair": a name compared in any script (Greek, Arabic, Hindi, CJK keep their letters), Latin
@@ -76,9 +90,9 @@ const sameLink = (url: string) => { const u = new URL(url); u.hash = ""; return 
  * ("★★★") is compared as written, so a key is never just "title:".
  */
 const sameName = (title: string) =>
-  title.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, " ").trim() || title.toLowerCase();
+  title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, " ").trim() || title.toLowerCase();
 
-/** The key a row is stored under: its SKU, else its link, else its name (My calls 4). */
+/** The key a row is stored under: its SKU, else its link, else its name. */
 const keyOf = (r: Pick<SavedRow, "sku" | "url" | "title">) =>
   r.sku ? `sku:${r.sku}` : r.url ? `url:${sameLink(r.url)}` : `title:${sameName(r.title)}`;
 
@@ -102,8 +116,8 @@ export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
   let skipped = 0;
   sheet.rows.forEach((cells, i) => {
     const at = (f: ImportField) => { const c = mapping.indexOf(f); return c < 0 ? "" : (cells[c] ?? "").trim(); };
-    const report = (reason: string) => problems.push({ row: sheet.lines[i] ?? i + 2, reason });
-    const skip = (reason: string) => { skipped++; report(reason); };
+    const report = (reason: string, skip = false) => problems.push({ row: sheet.lines[i] ?? i + 2, reason, skipped: skip });
+    const skip = (reason: string) => { skipped++; report(reason, true); };
     const currency = at("currency");
     const stock = norm(at("inStock"));
     const inStock = YES.has(stock) ? true : NO.has(stock) ? false : null;
@@ -113,7 +127,8 @@ export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
       url: httpUrl(at("url")),
       imageUrl: httpUrl(at("imageUrl")),
       category: line(at("category"), 120),
-      description: block(htmlText(at("description")), 5000),
+      // Cut before htmlText: the cell (up to 10,000 characters) is untrusted.
+      description: block(htmlText(at("description").slice(0, 5000)), 5000),
       materials: block(at("materials"), 1000),
       dimensions: block(at("dimensions"), 1000),
       certifications: block(at("certifications"), 1000),
@@ -157,8 +172,9 @@ export function toRows(sheet: Sheet, mapping: (ImportField | null)[]) {
 /**
  * saveRows' `match` for IMPORT: an incoming row whose key isn't stored updates the stored row with the same SKU, else
  * the same link, else the same name, so adding a SKU column to a file keeps the products (and their links and facts).
+ * A stored row already taken (`claimed`, or by an earlier row here) is passed over for the next way of matching.
  */
-export function matchStored(rows: SavedRow[], stored: { id: string; sku: string | null; url: string | null; title: string }[]) {
+export function matchStored(rows: SavedRow[], stored: { id: string; sku: string | null; url: string | null; title: string }[], claimed: ReadonlySet<string> = new Set()) {
   const index = (key: (p: (typeof stored)[number]) => string | null) => {
     const m = new Map<string, string>();
     for (const p of stored) { const k = key(p); if (k && !m.has(k)) m.set(k, p.id); }
@@ -168,9 +184,14 @@ export function matchStored(rows: SavedRow[], stored: { id: string; sku: string 
   const byLink = index((p) => (p.url ? sameLink(p.url) : null));
   const byName = index((p) => sameName(p.title));
   const found = new Map<string, string>();
+  const taken = new Set(claimed);
+  const free = (id: string | null | undefined) => (id && !taken.has(id) ? id : null);
   for (const r of rows) {
-    const id = (r.sku && bySku.get(r.sku)) || (r.url && byLink.get(sameLink(r.url))) || byName.get(sameName(r.title));
-    if (id) found.set(r.externalId, id);
+    const id = free(r.sku && bySku.get(r.sku)) ?? free(r.url && byLink.get(sameLink(r.url))) ?? free(byName.get(sameName(r.title)));
+    if (id) {
+      found.set(r.externalId, id);
+      taken.add(id);
+    }
   }
   return found;
 }

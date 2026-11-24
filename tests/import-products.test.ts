@@ -48,7 +48,7 @@ describe("toRows", () => {
     const { rows, skipped, problems } = toRows(sheet(["Nom", "Prix"], ["", "10"], ["Milo", "ask us"], ["Oslo", "-5"], ["Ava", "12"]), map);
     expect(rows.map((r) => r.title)).toEqual(["Ava"]);
     expect(skipped).toBe(3);
-    expect(problems).toEqual([{ row: 2, reason: "it has no name" }, { row: 3, reason: "the price isn't an amount" }, { row: 4, reason: "the price isn't an amount" }]);
+    expect(problems).toEqual([{ row: 2, reason: "it has no name", skipped: true }, { row: 3, reason: "the price isn't an amount", skipped: true }, { row: 4, reason: "the price isn't an amount", skipped: true }]);
   });
 
   it("keys rows by SKU, else link, else name; a repeated SKU keeps the last row and is counted", () => {
@@ -69,7 +69,7 @@ describe("toRows", () => {
   it("reports a row's own line, and an in-stock value it can't read (the row is still imported)", () => {
     const { rows, skipped, problems } = toRows({ headers: ["Nom", "En stock"], rows: [["", "oui"], ["Milo", "bientôt"]], lines: [5, 9] }, guessMapping(["Nom", "En stock"]));
     expect([rows.length, rows[0]!.inStock, skipped]).toEqual([1, null, 1]);
-    expect(problems).toEqual([{ row: 5, reason: "it has no name" }, { row: 9, reason: "the in-stock value isn't yes or no, so its stock was left unknown" }]);
+    expect(problems).toEqual([{ row: 5, reason: "it has no name", skipped: true }, { row: 9, reason: "the in-stock value isn't yes or no, so its stock was left unknown", skipped: false }]);
   });
 
   it("an empty facts cell is null, so the save keeps what's stored", () => {
@@ -80,6 +80,25 @@ describe("toRows", () => {
     const stored = [{ id: "a", sku: "M-1", url: null, title: "x" }, { id: "b", sku: null, url: "https://shop.fr/oslo/", title: "y" }, { id: "c", sku: null, url: null, title: "Ava Chair" }];
     const { rows } = toRows(sheet(["Nom", "Prix", "En stock", "Lien", "SKU"], ["Milo", "", "", "", "M-1"], ["Oslo", "", "", "https://shop.fr/oslo", "O-1"], ["ava chair", "", "", "", "A-1"], ["New", "", "", "", "N-1"]), map);
     expect([...matchStored(rows, stored)]).toEqual([["sku:M-1", "a"], ["sku:O-1", "b"], ["sku:A-1", "c"]]);
+  });
+
+  it("matchStored passes over a claimed row to the next way of matching, and survives a malformed stored link", () => {
+    const stored = [{ id: "a", sku: "M-1", url: "not a link", title: "x" }, { id: "b", sku: null, url: null, title: "Milo" }];
+    const { rows } = toRows(sheet(["Nom", "Prix", "En stock", "Lien", "SKU"], ["Milo", "", "", "", "M-1"]), map);
+    expect([...matchStored(rows, stored, new Set(["a"]))]).toEqual([["sku:M-1", "b"]]);
+  });
+
+  it("reads plain numbers (Excel's number cells) as decimals rounded to cents, written prices with amountOf", () => {
+    const { rows } = toRows(sheet(["Nom", "Prix"], ["A", "35.880000000000003"], ["B", "1299.999"], ["C", "12.5"], ["D", "1.299,00 €"]), map);
+    expect(rows.map((r) => r.price)).toEqual(["35.88", "1300.00", "12.50", "1299.00"]);
+  });
+
+  it("stays fast on hostile descriptions: 5,000 rows of 10,000 '<'", () => {
+    const hostile = { headers: ["Nom", "Description"], rows: Array.from({ length: 5000 }, (_, i) => [`P${i}`, "<".repeat(10_000)]), lines: [] };
+    const start = performance.now();
+    const { rows } = toRows(hostile, guessMapping(hostile.headers));
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(rows).toHaveLength(5000);
   });
 });
 
@@ -127,7 +146,7 @@ describe("import route", () => {
 
   it("names the file's own line for a problem, blank lines included", async () => {
     const res = await upload("Nom;Prix\n\nMilo;10\n\n;12", undefined, true);
-    expect((await res.json()).problems).toEqual([{ row: 5, reason: "it has no name" }]);
+    expect((await res.json()).problems).toEqual([{ row: 5, reason: "it has no name", skipped: true }]);
   });
 
   it("another import or sync holding the catalogue: 409, try again", async () => {
@@ -142,7 +161,7 @@ describe("import route", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
       headers: ["Nom", "Prix", "Couleur"], mapping: ["title", "price", null], sample: [["Milo", "10", "red"], ["", "12", "blue"]], rowCount: 2, skipped: 1,
-      problems: [{ row: 3, reason: "it has no name" }], needsApproval: ["price", "compareAtPrice", "inStock", "stockQuantity", "materials", "dimensions", "certifications"],
+      problems: [{ row: 3, reason: "it has no name", skipped: true }], needsApproval: ["price", "compareAtPrice", "inStock", "stockQuantity", "materials", "dimensions", "certifications"],
     });
     expect(save).not.toHaveBeenCalled();
     perms.set.add("rules.approve");
@@ -172,6 +191,26 @@ describe("import route", () => {
     expect(wait).toBe(15_000);
     expect([scope, source, fetched.complete, opts.keep]).toEqual([{ userId: "u1", workspaceId: "w1", brandId: "b1" }, "IMPORT", true, ["price", "compareAtPrice", "inStock", "stockQuantity"]]);
     expect(audit.mock.calls[0]![0].data).toMatchObject({ action: "product.import", entityId: "b1", metadata: { fields: ["title", "category"], created: 1 } });
+  });
+
+  it("keeps price and stock in pairs: mapping only in-stock writes the quantity empty, prices are kept", async () => {
+    perms.set.add("rules.approve");
+    await upload("Nom,En stock\nMilo,non", ["title", "inStock"]);
+    expect((save.mock.calls[0] as unknown as [unknown, unknown, unknown, { keep: string[] }])[3].keep).toEqual(["price", "compareAtPrice"]);
+  });
+
+  it("reads at most two files at once in a process; a third is asked to retry", async () => {
+    let finish!: () => void;
+    const held = new Promise<void>((r) => (finish = r));
+    save.mockImplementation(async () => { await held; return { seen: 1, created: 1, updated: 0, unchanged: 0, archived: 0 }; });
+    const first = [upload("Nom\nA", ["title"]), upload("Nom\nB", ["title"])];
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect((await upload("Nom\nC", undefined, true)).status).toBe(429);
+    finish();
+    expect((await Promise.all(first)).map((r) => r.status)).toEqual([200, 200]);
+    save.mockReset();
+    save.mockResolvedValue({ seen: 1, created: 1, updated: 0, unchanged: 0, archived: 0 });
+    expect((await upload("Nom\nC", undefined, true)).status).toBe(200);
   });
 
   it("all rows bad: nothing written or archived", async () => {

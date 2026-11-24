@@ -75,8 +75,8 @@ describe("parseSheet XLSX", () => {
 
   it("reads shared, rich-text and inline strings, booleans and numbers", () => {
     const shared = `<si><t>Title</t></si><si><r><t>Ch</t></r><r><rPr><b/></rPr><t xml:space="preserve">air &amp; co</t></r><rPh><t>ignored</t></rPh></si><si><t>In stock</t></si>`;
-    const rows = `<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>2</v></c><c r="C1" t="str"><v>Price</v></c></row>` + `<row r="2"><c r="A2" t="s"><v>1</v></c><c r="B2" t="b"><v>1</v></c><c r="C2"><v>1299</v></c></row>` + `<row r="3">${inline("A3", "Lamp &#233;")}</row>`;
-    expect(parseSheet(book(rows, shared))).toMatchObject({ headers: ["Title", "In stock", "Price"], rows: [["Chair & co", "1", "1299"], ["Lamp é"]] });
+    const rows = `<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>2</v></c><c r="C1" t="str"><v>Price</v></c></row>` + `<row r="2"><c r="A2" t="s"><v>1</v></c><c r="B2" t="b"><v>1</v></c><c r="C2"><v>1299</v></c></row>` + `<row r="3">${inline("A3", "Lamp &#233;")}<c r="C3" t="n"><v>35.880000000000003</v></c></row>`;
+    expect(parseSheet(book(rows, shared))).toMatchObject({ headers: ["Title", "In stock", "Price"], rows: [["Chair & co", "1", "1299"], ["Lamp é", "", "35.88"]] });
   });
 
   it("places sparse cells by column and cells without r in sequence", () => {
