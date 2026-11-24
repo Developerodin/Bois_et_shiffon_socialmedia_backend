@@ -1,11 +1,12 @@
 import type { Quote, ShopifyWriteAction } from "@prisma/client";
 import { AccessDeniedError } from "@/server/auth/errors";
+import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { loadQuote, quoteDiscount, quoteLines, quoteTotals, toQuoteDto, type QuoteScope } from "@/server/quotes/quotes";
 import { PublishingError } from "@/server/services/publishing";
 import { askCartWriteAdapter, type DraftOrder, type DraftOrderInput, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
 import { confirmWrite, previewWrite, ShopifyWriteError } from "@/server/shopify/writes";
-import { quoteNumber, type DraftOrderWritePreview, type InvoiceEmailInput, type InvoiceWritePreview, type QuoteShopifyAction } from "@/shared";
+import { QUOTE_LIMITS, quoteNumber, type DraftOrderWritePreview, type InvoiceEmailInput, type InvoiceWritePreview, type QuoteShopifyAction } from "@/shared";
 
 /**
  * Quotes to Shopify as draft orders (plan 2026-11-24-phase-3-crm, Task 8a): create, then update after edits, each a
@@ -168,9 +169,13 @@ export async function previewInvoice(scope: QuoteScope, quoteId: string, email: 
   return previewWrite(scope, { entityType: "QUOTE", entityId: q.id, action: ACTION.invoice, version: q.version, payload, again: opts.again }, adapter);
 }
 
-/** Shopify sends its invoice email (draftOrderInvoiceSend), at most once per confirmed attempt; the quote is SENT. */
+/**
+ * Shopify sends its invoice email (draftOrderInvoiceSend), at most once per confirmed attempt; the quote is SENT and
+ * valid 30 brand days from that send (each send, a re-send after a revision included, starts the 30 days again).
+ */
 export async function confirmInvoice(scope: QuoteScope, quoteId: string, email: InvoiceEmailInput, token: string, adapter: ShopifyWriteAdapter = askCartWriteAdapter) {
   let q = await loadQuote(scope, quoteId);
+  const zone = await brandTimeZone(scope);
   const where = { id: q.id, workspaceId: scope.workspaceId, brandId: scope.brandId };
   await confirmWrite<InvoiceWritePreview, DraftOrder>(
     scope,
@@ -192,9 +197,11 @@ export async function confirmInvoice(scope: QuoteScope, quoteId: string, email: 
       },
       onDone: async (tx, result, write) => {
         // The sender owns the payment reminders (server/quotes/status-sync.ts).
+        const sentAt = result.invoiceSentAt ? new Date(result.invoiceSentAt) : new Date();
+        const validUntil = new Date(`${addDays(zoneToday(zone, sentAt), QUOTE_LIMITS.validDays)}T00:00:00Z`);
         await tx.quote.updateMany({
           where: { ...where, status: { in: ["CREATED", "SENT"] } },
-          data: { status: "SENT", sentAt: result.invoiceSentAt ? new Date(result.invoiceSentAt) : new Date(), sentById: write.actorUserId, invoiceUrl: result.invoiceUrl },
+          data: { status: "SENT", sentAt, validUntil, sentById: write.actorUserId, invoiceUrl: result.invoiceUrl },
         });
       },
     },

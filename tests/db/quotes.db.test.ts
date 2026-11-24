@@ -30,7 +30,8 @@ describe("quotes", () => {
     expect(q).toMatchObject({ status: "DRAFT", version: 1, currency: "EUR", totals: { subtotal: "2480.00", discount: "248.00", total: "2232.00" } });
     expect(q.lines[0]).toEqual({ productId: product, variantId: "gid://shopify/ProductVariant/7", title: "Linen sofa — Sand", quantity: 2, unitPrice: "1200.00" });
     expect(q.lines[1]).toMatchObject({ productId: null, variantId: null, unitPrice: "80.00" });
-    expect(q.validUntil).toBe(new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10));
+    // No validity until the invoice is sent.
+    expect(q.validUntil).toBeNull();
   });
 
   it("two quotes at once get distinct numbers", async () => {

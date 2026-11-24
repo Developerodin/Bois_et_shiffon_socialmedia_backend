@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type { Prisma, Quote, QuoteStatus } from "@prisma/client";
 import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
-import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { PublishingError } from "@/server/services/publishing";
 import { OPEN_TASK_STATUSES, QUOTE_LIMITS, quoteNumber, type PermissionKey, type QuoteDiscount, type QuoteDto, type QuoteLine, type QuoteTotals } from "@/shared";
@@ -81,7 +80,7 @@ export function toQuoteDto(q: Quote): QuoteDto {
     totals,
     note: q.note,
     internalNote: q.internalNote,
-    validUntil: day(q.validUntil),
+    validUntil: q.validUntil ? day(q.validUntil) : null,
     shopifyName: q.shopifyName,
     needsShopifyUpdate: !!q.shopifyId && q.syncedVersion !== q.version,
     shopifySubtotal: q.shopifySubtotal,
@@ -153,7 +152,7 @@ const audit = (db: Prisma.TransactionClient | typeof prisma, scope: { workspaceI
 
 /**
  * A new DRAFT quote, numbered from the brand's counter in the same transaction (one row update, so two creates at once
- * get distinct numbers), valid 30 brand days. The brand's first quote also turns on its SHOPIFY_QUOTES source (daily
+ * get distinct numbers). It has no validity until its invoice is sent (then 30 brand days, shopify-draft-orders.ts). The brand's first quote also turns on its SHOPIFY_QUOTES source (daily
  * status, expiry and payment reminders: server/quotes/status-sync.ts).
  */
 export async function createQuote(scope: QuoteScope, input: z.infer<typeof QuoteCreate>) {
@@ -161,7 +160,6 @@ export async function createQuote(scope: QuoteScope, input: z.infer<typeof Quote
   if (!currency) throw new PublishingError("Say which currency the quote is in", 400, "quote.currency");
   const lines = await snapshotLines(scope, input.lines, currency);
   checkDiscount(lines, input.discount);
-  const validUntil = addDays(zoneToday(await brandTimeZone(scope)), QUOTE_LIMITS.validDays);
   const quote = await prisma.$transaction(async (tx) => {
     const [{ number }] = await tx.$queryRaw<{ number: number }[]>`
       INSERT INTO "BrandProfile" ("id", "workspaceId", "brandId", "nextQuoteNumber", "updatedAt") VALUES (${randomUUID()}, ${scope.workspaceId}, ${scope.brandId}, 2, now())
@@ -171,7 +169,7 @@ export async function createQuote(scope: QuoteScope, input: z.infer<typeof Quote
       data: {
         workspaceId: scope.workspaceId, brandId: scope.brandId, number, currency, lines: lines as Prisma.InputJsonValue,
         discount: (input.discount ?? undefined) as Prisma.InputJsonValue | undefined, contactName: input.contactName || null, contactEmail: input.contactEmail || null,
-        note: input.note || null, internalNote: input.internalNote || null, validUntil: new Date(`${validUntil}T00:00:00Z`), createdById: scope.userId,
+        note: input.note || null, internalNote: input.internalNote || null, createdById: scope.userId,
       },
     });
     await tx.dataSource.createMany({ data: [{ workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SHOPIFY_QUOTES", externalId: "" }], skipDuplicates: true });

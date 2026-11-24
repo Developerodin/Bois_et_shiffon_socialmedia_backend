@@ -13,8 +13,8 @@ import { quoteNumber } from "@/shared";
 /**
  * SHOPIFY_QUOTES runner (plan 2026-11-24-phase-3-crm, Task 8b), once a day per brand with quotes, on the data.sync job
  * (so it gets lastResult, the sweep and Sync now). In order:
- *  1. Expiry: an open quote (CREATED or SENT) past its validUntil (brand day) is EXPIRED; its Shopify draft is left
- *     for a person.
+ *  1. Expiry: an open quote (CREATED or SENT) past its validUntil (30 brand days from the invoice send; never-sent
+ *     quotes have none and don't expire) is EXPIRED; its Shopify draft is left for a person.
  *  2. Status: open quotes in Shopify are read back by id (the adapter's draft order carries status, order id and
  *     dates, never customer fields): COMPLETED → ACCEPTED with its order; gone → CANCELLED.
  *  3. Payment reminders: a quote still SENT 7 (then 21) brand days after its invoice gets a CRM task owned by whoever

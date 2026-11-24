@@ -59,13 +59,19 @@ describe("quote status", () => {
     expect(JSON.stringify(audit)).not.toMatch(/jeanne|someone/);
   });
 
-  it("an open quote past its 30 days is EXPIRED, its Shopify draft left alone", async () => {
+  it("a sent quote is valid 30 days from the send, then EXPIRED, its Shopify draft left alone; a never-sent one never expires", async () => {
     const shop = fakeShopify();
     const q = await sentQuote(shop);
+    expect(q.validUntil).toBe(new Date(Date.now() + 30 * DAY).toISOString().slice(0, 10));
+    const unsent = await createQuote(scope, QuoteCreate.parse({ currency: "EUR", lines: [{ title: "Lamp", quantity: 1, unitPrice: "10" }] }));
+    const c = await previewDraftOrderWrite(scope, unsent.id, "create", {}, shop.adapter);
+    await confirmDraftOrderWrite(scope, unsent.id, "create", c.confirmToken, shop.adapter);
     await syncQuoteStatus(scope, shop.adapter, new Date(Date.now() + 30 * DAY));
     expect(await status(q.id)).toBe("SENT");
     await syncQuoteStatus(scope, shop.adapter, new Date(Date.now() + 31 * DAY));
     expect(await status(q.id)).toBe("EXPIRED");
+    await syncQuoteStatus(scope, shop.adapter, new Date(Date.now() + 400 * DAY));
+    expect(await status(unsent.id)).toBe("CREATED");
     expect(shop.drafts.size).toBeGreaterThan(0);
   });
 

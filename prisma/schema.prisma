@@ -1951,8 +1951,8 @@ model Quote {
   note             String?
   /// <= 2,000, never sent
   internalNote     String?
-  /// created + 30 days (brand day)
-  validUntil       DateTime    @db.Date
+  /// the invoice send day + 30 (brand day); null until sent, so a draft never expires
+  validUntil       DateTime?   @db.Date
   shopifyId        String?
   shopifyName      String?
   /// the version Shopify's draft order holds; invoice send needs it to equal `version`
