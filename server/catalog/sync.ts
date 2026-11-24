@@ -255,11 +255,15 @@ type SaveOptions = {
    * whose own key isn't stored. A stored row is claimed once; a second claim or an unknown id creates a new row instead.
    */
   match?: (rows: SavedRow[], stored: Stored[]) => Map<string, string>;
+  /** IMPORT: stock and price fields the file has no column for: a matched row keeps its stored value, a new row has none. */
+  keep?: KeptField[];
 };
+type KeptField = "price" | "compareAtPrice" | "inStock" | "stockQuantity";
+const kept = (p: Stored, f: KeptField) => (f === "price" || f === "compareAtPrice" ? (p[f]?.toFixed(2) ?? null) : p[f]);
 
 /**
  * Write what changed, then archive what the source no longer has (complete fetches only, archiveWhere). Returns rows
- * seen. `db` may be a transaction. A row sent without a currency (the website's /cart.js failed) keeps the stored one.
+ * seen and what happened to them. `db` may be a transaction. A row sent without a currency (the website's /cart.js failed) keeps the stored one.
  * New SHOPIFY rows take the person's facts from the same variant's WEBSITE row, so switching to Shopify keeps them.
  * Queries: one read of the source (or of `keys`), changed rows in one UPDATE … FROM unnest per 1,000 (their stock
  * freshness included), createMany per 1,000 new rows, one stockCheckedAt update per 1,000 unchanged rows that report
@@ -286,8 +290,10 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
     }
   }
   const rows = unique.map((r) => {
-    const keep = r.currency === null ? target.get(r.externalId)?.currency : null;
-    return keep ? { ...r, currency: keep } : r;
+    const p = target.get(r.externalId);
+    const keep = r.currency === null ? p?.currency : null;
+    const own = p && opts.keep?.length ? Object.fromEntries(opts.keep.map((f) => [f, kept(p, f)])) : {};
+    return { ...r, ...(keep && { currency: keep }), ...own };
   });
   const reports = (r: SavedRow) => r.inStock !== null || r.stockQuantity !== null;
   const created = rows.filter((r) => !target.has(r.externalId));
@@ -331,16 +337,28 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
     });
     for (const { externalId, ...f } of website) if (externalId) facts.set(externalId, f);
   }
+  let added = 0;
   for (const part of chunks(created)) {
-    await db.product.createMany({
+    added += (await db.product.createMany({
       data: part.map((r) => ({ ...facts.get(variantNumericId(r.externalId) ?? ""), ...r, ...where, ...(reports(r) && { stockCheckedAt: now }) })),
       skipDuplicates: true,
-    });
+    })).count;
   }
   for (const part of chunks(unchangedReporting)) await db.product.updateMany({ where: { ...where, id: { in: part } }, data: { stockCheckedAt: now } });
   const gone = archiveWhere(scope, source, rows.map((r) => r.externalId), fetched.complete);
-  if (gone) await db.product.updateMany({ where: gone, data: { archivedAt: now } });
-  return rows.length;
+  const archived = gone ? (await db.product.updateMany({ where: gone, data: { archivedAt: now } })).count : 0;
+  return { seen: rows.length, created: added, updated: changed.length, unchanged: rows.length - created.length - changed.length, archived };
+}
+
+/**
+ * saveRows in a transaction holding the brand's catalogue lock, so an import and a sync of one brand (or two imports)
+ * never interleave: the second waits for the first to commit. 60 s covers MAX_ROWS rows (well under 5 s on a test DB).
+ */
+export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL">, fetched: { rows: SavedRow[]; complete: boolean }, opts: SaveOptions = {}) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('catalog:' || ${scope.brandId}))`;
+    return saveRows(tx, scope, source, fetched, opts);
+  }, { timeout: 60_000 });
 }
 
 /** With no Shopify connection and no website feed, nothing updates SHOPIFY rows any more: their stock would go stale. */
@@ -375,7 +393,7 @@ export async function runCatalogSync(payload: unknown) {
   try {
     const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal) : await websiteFeed(found.websiteUrl, signal);
     if (fetched.note === NOT_A_FEED) await archiveShopifyRows(scope);
-    const count = await saveRows(prisma, scope, found.source, fetched);
+    const { seen: count } = await lockedSave(scope, found.source, fetched);
     await record(scope, { at, source: found.source, count }, fetched.note ?? null);
   } catch (error) {
     const refused = error instanceof ReconnectNeeded;
@@ -413,7 +431,7 @@ export async function catalogSyncRunning(scope: Scope) {
  * loops they (or one with the daily or connect-time sync) can run at the same time; nothing serialises syncs per brand.
  * The overlap is harmless: rows are last-writer-wins, so the slower one's fetch (at most the 4-minute deadline older)
  * can land last, and a product the shop added in between can show archived. No row, credit or connection is lost, and
- * the next sync corrects it. Take an advisory lock per brand around saveRows + record if that ever matters.
+ * the next sync corrects it. The save itself holds the brand's catalogue lock (lockedSave), so two saves never interleave.
  */
 export async function requestCatalogSync(scope: Scope) {
   if (await catalogSyncRunning(scope)) return { queued: false };
