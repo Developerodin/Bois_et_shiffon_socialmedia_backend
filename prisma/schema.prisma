@@ -243,6 +243,7 @@ model Brand {
   searchDays    SearchDay[]
   adDays        AdDay[]
   shopifyWrites ShopifyWrite[]
+  blogArticles  BlogArticle[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1502,6 +1503,7 @@ model Task {
   attachments   TaskAttachment[]
   comments      TaskComment[]
   notifications Notification[]
+  blogArticles  BlogArticle[]
 
   @@unique([brandId, requestId])
   @@index([workProjectId, status])
@@ -1853,4 +1855,50 @@ model ShopifyWrite {
 
   @@unique([entityType, entityId, version, action, attempt])
   @@index([status, startedAt])
+}
+
+enum BlogArticleStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+  HIDDEN_IN_SHOPIFY
+  PUBLISHED
+  ARCHIVED
+}
+
+/// A blog article written in our app (server/blog/articles.ts) and sent to the brand's Shopify blog hidden, then published.
+model BlogArticle {
+  id            String            @id @default(cuid())
+  workspaceId   String
+  brandId       String
+  /// <= 200
+  title         String
+  /// slug, unique per brand; how a create whose answer was lost is found in Shopify
+  handle        String
+  /// <= 500
+  summary       String?
+  /// ArticleBlock[] (shared/blog.ts), <= 30,000 characters of text
+  blocks        Json
+  tags          String[]
+  /// re-read with brand scope
+  productIds    String[]
+  taskId        String?
+  status        BlogArticleStatus @default(DRAFT)
+  /// the confirm token binds it; bumped by edits (a person's or the writer's) only
+  version       Int               @default(1)
+  shopifyBlogId String?
+  shopifyId     String?
+  publishedAt   DateTime?
+  approvedById  String?
+  createdById   String?
+  /// who changed the text last (creator, editor, or whoever ran the writer): approving your own needs nobody else to approve
+  editedById    String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  task  Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@unique([brandId, handle])
+  @@index([brandId, status, updatedAt])
 }
