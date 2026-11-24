@@ -55,7 +55,7 @@ const PARTIAL: Note = { error: "Only part of the catalogue could be read, so no 
 const FAILED: Note = { error: "The last sync couldn't read the products. Press Sync now to try again.", reason: "failed" };
 const REFUSED: Note = { error: SHOPIFY_REFUSED, reason: "shopify-refused" };
 
-const str = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+export const str = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
 
 /** "12.50", 12.5 → "12.50"; empty, negative, NaN, ≥ 1e9 (ProductInput's cap) or non-numeric → null (the feed is untrusted). */
 export function parsePrice(v: unknown): string | null {
@@ -81,6 +81,30 @@ export function variantTitle(product: string, variant: unknown) {
   return (v && v !== "Default Title" ? `${product} — ${v}` : product).slice(0, 300);
 }
 
+/**
+ * One row from a page or feed's untrusted values, through the caps every source gets. `title` and `url` are final;
+ * `description` is already plain text (htmlText), so a product's variants convert it once.
+ */
+export function syncedRow(v: {
+  externalId: string; title: string; url: string | null; description: string | null; currency: string | null;
+  sku: unknown; category: unknown; price: unknown; compareAtPrice: unknown; inStock: unknown; image: unknown;
+}): SyncedRow {
+  return {
+    externalId: v.externalId,
+    sku: str(v.sku, 100),
+    title: v.title,
+    url: v.url,
+    category: str(v.category, 120),
+    description: str(v.description, 5000),
+    price: parsePrice(v.price),
+    compareAtPrice: parsePrice(v.compareAtPrice),
+    currency: v.currency,
+    inStock: typeof v.inStock === "boolean" ? v.inStock : null,
+    stockQuantity: null,
+    imageUrl: httpUrl(v.image),
+  };
+}
+
 /** Rows from one page of a public /products.json feed: one per variant. Malformed entries are skipped. */
 export function websiteRows(products: unknown[], origin: string, currency: string | null): SyncedRow[] {
   return products.flatMap((raw) => {
@@ -89,27 +113,25 @@ export function websiteRows(products: unknown[], origin: string, currency: strin
     const handle = str(p?.handle, 255);
     if (!p || !title || !handle || !Array.isArray(p.variants)) return [];
     const url = new URL(`/products/${encodeURIComponent(handle)}`, origin).toString();
-    const description = str(typeof p.body_html === "string" ? htmlText(p.body_html) : null, 5000);
-    const category = str(p.product_type, 120);
+    const description = typeof p.body_html === "string" ? htmlText(p.body_html) : null;
     const productImage = Array.isArray(p.images) ? p.images[0]?.src : undefined;
     return p.variants.flatMap((v) => {
       const id = typeof v?.id === "number" || typeof v?.id === "string" ? String(v.id).trim().slice(0, 100) : "";
       if (!id) return [];
       const image = v.featured_image?.src ?? productImage;
-      return [{
+      return [syncedRow({
         externalId: id,
-        sku: str(v.sku, 100),
+        sku: v.sku,
         title: variantTitle(title, v.title),
         url,
-        category,
+        category: p.product_type,
         description,
-        price: parsePrice(v.price),
-        compareAtPrice: parsePrice(v.compare_at_price),
+        price: v.price,
+        compareAtPrice: v.compare_at_price,
         currency,
-        inStock: typeof v.available === "boolean" ? v.available : null,
-        stockQuantity: null,
-        imageUrl: typeof image === "string" ? httpUrl(shopifySized(image)) : null,
-      }];
+        inStock: v.available,
+        image: typeof image === "string" ? shopifySized(image) : null,
+      })];
     });
   });
 }
