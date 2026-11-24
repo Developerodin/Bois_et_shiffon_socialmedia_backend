@@ -12,6 +12,7 @@ import { AiProviderError } from "@/server/ai/provider";
 import { runCatalogPages } from "@/server/catalog/page-reader";
 import { CATALOG_PAGES_JOB, CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
 import { DATA_SYNC_JOB, enqueueDailyDataSyncs, runDataSync } from "@/server/data/sources";
+import { DIGEST_JOB, enqueueWeeklyDigests, runDigest } from "@/server/digest/job";
 import { ensurePostMetricSources } from "@/server/data/post-metric-sync"; // also registers the POST_METRICS runner
 import "@/server/data/shopify-orders-sync"; // registers the SHOPIFY_ORDERS runner
 import "@/server/data/meta-ads-sync"; // registers the META_ADS sync
@@ -50,6 +51,7 @@ const HANDLERS: Record<string, Handler> = {
   [CATALOG_SYNC_JOB]: { run: runCatalogSync },
   [DAILY_SWEEP_JOB]: { run: dailySweep },
   [DATA_SYNC_JOB]: { run: runDataSync },
+  [DIGEST_JOB]: { run: runDigest },
   [EMAIL_SEND_JOB]: { run: sendOutboxEmail },
   [FINDING_CLEAR_JOB]: { run: clearFindings },
   [FINDING_TASKS_JOB]: { run: tasksFromReport },
@@ -175,8 +177,9 @@ async function dailySweep() {
   // Last, and each on its own: a failing step is logged and never blocks the steps above (billing renewals).
   const now = new Date();
   // "data" only queues each data source's sync (no provider calls), spread over the next two hours; "post-metric
-  // sources" first gives each brand with published posts its POST_METRICS source.
-  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites]] as const) {
+  // sources" first gives each brand with published posts its POST_METRICS source. "digest" queues Monday's digests for
+  // after those syncs.
+  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["digest", enqueueWeeklyDigests], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites]] as const) {
     try {
       await step(now);
     } catch (e) {
@@ -242,13 +245,15 @@ export async function startScheduledAgents(now = new Date()) {
 }
 
 /** Housekeeping: rows that only matter for a while. Audit events, decisions and AI usage are kept. */
-async function pruneOldRows() {
+export async function pruneOldRows() {
   const ago = (days: number) => new Date(Date.now() - days * 86_400_000);
   await prisma.rateLimitBucket.deleteMany({ where: { windowStart: { lt: ago(2) } } });
   await prisma.transientEntry.deleteMany({ where: { expiresAt: { lt: new Date() } } });
   await prisma.oAuthStateTransaction.deleteMany({ where: { expiresAt: { lt: ago(2) } } });
   await prisma.job.deleteMany({ where: { status: "COMPLETED", updatedAt: { lt: ago(30) } } });
-  await prisma.emailOutbox.deleteMany({ where: { status: { in: ["SENT", "NOT_CONFIGURED"] }, createdAt: { lt: ago(30) } } });
+  // FAILED too: a send that failed for 30 days won't go, and its text may still hold a link.
+  await prisma.emailOutbox.deleteMany({ where: { status: { in: ["SENT", "NOT_CONFIGURED", "FAILED"] }, createdAt: { lt: ago(30) } } });
+  await prisma.digest.deleteMany({ where: { createdAt: { lt: ago(12 * 7) } } });
   await prisma.agentEvent.deleteMany({ where: { createdAt: { lt: ago(90) } } });
   await prisma.pageView.deleteMany({ where: { createdAt: { lt: ago(180) } } });
 }

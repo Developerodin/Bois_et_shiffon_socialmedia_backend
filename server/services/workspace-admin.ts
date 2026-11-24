@@ -213,6 +213,8 @@ export async function removeMember(workspaceId: string, actorUserId: string, mem
   await prisma.$transaction(async (tx) => {
     await tx.brandMember.deleteMany({ where: { workspaceId, userId: member.userId } });
     await tx.workspaceMember.delete({ where: { id: member.id } });
+    // Their weekly digests hold this workspace's figures: gone with them (a queued email is skipped at send).
+    await tx.digest.deleteMany({ where: { workspaceId, userId: member.userId } });
     // Their cloned voices leave with them: archived, and deleted at ElevenLabs by a job queued in this transaction.
     await archiveMemberClones(tx, workspaceId, member.userId, actorUserId);
   });

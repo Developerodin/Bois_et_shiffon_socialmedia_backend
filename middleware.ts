@@ -6,8 +6,9 @@ import { authConfig } from "@/auth.config";
 const authMiddleware = NextAuth(authConfig).auth as unknown as (request: NextRequest, event: NextFetchEvent) => Promise<Response>;
 
 const READS = new Set(["GET", "HEAD", "OPTIONS"]);
-// Callers that never hold the session cookie: providers (webhooks), the job trigger, the phone's own sign-in routes.
-const NO_COOKIE_PATHS = ["/api/v1/webhooks/", "/api/v1/jobs/run", "/api/v1/mobile/", "/api/v1/integrations/"];
+// Callers that never hold the session cookie: providers (webhooks), the job trigger, the phone's own sign-in routes, a
+// mail provider's one-click unsubscribe (signed link).
+const NO_COOKIE_PATHS = ["/api/v1/webhooks/", "/api/v1/jobs/run", "/api/v1/mobile/", "/api/v1/integrations/", "/api/v1/digest/unsubscribe"];
 
 /** AUTH_URL's origin (the website) plus WEB_ORIGINS, a comma list for dev hosts such as a LAN address. */
 function allowedOrigins() {

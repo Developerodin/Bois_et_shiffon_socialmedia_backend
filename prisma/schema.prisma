@@ -701,6 +701,9 @@ model EmailOutbox {
   attempts  Int         @default(0)
   error     String?
   sentAt    DateTime?
+  /// What the email is about, for the send path: "digest:<digestId>" is rebuilt from that Digest at send time (after
+  /// re-checking the reader) and scrubbed to "[digest]" after (scrubSent). Null for invites and resets.
+  ref       String?
   createdAt DateTime    @default(now())
 
   @@index([status, createdAt])
