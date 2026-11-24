@@ -179,8 +179,8 @@ async function dailySweep() {
   const now = new Date();
   // "data" only queues each data source's sync (no provider calls), spread over the next two hours; "post-metric
   // sources" first gives each brand with published posts its POST_METRICS source. "digest" queues Monday's digests for
-  // after those syncs.
-  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["digest", enqueueWeeklyDigests], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites]] as const) {
+  // after those syncs, last: a workspace-wide insert that must never hold up the steps before it.
+  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites], ["digest", enqueueWeeklyDigests]] as const) {
     try {
       await step(now);
     } catch (e) {

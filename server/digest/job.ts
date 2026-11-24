@@ -5,7 +5,6 @@ import { prisma } from "@/server/db/prisma";
 import { spreadSecs } from "@/server/data/sources";
 import { buildDigest, digestWeekStart, sweepAt } from "@/server/digest/build";
 import { emailConfigured, queueEmail } from "@/server/email/outbox";
-import { enqueueJob } from "@/server/jobs/queue";
 
 /**
  * The weekly digest job (plan 2026-11-24-phase-3-crm.md, Task 3): one per (workspace, active member) each Monday.
@@ -16,10 +15,15 @@ import { enqueueJob } from "@/server/jobs/queue";
 export const DIGEST_JOB = "digest.build";
 const AFTER_SWEEP_MS = 3 * 60 * 60_000;
 const SPREAD_SECS = 60 * 60;
+/** Members per insert: one statement each, so a large workspace count stays a handful of round trips. */
+const CHUNK = 500;
 
 const Payload = z.object({ workspaceId: z.string(), userId: z.string(), weekStart: z.iso.date() });
 
-/** Daily sweep step: on Mondays (UTC) only, queue every active member's digest. A double sweep queues each once (key). */
+/**
+ * Daily sweep step: on Mondays (UTC) only, queue every active member's digest, CHUNK rows per insert. A double sweep
+ * queues each once (the idempotency key; skipDuplicates leaves an existing job as it is, like enqueueJob's upsert).
+ */
 export async function enqueueWeeklyDigests(now = new Date()) {
   if (now.getUTCDay() !== 1) return;
   const weekStart = digestWeekStart(now);
@@ -27,14 +31,17 @@ export async function enqueueWeeklyDigests(now = new Date()) {
     where: { user: { status: "ACTIVE", deletedAt: null } },
     select: { workspaceId: true, userId: true },
   });
-  for (const m of members) {
-    await enqueueJob({
-      type: DIGEST_JOB,
-      workspaceId: m.workspaceId,
-      payload: { workspaceId: m.workspaceId, userId: m.userId, weekStart },
-      runAt: new Date(now.getTime() + AFTER_SWEEP_MS + (spreadSecs(m.userId) % SPREAD_SECS) * 1000),
-      maxAttempts: 3,
-      idempotencyKey: `digest:${m.workspaceId}:${m.userId}:${weekStart}`,
+  for (let i = 0; i < members.length; i += CHUNK) {
+    await prisma.job.createMany({
+      data: members.slice(i, i + CHUNK).map((m) => ({
+        type: DIGEST_JOB,
+        workspaceId: m.workspaceId,
+        payload: { workspaceId: m.workspaceId, userId: m.userId, weekStart },
+        runAt: new Date(now.getTime() + AFTER_SWEEP_MS + (spreadSecs(m.userId) % SPREAD_SECS) * 1000),
+        maxAttempts: 3,
+        idempotencyKey: `digest:${m.workspaceId}:${m.userId}:${weekStart}`,
+      })),
+      skipDuplicates: true,
     });
   }
 }

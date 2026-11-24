@@ -9,8 +9,9 @@ const db = vi.hoisted(() => {
   };
 });
 const sweep = vi.hoisted(() => ({
-  claim: vi.fn(), complete: vi.fn(), catalog: vi.fn(async () => undefined), data: vi.fn(), overdue: vi.fn(async () => 0), noop: vi.fn(async () => undefined),
+  claim: vi.fn(), complete: vi.fn(), catalog: vi.fn(async () => undefined), data: vi.fn(), overdue: vi.fn(async () => 0), noop: vi.fn(async () => undefined), digest: vi.fn(async () => undefined),
 }));
+vi.mock("@/server/digest/job", async (orig) => ({ ...(await orig<object>()), enqueueWeeklyDigests: sweep.digest }));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("next/server", async (orig) => ({ ...(await orig<object>()), after: vi.fn() }));
 vi.mock("@/server/jobs/queue", async (orig) => ({ ...(await orig<object>()), claimNextJob: sweep.claim, completeJob: sweep.complete, holdLease: () => () => {} }));
@@ -85,6 +86,8 @@ describe("daily sweep", () => {
     expect(sweep.data).toHaveBeenCalledWith(expect.any(Date));
     expect(sweep.catalog.mock.invocationCallOrder[0]).toBeLessThan(sweep.data.mock.invocationCallOrder[0]!);
     expect(sweep.overdue).toHaveBeenCalledTimes(1);
+    // The digest step comes last of all.
+    expect(sweep.digest.mock.invocationCallOrder[0]).toBeGreaterThan(sweep.overdue.mock.invocationCallOrder[0]!);
     expect(sweep.complete).toHaveBeenCalledTimes(1);
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("data"), expect.any(Error));
   });

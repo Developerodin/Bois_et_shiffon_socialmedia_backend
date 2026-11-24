@@ -159,7 +159,11 @@ describe("articles to Shopify", () => {
     await decideArticle(approver, a.id, { version: 3, verdict: "APPROVED" });
     expect(await refusal(previewArticleWrite(approver, a.id, "create", {}, shop.adapter))).toMatchObject({ status: 409, code: "blog.earlierSend" });
     expect(await prisma.blogArticle.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ status: "APPROVED", version: 3, shopifyId: "gid://shopify/Article/1" });
-    expect(await prisma.shopifyWrite.findFirst({ where: { entityId: a.id, version: 2 } })).toMatchObject({ status: "DONE", shopifyId: "gid://shopify/Article/1" });
+    const row = await prisma.shopifyWrite.findFirstOrThrow({ where: { entityId: a.id, version: 2 } });
+    expect(row).toMatchObject({ status: "DONE", shopifyId: "gid://shopify/Article/1" });
+    // Settled through writes.ts's shared helper: audited as the write's action, by whoever settled it.
+    const settled = await prisma.auditEvent.findMany({ where: { entityType: "ShopifyWrite", entityId: row.id, action: "shopify.article_create" } });
+    expect(settled.map((e) => [e.actorUserId, (e.metadata as { status: string }).status])).toContainEqual([approver.userId, "DONE"]);
     const { article } = await send(a.id, "update", shop);
     expect(article).toMatchObject({ status: "HIDDEN_IN_SHOPIFY" });
     expect(shop.calls.filter((c) => c.method === "createArticle")).toHaveLength(1);

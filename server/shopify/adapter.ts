@@ -9,6 +9,8 @@
  * ponytail: the input and output shapes below are ours; settle them with AskCart's contract when its write endpoints exist.
  */
 export type ShopifyTarget = { workspaceId: string; brandId: string };
+/** The adapter's target from any brand scope (only its ids, never the person or permissions). */
+export const shopifyTarget = (scope: ShopifyTarget): ShopifyTarget => ({ workspaceId: scope.workspaceId, brandId: scope.brandId });
 
 export type ShopifyRefusal =
   | { ok: false; reason: "NOT_CONNECTED" }

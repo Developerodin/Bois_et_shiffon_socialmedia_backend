@@ -4,6 +4,7 @@ import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { prisma } from "@/server/db/prisma";
 import { PublishingError } from "@/server/services/publishing";
+import { writeInFlight } from "@/server/shopify/writes";
 import { OPEN_TASK_STATUSES, QUOTE_LIMITS, quoteNumber, type PermissionKey, type QuoteDiscount, type QuoteDto, type QuoteLine, type QuoteTotals } from "@/shared";
 
 /**
@@ -18,14 +19,17 @@ export type QuoteScope = { workspaceId: string; brandId: string; userId: string;
 
 const PRICE = /^\d{1,9}(\.\d{1,3})?$/;
 const price = z.string().trim().regex(PRICE, "Write prices like 1250 or 1250.50");
-const percent = z.string().trim().regex(/^\d{1,3}(\.\d{1,2})?$/, "Write a percentage like 10 or 12.5");
+const percent = z
+  .string()
+  .trim()
+  .regex(/^\d{1,3}(\.\d{1,2})?$/, "Write a percentage like 10 or 12.5, at most 2 decimals")
+  .refine((v) => Number(v) <= 100, "A percentage discount is at most 100");
 const LineInput = z.union([
   z.object({ productId: z.string().min(1).max(40), quantity: z.number().int().min(1).max(QUOTE_LIMITS.quantity), title: z.string().trim().min(1).max(QUOTE_LIMITS.title).optional(), unitPrice: price.optional() }),
   z.object({ productId: z.null().optional(), title: z.string().trim().min(1).max(QUOTE_LIMITS.title), quantity: z.number().int().min(1).max(QUOTE_LIMITS.quantity), unitPrice: price }),
 ]);
-const Discount = z
-  .object({ kind: z.enum(["PERCENT", "AMOUNT"]), value: price.or(percent) })
-  .refine((d) => d.kind !== "PERCENT" || Number(d.value) <= 100, "A percentage discount is at most 100");
+/** By kind: a percentage 0–100 with at most 2 decimals; an amount as a price (its decimals checked against the currency). */
+const Discount = z.discriminatedUnion("kind", [z.object({ kind: z.literal("PERCENT"), value: percent }), z.object({ kind: z.literal("AMOUNT"), value: price })]);
 const fields = {
   contactName: z.string().trim().max(QUOTE_LIMITS.name).nullable().optional(),
   contactEmail: z.string().trim().max(QUOTE_LIMITS.email).email("That email address doesn't look right").nullable().optional(),
@@ -105,6 +109,7 @@ export function toQuoteDto(q: Quote): QuoteDto {
 }
 
 const notFound = () => new PublishingError("Quote not found", 404);
+const inFlight = () => new PublishingError("A change to this quote is being sent to Shopify or waits for Shopify to confirm it. Check it again, then edit.", 409, "quote.writeInFlight");
 const changed = () => new PublishingError("This quote changed since you opened it. Reload it and try again.", 409, "quote.changed");
 
 /** The brand's quote, or 404 (another brand's id included). */
@@ -173,15 +178,23 @@ const audit = (db: Prisma.TransactionClient | typeof prisma, scope: { workspaceI
  * status, expiry and payment reminders: server/quotes/status-sync.ts).
  */
 export async function createQuote(scope: QuoteScope, input: z.infer<typeof QuoteCreate>) {
-  const currency = (await shopCurrency(scope)) ?? input.currency;
+  // The shop's currency; without a Shopify catalogue, the one the brand's first quote was given (kept on BrandProfile).
+  const shop = await shopCurrency(scope);
+  const kept = shop ? null : (await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { quoteCurrency: true } }))?.quoteCurrency ?? null;
+  if (kept && input.currency && input.currency !== kept) throw new PublishingError(`This business's quotes are in ${kept}`, 400, "quote.currency");
+  const currency = shop ?? kept ?? input.currency;
   if (!currency) throw new PublishingError("Say which currency the quote is in", 400, "quote.currency");
   const lines = await snapshotLines(scope, input.lines, currency);
   checkDiscount(lines, input.discount, currency);
   const quote = await prisma.$transaction(async (tx) => {
-    const [{ number }] = await tx.$queryRaw<{ number: number }[]>`
-      INSERT INTO "BrandProfile" ("id", "workspaceId", "brandId", "nextQuoteNumber", "updatedAt") VALUES (${randomUUID()}, ${scope.workspaceId}, ${scope.brandId}, 2, now())
-      ON CONFLICT ("brandId") DO UPDATE SET "nextQuoteNumber" = "BrandProfile"."nextQuoteNumber" + 1, "updatedAt" = now()
-      RETURNING "nextQuoteNumber" - 1 AS number`;
+    // The row update also keeps the first quote's currency when there is no shop's (two first quotes at once queue on
+    // the row: the second sees the first's currency and is refused if it differs).
+    const keep = shop ? null : currency;
+    const [{ number, quoteCurrency }] = await tx.$queryRaw<{ number: number; quoteCurrency: string | null }[]>`
+      INSERT INTO "BrandProfile" ("id", "workspaceId", "brandId", "nextQuoteNumber", "quoteCurrency", "updatedAt") VALUES (${randomUUID()}, ${scope.workspaceId}, ${scope.brandId}, 2, ${keep}, now())
+      ON CONFLICT ("brandId") DO UPDATE SET "nextQuoteNumber" = "BrandProfile"."nextQuoteNumber" + 1, "quoteCurrency" = COALESCE("BrandProfile"."quoteCurrency", EXCLUDED."quoteCurrency"), "updatedAt" = now()
+      RETURNING "nextQuoteNumber" - 1 AS number, "quoteCurrency"`;
+    if (keep && quoteCurrency !== keep) throw new PublishingError(`This business's quotes are in ${quoteCurrency}`, 400, "quote.currency");
     const q = await tx.quote.create({
       data: {
         workspaceId: scope.workspaceId, brandId: scope.brandId, number, currency, lines: lines as Prisma.InputJsonValue,
@@ -203,6 +216,9 @@ export async function editQuote(scope: QuoteScope, id: string, patch: z.infer<ty
   const { version, lines: lineInput, discount, ...rest } = patch;
   const q = await loadQuote(scope, id);
   if (q.version !== version) throw changed();
+  // A send in flight (or unconfirmed) is for the version it was confirmed on; an edit now would leave Shopify holding
+  // lines the quote no longer has, and its onDone mark them sent.
+  if (await writeInFlight(scope, "QUOTE", id)) throw inFlight();
   if (!EDITABLE.includes(q.status)) {
     throw new PublishingError(q.status === "SENT" ? "The invoice was sent: revise the quote to change it" : "This quote can't be changed any more", 409, "quote.notEditable");
   }
@@ -269,8 +285,7 @@ export async function deleteQuote(scope: QuoteScope, id: string): Promise<{ quot
   const where = { id, workspaceId: scope.workspaceId, brandId: scope.brandId, status: q.status };
   const deleting = !q.shopifyId && q.status === "DRAFT";
   if (deleting) {
-    const inFlight = await prisma.shopifyWrite.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, entityType: "QUOTE", entityId: id, action: "DRAFT_ORDER_CREATE", status: { in: ["PENDING", "UNKNOWN"] } }, select: { id: true } });
-    if (inFlight) throw new PublishingError("Shopify hasn't confirmed this quote's draft order yet. Check it again before deleting the quote.", 409, "quote.createInFlight");
+    if (await writeInFlight(scope, "QUOTE", id, ["DRAFT_ORDER_CREATE"])) throw new PublishingError("Shopify hasn't confirmed this quote's draft order yet. Check it again before deleting the quote.", 409, "quote.createInFlight");
   }
   // ponytail: the in-flight check and the delete aren't one lock; a create confirmed in that instant leaves a draft in Shopify with no quote here (its tag names the id).
   await prisma.$transaction(async (tx) => {

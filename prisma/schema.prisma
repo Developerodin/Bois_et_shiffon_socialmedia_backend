@@ -282,6 +282,8 @@ model BrandProfile {
   shopifyBlogId   String?
   /// The next quote's number for this brand ("Q-0042"); taken and bumped in the quote's create transaction
   nextQuoteNumber Int      @default(1)
+  /// The currency of the brand's quotes when it has no Shopify catalogue: the first quote's, required after that
+  quoteCurrency   String?
   voiceSummary    String?
   pillars         Json?
   locales         Json?

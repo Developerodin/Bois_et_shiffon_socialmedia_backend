@@ -5,6 +5,7 @@ import { hasOtherHolder } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
 import { ArticleBlocksSchema } from "@/server/blog/render";
 import { PublishingError } from "@/server/services/publishing";
+import { writeInFlight } from "@/server/shopify/writes";
 import { slugify } from "@/server/services/slug";
 import { findVisibleTask, taskViewer } from "@/server/tasks/access";
 import { isUniqueViolation } from "@/server/tasks/errors";
@@ -149,7 +150,7 @@ export async function editArticle(scope: ArticleScope, id: string, patch: z.infe
   if (patch.blocks && textLength(patch.blocks) > ARTICLE_LIMITS.chars) throw new PublishingError(`The article is longer than ${ARTICLE_LIMITS.chars} characters`, 400);
   const productIds = patch.productIds && (await checkProducts(scope, patch.productIds));
   // An unconfirmed create is found again in Shopify by its handle (shopify-articles.ts earlierCreates): keep it.
-  if (fields.handle !== undefined && fields.handle !== current.handle && (await unsettledCreate(scope, id))) {
+  if (fields.handle !== undefined && fields.handle !== current.handle && (await writeInFlight(scope, "BLOG_ARTICLE", id, ["ARTICLE_CREATE"]))) {
     throw new PublishingError("The address can't change while a send to Shopify is unconfirmed. Try again in a few minutes.", 409, "blog.handleLocked");
   }
   const status = afterEdit(current.status);
@@ -175,18 +176,16 @@ export async function editArticle(scope: ArticleScope, id: string, patch: z.infe
   return toArticleDto(await loadArticle(scope, id));
 }
 
-const unsettledCreate = (scope: { workspaceId: string; brandId: string }, id: string) =>
-  prisma.shopifyWrite.findFirst({
-    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, entityType: "BLOG_ARTICLE", entityId: id, action: "ARTICLE_CREATE", status: { in: ["PENDING", "UNKNOWN"] } },
-    select: { id: true },
-  });
-
 /**
  * Remove an article: one never sent to Shopify is deleted; one that was is archived here and left as it is in Shopify
- * (removing it there is a person's call in Shopify).
+ * (removing it there is a person's call in Shopify). Refused while any write of it is being sent or unconfirmed: a
+ * create would leave the article in Shopify with nothing here, an update or publish would settle onto a removed one.
  */
 export async function deleteArticle(scope: ArticleScope, id: string) {
   const a = await loadArticle(scope, id);
+  if (await writeInFlight(scope, "BLOG_ARTICLE", id)) {
+    throw new PublishingError("A change to this article is being sent to Shopify or waits for Shopify to confirm it. Check it again before deleting it.", 409, "blog.writeInFlight");
+  }
   if (a.shopifyId) await prisma.blogArticle.updateMany({ where: { id, workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { status: "ARCHIVED" } });
   else await prisma.blogArticle.deleteMany({ where: { id, workspaceId: scope.workspaceId, brandId: scope.brandId } });
   await audit(scope, a.shopifyId ? "blog.article.archived" : "blog.article.deleted", id, { shopifyId: a.shopifyId });

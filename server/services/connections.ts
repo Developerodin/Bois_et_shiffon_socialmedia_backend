@@ -145,13 +145,16 @@ export async function startConnect(input: {
   });
 }
 
-/** A single-use connect state (DEC-017: only its hash is stored, ≤10 min); returns the raw state for the URL. */
+/**
+ * A single-use connect state (DEC-017: only its hash is stored, ≤10 min); returns the raw state for the URL. A PKCE
+ * verifier is kept encrypted like a token (it redeems the code), and cleared when the state is used.
+ */
 export async function createConnectState(input: {
   workspaceId: string; brandId: string; userId: string; provider: IntegrationProvider; client?: "web" | "mobile"; codeVerifier?: string; shop?: string;
 }) {
   const { raw, hash } = newToken();
   await prisma.oAuthStateTransaction.create({
-    data: { ...input, client: input.client ?? "web", stateHash: hash, expiresAt: new Date(Date.now() + STATE_TTL_MS) },
+    data: { ...input, codeVerifier: input.codeVerifier ? encryptCredentials(input.codeVerifier) : undefined, client: input.client ?? "web", stateHash: hash, expiresAt: new Date(Date.now() + STATE_TTL_MS) },
   });
   return raw;
 }
@@ -164,7 +167,9 @@ export async function createConnectState(input: {
 export async function claimConnectState(input: { provider: IntegrationProvider; state: string; userId: string }) {
   const stateHash = hashToken(input.state);
   // The PKCE verifier is read before the consume clears it, so a used state holds none; only the consumer uses it.
-  const verifier = (await prisma.oAuthStateTransaction.findUnique({ where: { stateHash }, select: { codeVerifier: true } }))?.codeVerifier ?? null;
+  const stored = (await prisma.oAuthStateTransaction.findUnique({ where: { stateHash }, select: { codeVerifier: true } }))?.codeVerifier ?? null;
+  // ponytail: a state started before verifiers were encrypted holds it plain; such states live 10 min, then this can go.
+  const verifier = stored && stored.startsWith("v1:") ? decryptCredentials<string>(stored) : stored;
   const consumed = await prisma.oAuthStateTransaction.updateMany({
     where: {
       stateHash,

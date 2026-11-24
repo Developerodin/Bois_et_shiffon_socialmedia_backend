@@ -23,6 +23,8 @@ beforeAll(async () => {
 });
 
 const create = (body: unknown) => createQuote(scope, QuoteCreate.parse(body));
+/** A brand of its own: a brand without a Shopify catalogue keeps its first quote's currency. */
+const freshScope = async (slug: string): Promise<QuoteScope> => ({ ...scope, brandId: (await prisma.brand.create({ data: { workspaceId: ws, slug, displayName: slug } })).id });
 
 describe("quotes", () => {
   it("snapshots a catalogue line in the shop's currency and works out totals itself", async () => {
@@ -90,6 +92,17 @@ describe("quotes", () => {
     expect(await refusal(deleteQuote(scope, b.id))).toMatchObject({ status: 409, code: "quote.closed" });
   });
 
+  it("an edit while a write of the quote is being sent or unconfirmed is a 409; once settled it goes", async () => {
+    const q = await create({ lines: [] });
+    await prisma.quote.update({ where: { id: q.id }, data: { status: "CREATED", shopifyId: "gid://shopify/DraftOrder/3" } });
+    for (const [attempt, status] of [[1, "PENDING"], [2, "UNKNOWN"]] as const) {
+      const w = await prisma.shopifyWrite.create({ data: { workspaceId: ws, brandId: brand, entityType: "QUOTE", entityId: q.id, version: 1, action: "DRAFT_ORDER_UPDATE", attempt, payloadHash: "h", status, actorUserId: scope.userId } });
+      expect(await refusal(editQuote(scope, q.id, QuoteEdit.parse({ version: 1, note: "x" })))).toMatchObject({ status: 409, code: "quote.writeInFlight" });
+      await prisma.shopifyWrite.update({ where: { id: w.id }, data: { status: "DONE" } });
+    }
+    expect(await editQuote(scope, q.id, QuoteEdit.parse({ version: 1, note: "x" }))).toMatchObject({ version: 2, note: "x" });
+  });
+
   it("a draft whose create in Shopify is unconfirmed can't be deleted", async () => {
     const q = await create({ lines: [] });
     await prisma.shopifyWrite.create({ data: { workspaceId: ws, brandId: brand, entityType: "QUOTE", entityId: q.id, version: 1, action: "DRAFT_ORDER_CREATE", payloadHash: "h", status: "UNKNOWN", actorUserId: scope.userId } });
@@ -97,10 +110,10 @@ describe("quotes", () => {
   });
 
   it("prices follow the currency's decimals: none for JPY, three for KWD", async () => {
-    const s2 = { ...scope, brandId: other };
+    const s2 = await freshScope("jpy");
     expect(await createQuote(s2, QuoteCreate.parse({ currency: "JPY", lines: [{ title: "Chair", quantity: 3, unitPrice: "1200" }], discount: { kind: "PERCENT", value: "10" } }))).toMatchObject({ totals: { subtotal: "3600", discount: "360", total: "3240" } });
     expect(await refusal(createQuote(s2, QuoteCreate.parse({ currency: "JPY", lines: [{ title: "Chair", quantity: 1, unitPrice: "1200.5" }] })))).toMatchObject({ status: 400, code: "quote.decimals" });
-    expect(await createQuote(s2, QuoteCreate.parse({ currency: "KWD", lines: [{ title: "Chair", quantity: 2, unitPrice: "1.255" }] }))).toMatchObject({ totals: { total: "2.510" } });
+    expect(await createQuote(await freshScope("kwd"), QuoteCreate.parse({ currency: "KWD", lines: [{ title: "Chair", quantity: 2, unitPrice: "1.255" }] }))).toMatchObject({ totals: { total: "2.510" } });
   });
 
   it("a brand without a Shopify catalogue gives the currency; a line in another currency is refused", async () => {
@@ -109,6 +122,23 @@ describe("quotes", () => {
     const usd = await prisma.product.create({ data: { workspaceId: ws, brandId: other, source: "MANUAL", title: "Lamp", price: "10.00", currency: "USD" } });
     expect(await refusal(createQuote(s2, QuoteCreate.parse({ currency: "EUR", lines: [{ productId: usd.id, quantity: 1 }] })))).toMatchObject({ status: 400, code: "quote.currency" });
     expect(await createQuote(s2, QuoteCreate.parse({ currency: "USD", lines: [{ productId: usd.id, quantity: 1 }] }))).toMatchObject({ currency: "USD", totals: { total: "10.00" } });
+    // The first quote's currency is kept: later quotes take it, and another is refused.
+    expect((await prisma.brandProfile.findUniqueOrThrow({ where: { brandId: other } })).quoteCurrency).toBe("USD");
+    expect(await createQuote(s2, QuoteCreate.parse({ lines: [] }))).toMatchObject({ currency: "USD" });
+    expect(await refusal(createQuote(s2, QuoteCreate.parse({ currency: "EUR", lines: [] })))).toMatchObject({ status: 400, code: "quote.currency" });
+  });
+
+  it("two first quotes at once in different currencies: one is kept, the other refused", async () => {
+    const s3 = await freshScope("race");
+    const out = await Promise.all(["EUR", "GBP"].map((currency) => createQuote(s3, QuoteCreate.parse({ currency, lines: [] })).then((q) => q.currency, (e: { code?: string }) => e.code)));
+    const kept = (await prisma.brandProfile.findUniqueOrThrow({ where: { brandId: s3.brandId } })).quoteCurrency;
+    expect(out.sort()).toEqual([kept, "quote.currency"].sort());
+  });
+
+  it("a brand with a Shopify catalogue takes the shop's currency and keeps none of its own", async () => {
+    const q = await create({ currency: "GBP", lines: [] });
+    expect(q.currency).toBe("EUR");
+    expect((await prisma.brandProfile.findUniqueOrThrow({ where: { brandId: brand } })).quoteCurrency).toBeNull();
   });
 });
 

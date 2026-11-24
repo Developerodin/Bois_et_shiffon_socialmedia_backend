@@ -4,7 +4,7 @@ import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { closeQuoteReminders, loadQuote, minorDigits, quoteDiscount, quoteLines, quoteTotals, toMinor, toQuoteDto, type QuoteScope } from "@/server/quotes/quotes";
 import { PublishingError } from "@/server/services/publishing";
-import { askCartWriteAdapter, type DraftOrder, type DraftOrderInput, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
+import { askCartWriteAdapter, shopifyTarget, type DraftOrder, type DraftOrderInput, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
 import { confirmWrite, previewWrite, ShopifyWriteError } from "@/server/shopify/writes";
 import { QUOTE_LIMITS, quoteNumber, type DraftOrderWritePreview, type InvoiceEmailInput, type InvoiceWritePreview, type QuoteShopifyAction } from "@/shared";
 
@@ -20,7 +20,6 @@ import { QUOTE_LIMITS, quoteNumber, type DraftOrderWritePreview, type InvoiceEma
 const ACTION = { create: "DRAFT_ORDER_CREATE", update: "DRAFT_ORDER_UPDATE", invoice: "DRAFT_ORDER_INVOICE_SEND" } as const satisfies Record<QuoteShopifyAction, ShopifyWriteAction>;
 type DraftAction = Exclude<QuoteShopifyAction, "invoice">;
 export const quoteTag = (id: string) => `sma-quote-${id}`;
-export const target = (scope: { workspaceId: string; brandId: string }) => ({ workspaceId: scope.workspaceId, brandId: scope.brandId });
 
 /** The draft order as it would be written now, or a 409 when the quote isn't in the state the action needs. */
 function build(q: Quote, action: DraftAction): DraftOrderWritePreview {
@@ -73,7 +72,7 @@ function refusedLine(fields: string[] = []) {
  */
 export async function completedInShopify(scope: QuoteScope, q: Quote, adapter: ShopifyWriteAdapter) {
   if (!q.shopifyId) return false;
-  const found = await adapter.lookupDraftOrder(target(scope), { id: q.shopifyId });
+  const found = await adapter.lookupDraftOrder(shopifyTarget(scope), { id: q.shopifyId });
   if (!found.ok || found.value?.status !== "COMPLETED") return false;
   const orderId = found.value.orderId;
   await prisma.$transaction(async (tx) => {
@@ -115,13 +114,13 @@ export async function confirmDraftOrderWrite(scope: QuoteScope, quoteId: string,
           return { version: q.version, payload: built };
         },
         run: (a, payload, requestId) =>
-          action === "create" ? a.createDraftOrder(target(scope), requestId, input(payload)) : a.updateDraftOrder(target(scope), requestId, q.shopifyId!, input(payload)),
+          action === "create" ? a.createDraftOrder(shopifyTarget(scope), requestId, input(payload)) : a.updateDraftOrder(shopifyTarget(scope), requestId, q.shopifyId!, input(payload)),
         reconcile: async (a) => {
           // A create by our tag (Shopify's search lags a few minutes: confirmWrite waits before a "Send again").
-          if (action === "create") return a.lookupDraftOrder(target(scope), { tag: quoteTag(q.id) });
+          if (action === "create") return a.lookupDraftOrder(shopifyTarget(scope), { tag: quoteTag(q.id) });
           // An update by the draft holding what was confirmed (the rebuilt payload: confirmWrite checked it hashes the
           // same), never by timestamps, which an edit in Shopify's admin or clock skew would fool.
-          const found = await a.lookupDraftOrder(target(scope), { id: q.shopifyId! });
+          const found = await a.lookupDraftOrder(shopifyTarget(scope), { id: q.shopifyId! });
           if (!found.ok || !found.value) return found;
           return { ok: true, value: built && holdsPayload(found.value, built) ? found.value : null };
         },
@@ -205,12 +204,12 @@ export async function confirmInvoice(scope: QuoteScope, quoteId: string, email: 
         q = await loadQuote(scope, quoteId);
         return { version: q.version, payload: await buildInvoice(scope, q, email) };
       },
-      run: (a, p, requestId) => a.sendInvoice(target(scope), requestId, q.shopifyId!, { to: p.to, subject: p.subject, message: p.message }),
+      run: (a, p, requestId) => a.sendInvoice(shopifyTarget(scope), requestId, q.shopifyId!, { to: p.to, subject: p.subject, message: p.message }),
       reconcile: async (a) => {
         // Sent when Shopify records a send after the last one we know of (q.sentAt holds Shopify's own invoiceSentAt
         // from the last confirmed send; none before the first): Shopify's clock against Shopify's clock.
         // ponytail: a send from Shopify's admin also counts; an adapter answering without invoiceSentAt leaves our clock in sentAt.
-        const found = await a.lookupDraftOrder(target(scope), { id: q.shopifyId! });
+        const found = await a.lookupDraftOrder(shopifyTarget(scope), { id: q.shopifyId! });
         if (!found.ok || !found.value) return found;
         const sentAt = found.value.invoiceSentAt;
         return { ok: true, value: sentAt && (!q.sentAt || new Date(sentAt) > q.sentAt) ? found.value : null };

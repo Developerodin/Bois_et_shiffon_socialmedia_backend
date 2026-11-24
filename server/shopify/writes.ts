@@ -26,8 +26,8 @@ export type WriteScope = { workspaceId: string; brandId: string; userId: string;
 export type WriteKey = { entityType: ShopifyWriteEntity; entityId: string; action: ShopifyWriteAction };
 
 const CONFIRM_TTL_MS = 10 * 60_000;
-const PENDING_STALE_MS = 2 * 60_000;
-const UNKNOWN_WAIT_MS = 10 * 60_000;
+export const PENDING_STALE_MS = 2 * 60_000;
+export const UNKNOWN_WAIT_MS = 10 * 60_000;
 const HOUR = 3_600_000;
 /** A send with no answer by then counts as unanswered (UNKNOWN), well inside PENDING_STALE_MS. */
 const RUN_TIMEOUT_MS = 60_000;
@@ -92,9 +92,12 @@ export async function shopifyMcpOnly(scope: { workspaceId: string; brandId: stri
   return conns.length > 0 && conns.every(isShopifyMcp);
 }
 
-/** Whether this brand's writes for `action` can run now. An MCP-only brand is refused (422) before the adapter. */
-export async function writesReady(adapter: ShopifyWriteAdapter, scope: WriteScope, action: ShopifyWriteAction): Promise<ShopifyWritesReady> {
-  if (await shopifyMcpOnly(scope)) throw new ShopifyWriteError(MCP_ONLY, 422, "NOT_CONNECTED");
+/**
+ * Whether this brand's writes for `action` can run now. An MCP-only brand is refused (422) before the adapter.
+ * `mcpOnly`: shopifyMcpOnly as the caller already read it for this preview or confirm (read here when not given).
+ */
+export async function writesReady(adapter: ShopifyWriteAdapter, scope: WriteScope, action: ShopifyWriteAction, mcpOnly?: boolean): Promise<ShopifyWritesReady> {
+  if (mcpOnly ?? (await shopifyMcpOnly(scope))) throw new ShopifyWriteError(MCP_ONLY, 422, "NOT_CONNECTED");
   const caps = await adapter.capabilities({ workspaceId: scope.workspaceId, brandId: scope.brandId });
   if (!caps.connected) return { ready: false, reason: "NOT_CONNECTED" };
   const needed = SHOPIFY_WRITE_SCOPE[action];
@@ -120,7 +123,7 @@ const latest = (scope: WriteScope, key: WriteKey, version: number) =>
  */
 export async function previewWrite<P>(
   scope: WriteScope,
-  input: WriteKey & { version: number; payload: P; again?: boolean },
+  input: WriteKey & { version: number; payload: P; again?: boolean; mcpOnly?: boolean },
   adapter: ShopifyWriteAdapter = askCartWriteAdapter,
   now = new Date(),
 ): Promise<ShopifyWritePreview<P>> {
@@ -135,7 +138,7 @@ export async function previewWrite<P>(
     attempt,
     confirmToken: confirm,
     expiresAt: new Date(exp).toISOString(),
-    writes: await writesReady(adapter, scope, action),
+    writes: await writesReady(adapter, scope, action, input.mcpOnly),
     last: last && last.attempt === attempt ? last.status : null,
   };
 }
@@ -151,6 +154,8 @@ export type ConfirmHooks<P, R extends { shopifyId: string }> = {
   reconcile: (adapter: ShopifyWriteAdapter, write: ShopifyWrite) => Promise<ShopifyResult<R | null>>;
   /** Runs in the transaction that marks the write DONE: update the entity from Shopify's answer. Database writes only, no network calls. */
   onDone?: (tx: Prisma.TransactionClient, result: R, write: ShopifyWrite) => Promise<void>;
+  /** shopifyMcpOnly as the caller already read it for this confirm (read here when not given). */
+  mcpOnly?: boolean;
 };
 
 /** Confirms a previewed write. Returns Shopify's answer once DONE; every other outcome throws a ShopifyWriteError. */
@@ -169,7 +174,7 @@ export async function confirmWrite<P, R extends { shopifyId: string }>(
   }
   const { version, payload } = await hooks.rebuild();
   if (version !== c.version || payloadHash(payload) !== c.hash) throw new ShopifyWriteError("This changed since you checked it", 409, "CHANGED");
-  const ready = await writesReady(adapter, scope, key.action);
+  const ready = await writesReady(adapter, scope, key.action, hooks.mcpOnly);
   if (!ready.ready) throw refusalError(ready);
 
   const where = { workspaceId: scope.workspaceId, brandId: scope.brandId, ...key, version };
@@ -243,9 +248,9 @@ async function reconciled<R extends { shopifyId: string }>(row: ShopifyWrite, ho
 
 /** `undo` puts the row back as it was when a limit refuses. */
 async function rateLimit(scope: WriteScope, undo: () => Promise<unknown>) {
-  const perUser = await hitRateLimit(`shopify-writes:${scope.brandId}:${scope.userId}`, 30, HOUR);
-  const perBrand = perUser.allowed && (await hitRateLimit(`shopify-writes:${scope.brandId}`, 100, HOUR));
-  if (perUser.allowed && perBrand && perBrand.allowed) return;
+  // Both buckets count every confirm that reaches here, refused or not (one round trip instead of two).
+  const [perUser, perBrand] = await Promise.all([hitRateLimit(`shopify-writes:${scope.brandId}:${scope.userId}`, 30, HOUR), hitRateLimit(`shopify-writes:${scope.brandId}`, 100, HOUR)]);
+  if (perUser.allowed && perBrand.allowed) return;
   await undo();
   throw new ShopifyWriteError("Too many Shopify changes this hour. Try again later.", 429, "RATE_LIMITED");
 }
@@ -316,6 +321,29 @@ async function done<R extends { shopifyId: string }>(row: ShopifyWrite, result: 
     await audit(tx, write, "DONE", { shopifyId: result.shopifyId });
     return { result, write };
   });
+}
+
+/**
+ * Settles a row a caller found from an earlier run (not one this confirm sent): DONE with Shopify's id when the write
+ * was found there, or FAILED when it wasn't. Only while the row is still as read (same run and state); audited with
+ * `actorUserId`, who settled it. In the caller's transaction; false when the row had moved on.
+ */
+export async function settleFoundRow(tx: Prisma.TransactionClient, row: ShopifyWrite, outcome: { status: "DONE"; shopifyId: string } | { status: "FAILED"; error: string }, actorUserId: string) {
+  const { count } = await tx.shopifyWrite.updateMany({
+    where: { id: row.id, runs: row.runs, status: row.status },
+    data: outcome.status === "DONE" ? { status: "DONE", shopifyId: outcome.shopifyId, error: null } : { status: "FAILED", error: outcome.error },
+  });
+  if (count) await audit(tx, { ...row, actorUserId }, outcome.status, outcome.status === "DONE" ? { shopifyId: outcome.shopifyId } : {});
+  return count > 0;
+}
+
+/** Whether a write of the entity (of one of `actions`, else any) is being sent or unconfirmed: PENDING or UNKNOWN. */
+export async function writeInFlight(scope: { workspaceId: string; brandId: string }, entityType: ShopifyWriteEntity, entityId: string, actions?: ShopifyWriteAction[]) {
+  const row = await prisma.shopifyWrite.findFirst({
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, entityType, entityId, status: { in: ["PENDING", "UNKNOWN"] }, ...(actions ? { action: { in: actions } } : {}) },
+    select: { id: true },
+  });
+  return !!row;
 }
 
 /** Daily sweep: a PENDING write with no answer for 10 min becomes UNKNOWN (reconciled at the next confirm). */

@@ -91,7 +91,9 @@ describe("per-brand mode", () => {
     const url = new URL(((await res.json()) as { url: string }).url);
     const state = url.searchParams.get("state")!;
     const row = await prisma.oAuthStateTransaction.findFirstOrThrow({ where: { brandId }, orderBy: { createdAt: "desc" } });
-    return { url, state, verifier: row.codeVerifier! };
+    // Kept encrypted, never as the raw verifier.
+    expect(row.codeVerifier).toMatch(/^v1:/);
+    return { url, state, verifier: decryptCredentials<string>(row.codeVerifier!) };
   }
   const tokenAnswer = (domain = "bc-store.myshopify.com", extra: object = {}) =>
     json({ access_token: `tok_${domain}`, shop: { domain, name: "B&C", currencyCode: "INR" }, scopes: ["read_products", "read_orders"], ...extra });
@@ -200,6 +202,26 @@ describe("per-brand mode", () => {
     expect(init.method).toBe("DELETE");
     expect(init.headers.authorization).toBe("Bearer tok_bc-store.myshopify.com");
     expect(await prisma.integrationConnection.findUniqueOrThrow({ where: { id: c.id } })).toMatchObject({ status: "REVOKED", encryptedCredentials: null });
+  });
+
+  it("disconnects first, then asks AskCart once, with a short deadline and no rate-limit wait", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { state } = await start("ac-b");
+    vi.stubGlobal("fetch", vi.fn(async () => tokenAnswer()));
+    await completeAskCartConnect({ state, code: "c", shop: null, userId: user });
+    const c = await conn("ac-b");
+    let statusAtRevoke: string | null = null;
+    const revoke = vi.fn(async (_url: string, init: RequestInit) => {
+      statusAtRevoke = (await prisma.integrationConnection.findUniqueOrThrow({ where: { id: c.id } })).status;
+      expect(init.signal).toBeInstanceOf(AbortSignal);
+      return new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "retry-after": "1" } });
+    });
+    vi.stubGlobal("fetch", revoke);
+    auth.brandId = "ac-b";
+    const res = await DELETE(new Request("http://x", { method: "DELETE" }), { params: Promise.resolve({ workspaceId: "w", brandId: "b", connectionId: c.id }) });
+    expect(res.status).toBe(200);
+    expect(statusAtRevoke).toBe("REVOKED");
+    expect(revoke).toHaveBeenCalledTimes(1);
   });
 });
 

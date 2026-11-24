@@ -150,7 +150,7 @@ async function cappedText(res: Response) {
  */
 export async function askCartRequest<T>(
   path: string,
-  opts: { bearer?: string; method?: "GET" | "POST" | "DELETE"; params?: Record<string, string>; body?: unknown; signal?: AbortSignal } = {},
+  opts: { bearer?: string; method?: "GET" | "POST" | "DELETE"; params?: Record<string, string>; body?: unknown; signal?: AbortSignal; /** false: a rate limit fails at once (no Retry-After wait) */ retry?: boolean } = {},
 ): Promise<T> {
   const cfg = askCartConfig();
   if (!cfg) throw new AskCartError(0, "not_configured");
@@ -184,7 +184,7 @@ export async function askCartRequest<T>(
     if (opts.bearer !== undefined && (res.status === 401 || storeGone)) throw new ReconnectNeeded(`AskCart ${res.status}${code ? ` ${code}` : ""}`);
     const err = new AskCartError(res.ok ? 502 : res.status, res.ok ? "bad_body" : code, typeof visibleSince === "string" ? visibleSince : null);
     const wait = Number(res.headers.get("retry-after") ?? 2);
-    if (err.rateLimited && attempt < RETRIES && Number.isFinite(wait) && wait >= 0 && wait <= MAX_RETRY_WAIT_S) {
+    if (err.rateLimited && opts.retry !== false && attempt < RETRIES && Number.isFinite(wait) && wait >= 0 && wait <= MAX_RETRY_WAIT_S) {
       await sleep(wait * 1000, undefined, { signal });
       continue;
     }
@@ -276,7 +276,7 @@ export async function askCartTokenRequest(grant: { grant_type: "authorization_co
 }
 
 /** Per-brand mode: tell AskCart to forget this brand's token (Disconnect). Best effort: the caller ignores failures. */
-export const askCartRevoke = (bearer: string) => askCartRequest<null>("token", { method: "DELETE", bearer });
+export const askCartRevoke = (bearer: string, signal?: AbortSignal) => askCartRequest<null>("token", { method: "DELETE", bearer, signal, retry: false });
 
 /**
  * INTERIM single-store mode only. One brand per deployment may attach AskCart: its secret is locked to one store

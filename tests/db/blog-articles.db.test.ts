@@ -5,7 +5,7 @@ vi.mock("@/server/auth/request-user", () => ({ requestUserId: vi.fn() }));
 import { prisma } from "@/server/db/prisma";
 import { brandAccess } from "@/server/auth/access";
 import { ensureSystemRoles } from "@/server/auth/permissions";
-import { ArticleEdit, createArticle, decideArticle, editArticle, type ArticleScope } from "@/server/blog/articles";
+import { ArticleEdit, createArticle, decideArticle, deleteArticle, editArticle, type ArticleScope } from "@/server/blog/articles";
 
 /** Articles against real tables: handles, versions on edit, the own-work approval rule and task scoping. */
 let ws: string;
@@ -65,6 +65,19 @@ describe("blog articles", () => {
       const admin = (await prisma.role.findFirstOrThrow({ where: { workspaceId: ws, slug: "admin" } })).id;
       await prisma.workspaceMember.create({ data: { workspaceId: ws, userId: user.ben!, roleId: admin } });
     }
+  });
+
+  it("an article with a write being sent or unconfirmed can't be deleted; once settled it can", async () => {
+    const ana = await scopeOf("ana");
+    const a = await createArticle(ana, { topic: "Ironing", productIds: [] });
+    await prisma.blogArticle.update({ where: { id: a.id }, data: { shopifyId: "gid://shopify/Article/9" } });
+    for (const [action, status] of [["ARTICLE_CREATE", "UNKNOWN"], ["ARTICLE_UPDATE", "PENDING"]] as const) {
+      const w = await prisma.shopifyWrite.create({ data: { workspaceId: ws, brandId: brand, entityType: "BLOG_ARTICLE", entityId: a.id, version: 1, action, payloadHash: action, status, actorUserId: user.ana! } });
+      expect(await refusal(deleteArticle(ana, a.id))).toEqual({ status: 409, code: "blog.writeInFlight" });
+      await prisma.shopifyWrite.update({ where: { id: w.id }, data: { status: "DONE" } });
+    }
+    await deleteArticle(ana, a.id);
+    expect((await prisma.blogArticle.findUniqueOrThrow({ where: { id: a.id } })).status).toBe("ARCHIVED");
   });
 
   it("a task or product of another brand is not found", async () => {

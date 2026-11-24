@@ -2,9 +2,8 @@ import type { Quote } from "@prisma/client";
 import { addDays, brandTimeZone, registerSync, type SyncOutcome, zoneToday } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { closeQuoteReminders, reminderKey } from "@/server/quotes/quotes";
-import { target } from "@/server/quotes/shopify-draft-orders";
 import { TX } from "@/server/services/publishing";
-import { askCartWriteAdapter, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
+import { askCartWriteAdapter, shopifyTarget, type ShopifyWriteAdapter } from "@/server/shopify/adapter";
 import { shopifyMcpOnly } from "@/server/shopify/writes";
 import { canBeAssigned } from "@/server/tasks/access";
 import { taskAudit } from "@/server/tasks/audit";
@@ -94,7 +93,7 @@ export async function syncQuoteStatus(scope: Scope, adapter: ShopifyWriteAdapter
   for (const q of toRead.slice(0, READS)) {
     let found: Awaited<ReturnType<ShopifyWriteAdapter["lookupDraftOrder"]>>;
     try {
-      found = await adapter.lookupDraftOrder(target(scope), { id: q.shopifyId! });
+      found = await adapter.lookupDraftOrder(shopifyTarget(scope), { id: q.shopifyId! });
     } catch (e) {
       // This quote only: the rest are still read, and it isn't expired today. Logged by error name (adapter text can carry anything).
       console.warn("[quotes] status read failed", q.id, e instanceof Error ? e.name : "error");
@@ -122,11 +121,17 @@ export async function syncQuoteStatus(scope: Scope, adapter: ShopifyWriteAdapter
   }
 
   const sent = await prisma.quote.findMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, status: "SENT", sentAt: { not: null } } });
+  // The reminders that exist already, in one read: only the missing ones get a transaction.
+  const made = new Set(
+    sent.length
+      ? (await prisma.task.findMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, requestId: { in: sent.flatMap((q) => REMINDER_DAYS.map((d) => reminderKey(q.id, q.sentAt!, d))) } }, select: { requestId: true } })).map((t) => t.requestId)
+      : [],
+  );
   for (const q of sent) {
     const sentDay = zoneToday(zone, q.sentAt!);
     // Only the latest one due: a quote first seen on day 21 gets the 21-day reminder, not both.
     const due = REMINDER_DAYS.find((d) => today >= addDays(sentDay, d));
-    if (due && (await remind(scope, q, sentDay, due))) count++;
+    if (due && !made.has(reminderKey(q.id, q.sentAt!, due)) && (await remind(scope, q, sentDay, due))) count++;
   }
   return { count, reason };
 }

@@ -90,10 +90,13 @@ async function refreshLocked(id: string) {
  * AskCart's announced DELETE /api/partner/token takes only the bearer, so the refresh token isn't sent; it relies on
  * AskCart ending the whole grant (check when its refresh exists).
  */
+const REVOKE_TIMEOUT_MS = 5_000;
+
 export async function revokeAskCart(conn: IntegrationConnection) {
   if (conn.externalAccountId === ASKCART_ACCOUNT || !conn.encryptedCredentials) return;
   try {
-    await askCartRevoke(decryptCredentials<Creds>(conn.encryptedCredentials).accessToken);
+    // Short and single: a person is waiting on Disconnect, and our side is already dropped.
+    await askCartRevoke(decryptCredentials<Creds>(conn.encryptedCredentials).accessToken, AbortSignal.timeout(REVOKE_TIMEOUT_MS));
   } catch (e) {
     console.warn("[askcart] token revoke failed", conn.brandId, e instanceof Error ? e.message : e);
   }

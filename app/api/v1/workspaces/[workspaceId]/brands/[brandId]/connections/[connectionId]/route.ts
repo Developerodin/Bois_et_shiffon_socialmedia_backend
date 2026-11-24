@@ -13,13 +13,14 @@ export async function DELETE(
     const scope = await authorizeBrandRoute(request, context.params, "integrations.manage");
     if (scope instanceof Response) return scope;
     const { connectionId } = await context.params;
-    // An AskCart store: AskCart forgets the brand's token first (best effort), then ours is dropped as usual.
+    // An AskCart store: ours is dropped first, then AskCart is told to forget the token read before (best effort,
+    // 5 s, a failure logged only), so a slow or refusing AskCart never keeps the store connected here.
     const conn = await prisma.integrationConnection.findFirst({
       where: { id: connectionId, workspaceId: scope.workspaceId, brandId: scope.brandId, provider: "SHOPIFY", status: { not: "REVOKED" } },
     });
-    if (conn && isAskCart(conn)) await revokeAskCart(conn);
     const result = await disconnect({ ...scope, connectionId });
     if (!result) return problemResponse({ type: "https://api.brandpilot/errors/not-found", title: "Not found", status: 404 });
+    if (conn && isAskCart(conn)) await revokeAskCart(conn);
     return Response.json(result);
   } catch (error) {
     return fromAccessError(error);

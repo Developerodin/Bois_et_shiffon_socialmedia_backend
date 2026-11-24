@@ -22,12 +22,12 @@ beforeAll(async () => {
   scope = { workspaceId: ws, brandId: brand, userId: u.id, perms: new Set<PermissionKey>(["brand.read", "crm.manage"]) };
 });
 
-async function sentQuote(shop: ReturnType<typeof fakeShopify>) {
-  const q = await createQuote(scope, QuoteCreate.parse({ currency: "EUR", contactEmail: "jeanne@client.test", lines: [{ title: "Sofa", quantity: 1, unitPrice: "900" }] }));
-  const c = await previewDraftOrderWrite(scope, q.id, "create", {}, shop.adapter);
-  await confirmDraftOrderWrite(scope, q.id, "create", c.confirmToken, shop.adapter);
-  const i = await previewInvoice(scope, q.id, {}, {}, shop.adapter);
-  return confirmInvoice(scope, q.id, {}, i.confirmToken, shop.adapter);
+async function sentQuote(shop: ReturnType<typeof fakeShopify>, s = scope) {
+  const q = await createQuote(s, QuoteCreate.parse({ currency: "EUR", contactEmail: "jeanne@client.test", lines: [{ title: "Sofa", quantity: 1, unitPrice: "900" }] }));
+  const c = await previewDraftOrderWrite(s, q.id, "create", {}, shop.adapter);
+  await confirmDraftOrderWrite(s, q.id, "create", c.confirmToken, shop.adapter);
+  const i = await previewInvoice(s, q.id, {}, {}, shop.adapter);
+  return confirmInvoice(s, q.id, {}, i.confirmToken, shop.adapter);
 }
 const status = async (id: string) => (await prisma.quote.findUniqueOrThrow({ where: { id } })).status;
 const reminders = (id: string) => prisma.task.findMany({ where: { requestId: { startsWith: `quote:${id}:` } }, orderBy: { createdAt: "asc" } });
@@ -95,6 +95,25 @@ describe("quote status", () => {
     const closed = await reminders(q.id);
     expect(closed.map((t) => t.status)).toEqual(["DONE", "DONE"]);
     expect(await prisma.taskComment.count({ where: { taskId: { in: closed.map((t) => t.id) }, kind: "SYSTEM" } })).toBe(2);
+  });
+
+  it("reminders already made are read once per run, not tried again quote by quote", async () => {
+    const s2 = { ...scope, brandId: (await prisma.brand.create({ data: { workspaceId: ws, slug: "made", displayName: "Made" } })).id };
+    const shop = fakeShopify();
+    const a = await sentQuote(shop, s2);
+    const b = await sentQuote(shop, s2);
+    await syncQuoteStatus(s2, shop.adapter, new Date(Date.now() + 8 * DAY));
+    const tx = vi.spyOn(prisma, "$transaction");
+    const reads = vi.spyOn(prisma.task, "findMany");
+    try {
+      expect(await syncQuoteStatus(s2, shop.adapter, new Date(Date.now() + 9 * DAY))).toEqual({ count: 0, reason: null });
+      expect(tx).not.toHaveBeenCalled();
+      expect(reads).toHaveBeenCalledTimes(1);
+    } finally {
+      tx.mockRestore();
+      reads.mockRestore();
+    }
+    expect([(await reminders(a.id)).length, (await reminders(b.id)).length]).toEqual([1, 1]);
   });
 
   it("no reminder once the quote isn't SENT", async () => {

@@ -36,6 +36,15 @@ describe("quote totals", () => {
     expect(QuoteEdit.safeParse({ version: 1, lines: [{ title: "x", quantity: 10_000, unitPrice: "1" }] }).success).toBe(false);
   });
 
+  it("a discount is checked by its kind: a percentage within 0–100 with at most 2 decimals, an amount as a price", () => {
+    const ok = (kind: string, value: string) => QuoteCreate.safeParse({ lines: [], discount: { kind, value } }).success;
+    expect([ok("PERCENT", "0"), ok("PERCENT", "12.5"), ok("PERCENT", "99.99"), ok("PERCENT", "100")]).toEqual([true, true, true, true]);
+    expect([ok("PERCENT", "100.01"), ok("PERCENT", "150"), ok("PERCENT", "12.345"), ok("PERCENT", "-5")]).toEqual([false, false, false, false]);
+    // An amount may pass 100 and carry 3 decimals (the currency's own decimals are checked on save).
+    expect([ok("AMOUNT", "150"), ok("AMOUNT", "1.255")]).toEqual([true, true]);
+    expect(ok("AMOUNT", "1.2345")).toBe(false);
+  });
+
   it("numbers read Q-0042", () => {
     expect(quoteNumber(42)).toBe("Q-0042");
     expect(quoteNumber(12345)).toBe("Q-12345");
