@@ -58,6 +58,8 @@ const PARTIAL: Note = { error: "Only part of the catalogue could be read, so no 
 const FAILED: Note = { error: "The last sync couldn't read the products. Press Sync now to try again.", reason: "failed" };
 const REFUSED: Note = { error: SHOPIFY_REFUSED, reason: "shopify-refused" };
 export const READING: Note = { error: null, reason: "reading" };
+// A website whose feed worked answered "not a feed" once (a deploy, a hiccup): kept a day before reading its pages.
+const FEED_MISSING: Note = { error: "Your website's product feed didn't answer today. We'll check again tomorrow.", reason: "feed-missing" };
 
 export const str = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
 
@@ -251,7 +253,7 @@ export async function catalogSource(scope: Scope, db: Db = prisma) {
   const last = profile.catalogSync as CatalogSync | null;
   return last?.source === "SITE"
     ? { source: "SITE" as const, websiteUrl: profile.websiteUrl, capped: last.pages?.capped ?? false }
-    : { source: "WEBSITE" as const, websiteUrl: profile.websiteUrl };
+    : { source: "WEBSITE" as const, websiteUrl: profile.websiteUrl, last };
 }
 
 /** The fields a save writes (SavedRow's keys), read back to tell changed rows from unchanged ones. */
@@ -300,6 +302,9 @@ type KeptField = "price" | "compareAtPrice" | "inStock" | "stockQuantity";
 const kept = (p: Stored, f: KeptField) => (f === "price" || f === "compareAtPrice" ? (p[f]?.toFixed(2) ?? null) : p[f]);
 
 /** A link without its #fragment or trailing slash, so "…/chair/" and "…/chair#reviews" are one product. */
+/** sameLink with a leading www. dropped: the same product page on a site read as www.x and as x (pages vs feed). */
+export const siteLink = (url: string) => sameLink(url).replace(/^(https?:\/\/)www\./i, "$1");
+
 export function sameLink(url: string) {
   try {
     const u = new URL(url);
@@ -399,12 +404,12 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
       orderBy: [{ archivedAt: { sort: "desc", nulls: "first" } }, { externalId: "asc" }],
     });
     for (const { url, sku, ...f } of site) {
-      if (url && !siteFacts.has(`url:${sameLink(url)}`)) siteFacts.set(`url:${sameLink(url)}`, f);
+      if (url && !siteFacts.has(`url:${siteLink(url)}`)) siteFacts.set(`url:${siteLink(url)}`, f);
       if (sku && !siteFacts.has(`sku:${sku}`)) siteFacts.set(`sku:${sku}`, f);
     }
   }
   const factsOf = (r: SavedRow) =>
-    facts.get(variantNumericId(r.externalId) ?? "") ?? (r.url && siteFacts.get(`url:${sameLink(r.url)}`)) ?? (r.sku && siteFacts.get(`sku:${r.sku}`)) ?? undefined;
+    facts.get(variantNumericId(r.externalId) ?? "") ?? (r.url && siteFacts.get(`url:${siteLink(r.url)}`)) ?? (r.sku && siteFacts.get(`sku:${r.sku}`)) ?? undefined;
   let added = 0;
   for (const part of chunks(created)) {
     added += (await db.product.createMany({
@@ -477,10 +482,16 @@ export async function runCatalogSync(payload: unknown) {
     // A SITE brand's feed is checked every day too: once the site has one, the feed takes over (and archives SITE rows).
     const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal) : await websiteFeed(found.websiteUrl, signal);
     // A SITE brand stays one when its feed URL turns readers away for a day: only a feed that answers moves it.
+    // A feed that worked must say "not a feed" on two different days before its products are left for the pages.
+    const last = found.source === "WEBSITE" ? found.last : null;
+    if (fetched.note === NOT_A_FEED && last?.source === "WEBSITE" && last.count > 0 && (last.reason !== "feed-missing" || last.at.slice(0, 10) === at.slice(0, 10))) {
+      return void (await record(scope, { at, source: "WEBSITE", count: last.count }, FEED_MISSING));
+    }
     if (fetched.note === NOT_A_FEED || (fetched.note === BLOCKED && found.source === "SITE")) {
       await archiveShopifyRows(scope);
-      await startPageChain(scope);
-      return void (await record(scope, { at, source: "SITE", ...(await siteProgress(scope, found.source === "SITE" && found.capped)) }, READING));
+      // Recorded first: the chain's first step reads the source from this record.
+      await record(scope, { at, source: "SITE", ...(await siteProgress(scope, found.source === "SITE" && found.capped)) }, READING);
+      return void (await startPageChain(scope));
     }
     const source = found.source === "SHOPIFY" ? "SHOPIFY" : "WEBSITE";
     // Up to 2 minutes behind an import or another sync's save; past that the job is retried, nothing recorded.

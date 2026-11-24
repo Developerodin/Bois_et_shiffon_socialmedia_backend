@@ -1,5 +1,5 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
-import { sameLink, variantNumericId } from "@/server/catalog/sync";
+import { sameLink, siteLink, variantNumericId } from "@/server/catalog/sync";
 import {
   REMOVED_PRODUCT_NAME, byExternalId, groupKey, handleOf, productName, stockState, type LinkedProduct, type ProductRow,
 } from "@/server/content/product-checks";
@@ -20,15 +20,17 @@ function otherSourceId(row: ProductRow) {
 /**
  * The automatic sources that read the same products as `source` under other keys: SITE rows (product pages) and the
  * WEBSITE/SHOPIFY rows (feed, store) share no externalId, so a link crosses between them by product link, then SKU.
+ * SITE also to SITE: a page that changes a product's key (a SKU added) archives the old row and makes a new one.
  */
 const acrossSite = (source: string): ("WEBSITE" | "SHOPIFY" | "SITE")[] =>
-  source === "SITE" ? ["SHOPIFY", "WEBSITE"] : source === "SHOPIFY" || source === "WEBSITE" ? ["SITE"] : [];
+  source === "SITE" ? ["SHOPIFY", "WEBSITE", "SITE"] : source === "SHOPIFY" || source === "WEBSITE" ? ["SITE"] : [];
 /** Rows read here carry their SKU (only `description` is left out); ProductRow doesn't name it. */
 const skuOf = (row: ProductRow) => (row as ProductRow & { sku?: string | null }).sku ?? null;
 /** The stored spellings of one link ("…/chair", "…/chair/", as written): the query matches them exactly. */
 const linkForms = (url: string) => {
   const same = sameLink(url);
-  return [...new Set([url, same, ...(same.includes("?") ? [] : [`${same}/`])])];
+  const hosts = [same, same.replace(/^(https?:\/\/)www\./i, "$1"), same.replace(/^(https?:\/\/)(?!www\.)/i, "$1www.")];
+  return [...new Set([url, ...hosts.flatMap((h) => [h, ...(h.includes("?") ? [] : [`${h}/`])])])];
 };
 /** Where an archived row's product may live on now, across the SITE switch (`acrossSite`). */
 function acrossWhere(row: ProductRow): Prisma.ProductWhereInput[] {
@@ -74,9 +76,9 @@ export async function linkedProducts(db: Db, scope: Scope, ids: string[], now = 
     const across = acrossSite(row.source);
     if (across.length) {
       const candidates = live.filter((r) => across.some((s) => s === r.source)).sort(byExternalId);
-      const link = row.url && sameLink(row.url);
+      const link = row.url && siteLink(row.url);
       const sku = skuOf(row);
-      const moved = (link && candidates.find((r) => r.url && sameLink(r.url) === link)) || (sku && candidates.find((r) => skuOf(r) === sku));
+      const moved = (link && candidates.find((r) => r.url && siteLink(r.url) === link)) || (sku && candidates.find((r) => skuOf(r) === sku));
       if (moved) return moved;
     }
     const key = groupKey(row);

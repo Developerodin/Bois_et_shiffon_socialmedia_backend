@@ -123,7 +123,9 @@ works with `--env-file`, compose and dotenv alike.
   job, a short one waits for the first to finish; raise it or add worker instances if that happens. A value below 1 is
   read as 1, and one that isn't a number as 4.
 - Each worker process has one Prisma pool (default `num_cpus × 2 + 1` connections, or `connection_limit` on
-  `DATABASE_URL`): keep it at least `WORKER_CONCURRENCY + 2`, one per loop plus lease renewals. Every loop also polls on
+  `DATABASE_URL`): keep it at least `WORKER_CONCURRENCY + 4`, one per loop plus lease renewals, plus two for the
+  product-page reader (`catalog.pages`, one at a time), which holds its brand lock and a host lock on connections of
+  their own while it saves on a third. Every loop also polls on
   its own, so an idle worker runs `WORKER_CONCURRENCY` claim queries per `WORKER_INTERVAL_MS` (4 per 15 s by default).
 - `WORKER_DAILY_SWEEP` decides whether the worker queues the daily sweep, which starts paid work (scheduled agent runs,
   plan renewals, catalog syncs). It reads `true`/`1` and `false`/`0` in any case, quotes ignored. Unset, it is on only

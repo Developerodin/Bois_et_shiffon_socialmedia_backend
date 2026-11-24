@@ -75,6 +75,13 @@ describe("linkedProducts", () => {
     expect((await linkedProducts(db, scope, ["site2"], now))[0]!.row?.id).toBe("w5");
   });
 
+  it("a SITE row whose key changed resolves to the new SITE row by link, with or without www.", async () => {
+    const old = row("site3", { source: "SITE", externalId: "url:https://www.shop.example/p/lamp", url: "https://www.shop.example/p/lamp", archivedAt: now });
+    const renamed = row("site4", { source: "SITE", externalId: "sku:L-1", sku: "L-1", url: "https://shop.example/p/lamp" });
+    const { db } = fakeDb([old, renamed]);
+    expect((await linkedProducts(db, scope, ["site3"], now))[0]!.row?.id).toBe("site4");
+  });
+
   it("a post linked to a feed row resolves to the SITE row that replaced it; feed and Shopify still match only by variant", async () => {
     const feedRow = row("w7", { externalId: "7", url: "https://shop.example/chair", archivedAt: now });
     const site = row("site7", { source: "SITE", externalId: "url:https://shop.example/chair", url: "https://shop.example/chair" });

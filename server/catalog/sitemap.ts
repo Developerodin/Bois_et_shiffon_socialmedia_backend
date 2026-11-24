@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Gunzip } from "fflate";
 import { prisma } from "@/server/db/prisma";
-import { ROBOTS_AGENT, robotsAllows, robotsRules, robotsSitemaps, safeFetchBytes } from "@/server/research/crawl";
+import { ROBOTS_AGENT, robotsAllows, robotsRules, robotsSitemaps, safeFetchBytes, sameSite } from "@/server/research/crawl";
 
 /**
  * Finds a website's product pages from its sitemap (robots.txt `Sitemap:` lines, else /sitemap.xml or
@@ -18,6 +18,9 @@ const FILE_TIMEOUT_MS = 30_000;
 const MAX_CHILDREN = 50;
 // Same ceiling as a feed (sync.ts MAX_ROWS): newest lastmod first.
 export const MAX_PAGES = 5000;
+// Sitemap entries kept in all: past this the rest is skipped (and the read is incomplete), so a hostile sitemap of a
+// million URLs never reaches the sort or robots.txt.
+const MAX_ENTRIES = 50_000;
 // Compressed bytes pushed at a time: gzip expands at most ~1,032x, so one push inflates ≤ ~4 MB before the counter stops it.
 const CHUNK = 4096;
 const MAX_URL = 2000;
@@ -29,17 +32,15 @@ const PRODUCT_PATH = /\/p\/|\/products?(?:[/-]|$)|\/produits?(?:[/-]|$)|-p-\d+/i
 export type FoundPage = { url: string; lastmod: Date | null };
 export type Discovery = { urls: FoundPage[]; complete: boolean; capped: boolean; reason?: "no-product-pages" };
 
-const siteHost = (u: URL) => u.hostname.toLowerCase().replace(/^www\./, "");
-
 /**
  * An http(s) URL on the same site as `base` (host equal or its www. variant), hash dropped; else null. `secure`: an
  * https site's sitemap files must be https too.
  */
-function sameSite(raw: string, base: URL, secure = false): URL | null {
+function sitemapUrl(raw: string, base: URL, secure = false): URL | null {
   if (raw.length > MAX_URL) return null;
   try {
     const u = new URL(raw, base);
-    if ((u.protocol !== "https:" && u.protocol !== "http:") || siteHost(u) !== siteHost(base)) return null;
+    if ((u.protocol !== "https:" && u.protocol !== "http:") || !sameSite(u.hostname, base.hostname)) return null;
     if (secure && base.protocol === "https:" && u.protocol !== "https:") return null;
     u.hash = "";
     return u;
@@ -153,13 +154,13 @@ export async function discoverProductUrls(origin: string, robots: string, signal
       return { parsed: null, status: null };
     }
     try {
-      const res = await safeFetchBytes(url.toString(), ACCEPT, Math.min(MAX_FILE, budget), deadline, FILE_TIMEOUT_MS);
+      const res = await safeFetchBytes(url.toString(), ACCEPT, Math.min(MAX_FILE, budget), deadline, FILE_TIMEOUT_MS, { sameSite: true });
       budget -= res.bytes.length;
       const fail = (status: number | null = res.status) => {
         complete = false;
         return { parsed: null, status };
       };
-      if (res.status !== 200 || !sameSite(res.url.toString(), base, true)) return fail();
+      if (res.status !== 200 || !sitemapUrl(res.url.toString(), base, true)) return fail();
       if (res.truncated) complete = false;
       let bytes = res.bytes;
       if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
@@ -176,7 +177,7 @@ export async function discoverProductUrls(origin: string, robots: string, signal
     }
   };
 
-  let roots = robotsSitemaps(robots).flatMap((s) => sameSite(s, base, true) ?? []);
+  let roots = robotsSitemaps(robots).flatMap((s) => sitemapUrl(s, base, true) ?? []);
   const fromRobots = roots.length > 0;
   if (!fromRobots) roots = [new URL("/sitemap.xml", base), new URL("/sitemap_index.xml", base)];
 
@@ -184,7 +185,13 @@ export async function discoverProductUrls(origin: string, robots: string, signal
   const other = new Map<string, string | null>();
   const take = (file: URL, entries: Entry[]) => {
     const into = PRODUCT_SITEMAP.test(file.pathname) ? product : other;
-    for (const e of entries) into.set(e.loc, e.lastmod);
+    for (const e of entries) {
+      if (product.size + other.size >= MAX_ENTRIES) {
+        complete = false;
+        return;
+      }
+      into.set(e.loc, e.lastmod);
+    }
   };
   const children = new Map<string, URL>();
   let anyRead = false;
@@ -199,7 +206,7 @@ export async function discoverProductUrls(origin: string, robots: string, signal
     anyRead = true;
     if (!parsed.index) take(root, parsed.entries);
     else for (const e of parsed.entries) {
-      const child = sameSite(e.loc, base, true);
+      const child = sitemapUrl(e.loc, base, true);
       if (child) children.set(child.toString(), child);
     }
   }
@@ -221,23 +228,25 @@ export async function discoverProductUrls(origin: string, robots: string, signal
   }
 
   const source = product.size ? product : other;
-  const pages = new Map<string, FoundPage>();
-  const rules = robotsRules(robots, ROBOTS_AGENT);
+  const pages = new Map<string, FoundPage & { path: string }>();
   for (const [loc, lastmod] of source) {
-    const u = sameSite(loc, base);
+    const u = sitemapUrl(loc, base);
     if (!u || pages.has(u.toString())) continue;
     if (!product.size && !PRODUCT_PATH.test(u.pathname)) continue;
-    if (!robotsAllows(rules, u.pathname + u.search)) continue;
     const t = lastmod ? Date.parse(lastmod) : NaN;
-    pages.set(u.toString(), { url: u.toString(), lastmod: Number.isFinite(t) ? new Date(t) : null });
+    pages.set(u.toString(), { url: u.toString(), lastmod: Number.isFinite(t) ? new Date(t) : null, path: u.pathname + u.search });
   }
-  const urls = [...pages.values()].sort((a, b) => (b.lastmod?.getTime() ?? -Infinity) - (a.lastmod?.getTime() ?? -Infinity));
+  const sorted = [...pages.values()].sort((a, b) => (b.lastmod?.getTime() ?? -Infinity) - (a.lastmod?.getTime() ?? -Infinity));
+  // robots.txt is checked on the newest MAX_PAGES only (its matching costs per URL): a disallowed one leaves the list
+  // short of the cap rather than letting a later page in.
+  const rules = robotsRules(robots, ROBOTS_AGENT);
+  const urls = sorted.slice(0, MAX_PAGES).flatMap(({ path, ...p }) => (robotsAllows(rules, path) ? [p] : []));
   // Capped: the pages past the newest 5,000 are still on the site. Empty: more likely an emptied or broken sitemap than
   // a shop with nothing for sale. Neither may delete pages (and archive their products).
   return {
-    urls: urls.slice(0, MAX_PAGES),
-    complete: complete && urls.length > 0 && urls.length <= MAX_PAGES,
-    capped: urls.length > MAX_PAGES,
+    urls,
+    complete: complete && urls.length > 0 && sorted.length <= MAX_PAGES,
+    capped: sorted.length > MAX_PAGES,
     ...(urls.length === 0 && { reason: "no-product-pages" as const }),
   };
 }

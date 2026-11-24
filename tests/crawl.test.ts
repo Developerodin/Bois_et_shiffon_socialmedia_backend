@@ -88,6 +88,20 @@ describe("robots.txt", () => {
     // equal length: Allow wins
     expect(allows("User-agent: *\nDisallow: /a\nAllow: /a\n", "/a")).toBe(true);
     expect(allows("", "/anything")).toBe(true);
+    expect(allows("User-agent: *\nDisallow: /a*b*c$\n", "/axxbyyc")).toBe(false);
+    expect(allows("User-agent: *\nDisallow: /a*b*c$\n", "/axxbyycd")).toBe(true);
+    expect(allows("User-agent: *\nDisallow: /*c$\n", "/c")).toBe(false); // a star may match nothing
+  });
+
+  it("a hostile robots.txt stays cheap: capped rules, no backtracking", () => {
+    const hostile = "User-agent: *\n" + Array.from({ length: 5000 }, () => `Disallow: /${"*a".repeat(250)}b\n`).join("");
+    const rules = robotsRules(hostile, ROBOTS_AGENT);
+    expect(rules.disallow.length).toBeLessThanOrEqual(1000);
+    expect(robotsRules(`User-agent: *\nDisallow: /${"x".repeat(600)}\n`, ROBOTS_AGENT).disallow).toEqual([]);
+    const path = "/" + "a".repeat(1999);
+    const started = performance.now();
+    for (let i = 0; i < 200; i++) robotsAllows(rules, path);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 
   it("Crawl-delay and Sitemap lines read", () => {
@@ -140,12 +154,11 @@ describe("crawlSite", () => {
     expect(res.failures).toEqual([{ url: "https://shop.example/account", error: "disallowed by robots.txt" }]);
   });
 
-  it("reads nothing when robots.txt answers 5xx", async () => {
+  it("still reads the site when robots.txt answers 5xx (only the product-page reader is strict)", async () => {
     m.fetch = async (url) =>
       new Response("<title>x</title>", { status: String(url).endsWith("robots.txt") ? 500 : 200, headers: { "content-type": "text/html" } });
     const res = await crawlSite("https://shop.example/");
-    expect(res.pages).toEqual([]);
-    expect(res.failures[0].error).toBe("disallowed by robots.txt");
+    expect(res.pages.map((p) => p.title)).toEqual(["x"]);
   });
 });
 

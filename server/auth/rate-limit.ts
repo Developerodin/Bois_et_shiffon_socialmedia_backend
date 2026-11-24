@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 
 /**
@@ -7,9 +8,9 @@ import { prisma } from "@/server/db/prisma";
  * ponytail: fixed window allows a 2x burst at window edges; switch to sliding
  * window if that matters. Old rows are harmless; prune in the daily sweep later.
  */
-/** `by`: how much this hit counts (default 1), e.g. one per AI call a request makes. */
-export async function hitRateLimit(key: string, limit: number, windowMs: number, by = 1) {
-  const rows = await prisma.$queryRaw<{ count: number }[]>`
+/** `by`: how much this hit counts (default 1), e.g. one per AI call a request makes. `db`: a transaction to run in. */
+export async function hitRateLimit(key: string, limit: number, windowMs: number, by = 1, db: Prisma.TransactionClient = prisma) {
+  const rows = await db.$queryRaw<{ count: number }[]>`
     INSERT INTO "RateLimitBucket" (key, count, "windowStart")
     VALUES (${key}, ${by}, now())
     ON CONFLICT (key) DO UPDATE SET

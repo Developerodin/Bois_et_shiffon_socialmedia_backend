@@ -14,18 +14,20 @@ const m = vi.hoisted(() => ({
   inFlight: 0,
   maxInFlight: 0,
   onFetch: null as null | ((url: string) => Promise<void>),
+  robotsFailures: 0,
 }));
 vi.mock("@/server/research/crawl", async (orig) => ({
   ...(await orig<object>()),
-  fetchRobots: vi.fn(async () => ({ txt: m.robots, disallowAll: false })),
-  safeFetchBytes: vi.fn(async (url: string, _a: string, _b: number, _s: AbortSignal, _t: number, headers: Record<string, string> = {}) => {
-    m.fetched.push({ url, headers });
+  fetchRobots: vi.fn(async () => (m.robotsFailures-- > 0 ? { txt: null, disallowAll: true } : { txt: m.robots, disallowAll: false })),
+  safeFetchBytes: vi.fn(async (url: string, _a: string, _b: number, _s: AbortSignal, _t: number, opts: { headers?: Record<string, string>; sameSite?: boolean } = {}) => {
+    m.fetched.push({ url, headers: opts.headers ?? {} });
     await m.onFetch?.(url);
     m.inFlight++;
     m.maxInFlight = Math.max(m.maxInFlight, m.inFlight);
     await new Promise((r) => setTimeout(r, m.delayMs));
     m.inFlight--;
     const s = m.serve.get(url) ?? { status: 500 };
+    if (s.url && opts.sameSite && new URL(s.url).hostname !== new URL(url).hostname) throw new Error("Redirected to another site");
     return { url: new URL(s.url ?? url), status: s.status, bytes: new TextEncoder().encode(s.body ?? ""), contentType: "text/html", truncated: false, headers: new Headers(s.headers) };
   }),
   safeFetch: vi.fn(async (url: string) => ({ url: new URL(url), status: 404, body: "", contentType: "text/html" })),
@@ -64,11 +66,11 @@ beforeAll(async () => {
   for (const id of ["pr-a", "pr-b"]) await prisma.brand.create({ data: { id, workspaceId: ws, slug: id, displayName: id } });
 });
 beforeEach(async () => {
-  for (const t of [prisma.catalogPage, prisma.product, prisma.job, prisma.rateLimitBucket, prisma.integrationConnection, prisma.brandProfile, prisma.auditEvent]) await (t as typeof prisma.job).deleteMany({});
+  for (const t of [prisma.catalogPage, prisma.product, prisma.job, prisma.rateLimitBucket, prisma.integrationConnection, prisma.brandProfile, prisma.auditEvent, prisma.transientEntry]) await (t as typeof prisma.job).deleteMany({});
   for (const id of ["pr-a", "pr-b"]) {
     await prisma.brandProfile.create({ data: { workspaceId: ws, brandId: id, websiteUrl: "https://shop.test", catalogSync: { at: "x", source: "SITE", count: 0, error: null } } });
   }
-  Object.assign(m, { robots: "", discovered: { urls: [], complete: false, capped: false }, fetched: [], delayMs: 0, inFlight: 0, maxInFlight: 0, onFetch: null });
+  Object.assign(m, { robots: "", discovered: { urls: [], complete: false, capped: false }, fetched: [], delayMs: 0, inFlight: 0, maxInFlight: 0, onFetch: null, robotsFailures: 0 });
   vi.mocked(discoverProductUrls).mockClear();
   m.serve.clear();
 });
@@ -114,6 +116,7 @@ describe("one chain per brand, budgets and the host lock", () => {
     const steps = [...(await nextSteps("pr-a")), ...(await nextSteps("pr-b"))];
     expect(steps.map((j) => j.idempotencyKey)).toEqual([expect.stringMatching(/^catalog-pages:pr-[ab]:\d{4}-\d{2}-\d{2}:2$/)]);
     expect(steps[0]!.runAt.getTime()).toBeGreaterThan(Date.now());
+    expect(await sync(steps[0]!.brandId!)).toMatchObject({ source: "SITE", reason: "reading" }); // progress recorded each step
   });
 
   it("pauses at least 1 s between pages, the site's Crawl-delay when longer", async () => {
@@ -123,6 +126,7 @@ describe("one chain per brand, budgets and the host lock", () => {
     await readSitePages(payload(), sleep);
     expect(sleep.mock.calls).toEqual([[1000], [1000]]);
     m.robots = "User-agent: *\nCrawl-delay: 4";
+    await prisma.transientEntry.deleteMany({}); // robots.txt is kept for the day
     await prisma.catalogPage.updateMany({ data: { triedAt: null, readAt: null } });
     sleep.mockClear();
     await readSitePages(payload(), sleep);
@@ -131,7 +135,7 @@ describe("one chain per brand, budgets and the host lock", () => {
 });
 
 describe("what a page's answer does", () => {
-  it("404 archives only the products no other page produces", async () => {
+  it("404 on two different days archives only the products no other page produces", async () => {
     await addPage(1, { readAt: daysAgo(8), productKeys: ["sku:1", "sku:2"] });
     await addPage(2, { readAt: daysAgo(1), productKeys: ["sku:2"] });
     await addProduct("1");
@@ -139,8 +143,27 @@ describe("what a page's answer does", () => {
     m.serve.set(url(1), { status: 404 });
     await readSitePages(payload(), noSleep);
     expect(m.fetched.map((f) => f.url)).toEqual([url(1)]);
+    expect(await live()).toEqual(["SITE:sku:1", "SITE:sku:2"]); // a first 404 is only noted
+    expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ state: "missing", productKeys: ["sku:1", "sku:2"] });
+    await prisma.catalogPage.updateMany({ where: { url: url(1) }, data: { triedAt: daysAgo(1) } });
+    await readSitePages(payload(), noSleep);
     expect(await live()).toEqual(["SITE:sku:2"]);
     expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ state: "gone", productKeys: [] });
+  });
+
+  it("a page failing on three different days is given up on: settled, its products archived", async () => {
+    await addPage(1, { productKeys: ["sku:1"], state: "failed:1", readAt: daysAgo(8) });
+    await addProduct("1");
+    m.serve.set(url(1), { status: 500 });
+    await readSitePages(payload(), noSleep);
+    expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ state: "failed:2", productKeys: ["sku:1"] });
+    await prisma.catalogPage.updateMany({ where: { url: url(1) }, data: { triedAt: daysAgo(1) } });
+    await readSitePages(payload(), noSleep);
+    const page = await prisma.catalogPage.findFirst({ where: { url: url(1) } });
+    expect(page).toMatchObject({ state: "dead", productKeys: [] });
+    expect(page?.readAt).not.toBeNull();
+    expect(await live()).toEqual([]);
+    expect(await sync()).toMatchObject({ pages: { read: 1, total: 1 } });
   });
 
   it("403 stops the chain without archiving or marking the page", async () => {
@@ -162,7 +185,7 @@ describe("what a page's answer does", () => {
     await readSitePages(payload(), noSleep);
     await readSitePages(payload(), noSleep);
     expect(m.fetched).toHaveLength(1);
-    expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ state: "failed", readAt: null });
+    expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ state: "failed:1", readAt: null });
   });
 
   it("200 saves the page's products; a later 304 (asked with its validators) keeps them and stamps their stock", async () => {
@@ -191,8 +214,8 @@ describe("what a page's answer does", () => {
     }
     await readSitePages(payload(), noSleep);
     expect(await live()).toEqual(["SITE:sku:1", "SITE:sku:2", "SITE:sku:3", "SITE:sku:4"]);
-    expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ state: "failed", productKeys: ["sku:1"] });
-    expect(await sync()).toMatchObject({ reason: "site-refused" });
+    expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ state: "failed:1", productKeys: ["sku:1"] });
+    expect(await sync()).toMatchObject({ reason: "pages-changed" });
     expect(await nextSteps()).toEqual([]);
   });
 
@@ -212,7 +235,31 @@ describe("what a page's answer does", () => {
     m.serve.set(url(1), { status: 200, body: html("1"), url: "https://elsewhere.test/p/1" });
     await readSitePages(payload(), noSleep);
     expect(await live()).toEqual([]);
-    expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ state: "failed", readAt: null });
+    expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ state: "failed:1", readAt: null });
+  });
+
+  it("robots.txt that fails is asked once more before the chain stops", async () => {
+    await addPage(1);
+    m.serve.set(url(1), { status: 200, body: html("1") });
+    m.robotsFailures = 1;
+    await readSitePages(payload(), noSleep);
+    expect(await live()).toEqual(["SITE:sku:1"]);
+    await prisma.transientEntry.deleteMany({});
+    await prisma.catalogPage.updateMany({ data: { readAt: null, triedAt: null } });
+    m.robotsFailures = 2;
+    await readSitePages(payload(), noSleep);
+    expect(await sync()).toMatchObject({ reason: "site-refused" });
+  });
+
+  it("pages of another site (the website changed) are dropped with the products only they gave", async () => {
+    await prisma.catalogPage.create({ data: { workspaceId: ws, brandId: "pr-a", url: "https://old.test/p/1", readAt: daysAgo(1), productKeys: ["sku:old"] } });
+    await addPage(1, { readAt: daysAgo(1), productKeys: ["sku:1"] });
+    await prisma.catalogPage.create({ data: { workspaceId: ws, brandId: "pr-a", url: "https://www.shop.test/p/2", readAt: daysAgo(1) } });
+    await addProduct("old");
+    await addProduct("1");
+    await readSitePages(payload(), noSleep);
+    expect((await prisma.catalogPage.findMany({ where: { brandId: "pr-a" }, orderBy: { url: "asc" } })).map((p) => p.url)).toEqual([url(1), "https://www.shop.test/p/2"]);
+    expect(await live()).toEqual(["SITE:sku:1"]);
   });
 });
 
@@ -255,6 +302,19 @@ describe("the chain", () => {
     expect(await live()).toEqual(["WEBSITE:7"]);
     expect(await prisma.catalogPage.findFirst({ where: { url: url(1) } })).toMatchObject({ readAt: null, etag: null });
     expect(await sync()).toMatchObject({ source: "WEBSITE" });
+  });
+
+  it("a feed that worked must say 'not a feed' on two different days before the pages are read", async () => {
+    await prisma.brandProfile.update({ where: { brandId: "pr-a" }, data: { catalogSync: { at: new Date().toISOString(), source: "WEBSITE", count: 12, error: null, reason: null } } });
+    m.serve.set("https://shop.test/products.json?limit=250&page=1", { status: 404 });
+    await runCatalogSync(scope());
+    expect(await sync()).toMatchObject({ source: "WEBSITE", count: 12, reason: "feed-missing" });
+    await runCatalogSync(scope()); // same day: still waiting
+    expect(await nextSteps()).toEqual([]);
+    await prisma.brandProfile.update({ where: { brandId: "pr-a" }, data: { catalogSync: { at: daysAgo(1).toISOString(), source: "WEBSITE", count: 12, error: "x", reason: "feed-missing" } } });
+    await runCatalogSync(scope());
+    expect(await sync()).toMatchObject({ source: "SITE", reason: "reading" });
+    expect(await nextSteps()).toHaveLength(1);
   });
 
   it("a SITE brand whose feed URL answers 403 for a day stays SITE and keeps what was read", async () => {
@@ -320,7 +380,7 @@ describe("the chain", () => {
   });
 
   it("leaves another brand's pages and products alone", async () => {
-    await addPage(1, { readAt: daysAgo(8), productKeys: ["sku:1"] });
+    await addPage(1, { readAt: daysAgo(8), productKeys: ["sku:1"], state: "missing" }); // its second 404
     await addProduct("1");
     await addPage(1, { readAt: daysAgo(8), productKeys: ["sku:1"] }, "pr-b");
     await addProduct("1", "pr-b");

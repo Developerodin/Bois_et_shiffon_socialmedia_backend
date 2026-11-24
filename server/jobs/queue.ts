@@ -65,6 +65,7 @@ export async function claimNextJob(workerId: string): Promise<Job | null> {
           SELECT count(*) FROM "Job" r
           WHERE r.type LIKE 'data.%' AND r.status = 'RUNNING' AND r."leasedUntil" >= now()
         ) < ${DATA_RUNNING_MAX})
+        -- 'catalog.pages' is CATALOG_PAGES_JOB (server/catalog/sync.ts), written out: queue.ts imports no job module.
         AND (type <> 'catalog.pages' OR (
           SELECT count(*) FROM "Job" r
           WHERE r.type = 'catalog.pages' AND r.status = 'RUNNING' AND r."leasedUntil" >= now()

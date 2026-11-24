@@ -3,7 +3,7 @@ import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-r
 import { enqueueCatalogSync } from "@/server/catalog/sync";
 import { prisma } from "@/server/db/prisma";
 import { kickRunner } from "@/server/jobs/runner";
-import { assertPublicUrl, CrawlError } from "@/server/research/crawl";
+import { assertPublicUrl, CrawlError, sameSite } from "@/server/research/crawl";
 import { EditBrandInput } from "@/server/services/create-brand";
 
 /**
@@ -21,10 +21,20 @@ export async function PATCH(request: Request, context: { params: Promise<BrandRo
     const { displayName, websiteUrl } = body.data;
     if (websiteUrl) await assertPublicUrl(websiteUrl);
     const before = await prisma.brand.findFirstOrThrow({ where: { id: scope.brandId, workspaceId: scope.workspaceId }, include: { profile: true } });
+    const oldUrl = before.profile?.websiteUrl;
+    // Another site: the pages read from the old one, and the products only they gave, go (www. and the path don't count).
+    const otherSite = !!websiteUrl && !!oldUrl && !sameSite(new URL(websiteUrl).hostname.toLowerCase(), new URL(oldUrl).hostname.toLowerCase());
+    const brandRows = { workspaceId: scope.workspaceId, brandId: before.id };
     await prisma.$transaction([
       prisma.brand.update({ where: { id: before.id }, data: { displayName, ...(displayName !== before.displayName ? { nameGuessed: false } : {}) } }),
       ...(websiteUrl
         ? [prisma.brandProfile.upsert({ where: { brandId: before.id }, create: { brandId: before.id, workspaceId: scope.workspaceId, websiteUrl }, update: { websiteUrl } })]
+        : []),
+      ...(otherSite
+        ? [
+            prisma.catalogPage.deleteMany({ where: brandRows }),
+            prisma.product.updateMany({ where: { ...brandRows, source: "SITE", archivedAt: null }, data: { archivedAt: new Date() } }),
+          ]
         : []),
       prisma.auditEvent.create({
         data: {

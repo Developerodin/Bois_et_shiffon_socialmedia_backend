@@ -101,20 +101,26 @@ export async function safeFetch(raw: string, accept = "text/html", signal?: Abor
 
 /**
  * Same guard as safeFetch, raw bytes (images). `truncated` = the body hit maxBytes and was cut. `signal` = caller's overall deadline.
- * `extra`: more request headers (conditional ones: If-None-Match, If-Modified-Since); `headers` = the final response's.
+ * `opts.headers`: more request headers (conditional ones: If-None-Match, If-Modified-Since); `headers` = the final response's.
+ * `opts.sameSite`: a redirect to another site (host other than the asked one, www. ignored) throws instead of being followed.
  */
-export async function safeFetchBytes(raw: string, accept: string, maxBytes = MAX_BYTES, signal?: AbortSignal, timeoutMs = TIMEOUT_MS, extra: Record<string, string> = {}): Promise<{ url: URL; status: number; bytes: Uint8Array; contentType: string; truncated: boolean; headers: Pick<Headers, "get"> }> {
+export async function safeFetchBytes(
+  raw: string, accept: string, maxBytes = MAX_BYTES, signal?: AbortSignal, timeoutMs = TIMEOUT_MS,
+  opts: { headers?: Record<string, string>; sameSite?: boolean } = {},
+): Promise<{ url: URL; status: number; bytes: Uint8Array; contentType: string; truncated: boolean; headers: Pick<Headers, "get"> }> {
   let url = await assertPublicUrl(raw);
+  const host = url.hostname;
   for (let hop = 0; hop < 4; hop++) {
     const res = await fetch(url, {
       dispatcher: PINNED,
       redirect: "manual",
-      headers: { ...extra, "user-agent": USER_AGENT, accept },
+      headers: { ...opts.headers, "user-agent": USER_AGENT, accept },
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
       await res.body?.cancel();
       url = await assertPublicUrl(new URL(res.headers.get("location")!, url).toString());
+      if (opts.sameSite && !sameSite(url.hostname, host)) throw new CrawlError("Redirected to another site");
       continue;
     }
     const reader = res.body?.getReader();
@@ -146,12 +152,19 @@ export async function safeFetchBytes(raw: string, accept: string, maxBytes = MAX
 
 export type RobotsGroup = { disallow: string[]; allow: string[]; crawlDelay: number | null };
 
+// A robots.txt is untrusted: past these limits the rest is ignored, so matching stays cheap for any file.
+// (Google reads 500 KiB too.) Every path is checked against at most MAX_RULES rules of at most MAX_RULE chars.
+const MAX_ROBOTS = 500 * 1024;
+const MAX_RULES = 1000;
+const MAX_RULE = 512;
+
 function readRobots(txt: string) {
   const groups = new Map<string, RobotsGroup>();
   const sitemaps: string[] = [];
   let agents: string[] = [];
   let inRules = false;
-  for (const line of txt.split(/\r?\n/)) {
+  let rules = 0;
+  for (const line of txt.slice(0, MAX_ROBOTS).split(/\r?\n/)) {
     const [k, ...rest] = line.split("#")[0].split(":");
     const key = k?.trim().toLowerCase();
     const value = rest.join(":").trim();
@@ -163,7 +176,10 @@ function readRobots(txt: string) {
       if (!groups.has(ua)) groups.set(ua, { disallow: [], allow: [], crawlDelay: null });
     } else if (key === "disallow" || key === "allow") {
       inRules = true;
-      if (value) for (const a of agents) groups.get(a)![key].push(value);
+      if (value && value.length <= MAX_RULE && rules < MAX_RULES) {
+        rules++;
+        for (const a of agents) groups.get(a)![key].push(value);
+      }
     } else if (key === "crawl-delay") {
       inRules = true;
       const seconds = Number(value);
@@ -189,18 +205,25 @@ export function robotsRules(txt: string, agent: string): RobotsGroup {
   return groups.get(token(agent)) ?? groups.get("*") ?? { disallow: [], allow: [], crawlDelay: null };
 }
 
-/** `*` matches any run, a trailing `$` anchors the end; otherwise a prefix match. Two pointers: O(path × rule), no regex backtracking on hostile rules. */
+/**
+ * `*` matches any run, a trailing `$` anchors the end; otherwise a prefix match. The literal pieces between stars are
+ * found left to right, each at its first place after the last (leftmost is always right when `*` is the only
+ * wildcard): one indexOf per piece, never backtracking, whatever the rule.
+ */
 function robotsMatch(rule: string, path: string) {
-  const p = rule.endsWith("$") ? rule.slice(0, -1) : `${rule}*`;
-  let i = 0, j = 0, star = -1, mark = 0;
-  while (j < path.length) {
-    if (i < p.length && p[i] !== "*" && p[i] === path[j]) { i++; j++; }
-    else if (i < p.length && p[i] === "*") { star = i++; mark = j; }
-    else if (star >= 0) { i = star + 1; j = ++mark; }
-    else return false;
+  const anchored = rule.endsWith("$");
+  const parts = (anchored ? rule.slice(0, -1) : rule).split("*");
+  if (!path.startsWith(parts[0])) return false;
+  let at = parts[0].length;
+  for (let k = 1; k < parts.length; k++) {
+    const piece = parts[k];
+    // An anchored rule's last piece must end the path (after what the earlier pieces used).
+    if (anchored && k === parts.length - 1) return path.length - piece.length >= at && path.endsWith(piece);
+    const i = path.indexOf(piece, at);
+    if (i < 0) return false;
+    at = i + piece.length;
   }
-  while (i < p.length && p[i] === "*") i++;
-  return i === p.length;
+  return !anchored || at === path.length;
 }
 
 /**
@@ -611,9 +634,11 @@ export type CrawledPage = { url: string; title: string | null; description: stri
 
 export async function crawlSite(startUrl: string, onPage?: (p: CrawledPage) => Promise<void>) {
   const start = await assertPublicUrl(startUrl);
-  const { txt: robotsTxt, disallowAll } = await fetchRobots(start.origin);
+  // Lenient on purpose: a robots.txt that fails (5xx, unreachable) reads as no rules here, so one bad answer doesn't
+  // leave Research and the site checks with no pages. The product-page reader, which comes back daily, is strict.
+  const { txt: robotsTxt } = await fetchRobots(start.origin);
   const rules = robotsRules(robotsTxt ?? "", ROBOTS_AGENT);
-  const allowed = (u: string) => !disallowAll && robotsAllows(rules, new URL(u).pathname + new URL(u).search);
+  const allowed = (u: string) => robotsAllows(rules, new URL(u).pathname + new URL(u).search);
 
   const queue = [start.toString()];
   const seen = new Set(queue);

@@ -127,6 +127,17 @@ describe("discoverProductUrls", () => {
     expect(await discoverProductUrls(O, "")).toEqual({ urls: [], complete: false, capped: false, reason: "no-product-pages" });
   });
 
+  it("keeps at most 50,000 entries (incomplete) and checks robots.txt on the newest 5,000 only", async () => {
+    site[`${O}/sitemap.products.xml`] = urlset(Array.from({ length: 60_000 }, (_, i) => [`${O}/p/${i}`, new Date(Date.UTC(2020, 0, 1) + i * 60_000).toISOString()] as [string, string]));
+    const robots = `Sitemap: ${O}/sitemap.products.xml\nUser-agent: *\nDisallow: /p/49999\n`;
+    const t = performance.now();
+    const res = await discoverProductUrls(O, robots);
+    expect(performance.now() - t).toBeLessThan(5000);
+    expect(res).toMatchObject({ complete: false, capped: true });
+    expect(res.urls).toHaveLength(4999); // the newest 5,000 of the first 50,000, less the disallowed one
+    expect(res.urls[0]!.url).toBe(`${O}/p/49998`);
+  });
+
   it("no sitemap at all → incomplete, no-product-pages", async () => {
     expect(await discoverProductUrls(O, "")).toEqual({ urls: [], complete: false, capped: false, reason: "no-product-pages" });
   });
