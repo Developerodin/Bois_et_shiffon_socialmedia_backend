@@ -38,6 +38,8 @@ model User {
   sessionVersion  Int        @default(0)
   /// May change platform-wide settings (Settings → AI models). Set directly in the database; no workspace role grants it.
   isPlatformAdmin Boolean    @default(false)
+  /// Email me the weekly digest (opt-in; the in-app digest is for everyone). Off by the signed unsubscribe link too.
+  digestEmail     Boolean    @default(false)
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 
@@ -55,6 +57,7 @@ model User {
   blockingTasks   Task[]               @relation("TaskBlockedOn")
   ownedProjects   WorkProject[]        @relation("WorkProjectOwner")
   notifications   Notification[]
+  digests         Digest[]
 }
 
 /// A phone that gets push notifications (reel ready / couldn't be made). messages: the notification texts in the
@@ -131,6 +134,28 @@ model Workspace {
   credits      CreditEntry[]
   voices       Voice[]
   subscription Subscription?
+  digests      Digest[]
+}
+
+/// One reader's weekly digest for one workspace (server/digest/build.ts). Re-filtered by current permissions on read and
+/// at email send; deleted when the member is removed; pruned after 12 weeks (pruneOldRows).
+model Digest {
+  id          String    @id @default(cuid())
+  userId      String
+  workspaceId String
+  /// Monday of the covered week (UTC label; each brand section carries its own range)
+  weekStart   DateTime  @db.Date
+  /// DigestBody (shared/digest.ts): per brand, the sections the reader could see at build time
+  body        Json
+  emailedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId, weekStart])
+  @@index([workspaceId, weekStart])
+  @@index([createdAt])
 }
 
 enum SubscriptionStatus {
