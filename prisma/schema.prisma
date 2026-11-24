@@ -1051,6 +1051,8 @@ enum ProductSource {
   WEBSITE // the public /products.json feed of BrandProfile.websiteUrl
   SHOPIFY // Admin API through the brand's SHOPIFY connection
   MANUAL // added by a person
+  IMPORT // from a spreadsheet a person uploaded: person-owned like MANUAL, re-imports update it
+  SITE // read from the product data embedded in the website's product pages
 }
 
 /**

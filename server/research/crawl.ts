@@ -155,13 +155,39 @@ const decode = (s: string) =>
       return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : "";
     });
 
+/**
+ * `<script>…</script>` (and style, noscript, svg, template) blocks replaced by a space, in one pass: once a tag name
+ * has no closing tag ahead, its later openings are left alone without searching again (a lazy regex would rescan to
+ * the end for each, quadratic on thousands of unclosed "<script").
+ */
+function withoutBlocks(html: string) {
+  const open = /<(script|style|noscript|svg|template)/gi;
+  const unclosed = new Set<string>();
+  let out = "";
+  let from = 0;
+  for (let m; (m = open.exec(html)); ) {
+    const name = m[1]!.toLowerCase();
+    if (unclosed.has(name)) continue;
+    const close = new RegExp(`</${name}>`, "gi");
+    close.lastIndex = open.lastIndex;
+    const end = close.exec(html);
+    if (!end) {
+      unclosed.add(name);
+      continue;
+    }
+    out += `${html.slice(from, m.index)} `;
+    from = open.lastIndex = close.lastIndex;
+  }
+  return out + html.slice(from);
+}
+
 /** Readable text of an HTML page or fragment: scripts and styles dropped, entities decoded, blank lines collapsed. */
 export function htmlText(html: string) {
   return decode(
-    html
-      .replace(/<(script|style|noscript|svg|template)[\s\S]*?<\/\1>/gi, " ")
+    withoutBlocks(html)
       .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|section|article)>/gi, "\n")
-      .replace(/<[^>]+>/g, " "),
+      // A tag can't contain "<": a run of "<" without ">" (hostile text) costs one step each, not a scan to the end.
+      .replace(/<[^<>]+>/g, " "),
   )
     .replace(/[ \t]+/g, " ")
     .replace(/\n\s*\n+/g, "\n")

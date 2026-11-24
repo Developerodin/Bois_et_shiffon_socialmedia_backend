@@ -42,6 +42,9 @@ export async function productPhotos(workspaceId: string, brandId: string) {
   ];
 }
 
+/** Which source's row a photo links when several hold its product: the store's own data first. */
+const PHOTO_SOURCE_ORDER: string[] = ["SHOPIFY", "WEBSITE", "SITE", "IMPORT", "MANUAL"];
+
 /**
  * The catalogue product a library photo shows (app posts, P06): its store link's path matched to this brand's active
  * rows; the group's representative (first by externalId). [] for an upload or no match.
@@ -53,7 +56,8 @@ export async function productIdsForPhoto(workspaceId: string, brandId: string, p
     where: { workspaceId, brandId, archivedAt: null, source: { not: "MANUAL" }, url: { contains: `/products/${handle}`, mode: "insensitive" } },
     select: { id: true, source: true, externalId: true, url: true },
   });
-  const hit = rows.filter((r) => handleOf(r.url) === handle).sort((a, b) => a.source.localeCompare(b.source) || byExternalId(a, b))[0];
+  const rank = (r: { source: string }) => PHOTO_SOURCE_ORDER.indexOf(r.source);
+  const hit = rows.filter((r) => handleOf(r.url) === handle).sort((a, b) => rank(a) - rank(b) || byExternalId(a, b))[0];
   return hit ? [hit.id] : [];
 }
 

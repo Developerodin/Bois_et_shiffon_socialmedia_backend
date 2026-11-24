@@ -99,9 +99,11 @@ assert.deepEqual(archiveWhere(scope, "WEBSITE", ["1", "2"], true), {
   workspaceId: "w",
   brandId: "b",
   archivedAt: null,
-  OR: [{ source: "SHOPIFY" }, { source: "WEBSITE", externalId: { notIn: ["1", "2"] } }],
+  OR: [{ source: { in: ["SHOPIFY", "SITE"] } }, { source: "WEBSITE", externalId: { notIn: ["1", "2"] } }],
 });
-assert.deepEqual(archiveWhere(scope, "SHOPIFY", [], true)?.OR, [{ source: "WEBSITE" }, { source: "SHOPIFY", externalId: { notIn: [] } }]);
+assert.deepEqual(archiveWhere(scope, "SHOPIFY", [], true)?.OR, [{ source: { in: ["WEBSITE", "SITE"] } }, { source: "SHOPIFY", externalId: { notIn: [] } }]);
+assert.deepEqual(archiveWhere(scope, "IMPORT", ["sku:1"], true)?.OR, [{ source: "IMPORT", externalId: { notIn: ["sku:1"] } }]);
+assert.equal(archiveWhere(scope, "MANUAL", [], true), null);
 
 // Shop domains: the token only ever goes to <handle>.myshopify.com.
 assert.equal(shopDomain("My-Store"), "my-store.myshopify.com");

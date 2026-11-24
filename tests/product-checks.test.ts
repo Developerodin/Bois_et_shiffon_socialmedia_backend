@@ -40,6 +40,10 @@ describe("stockState", () => {
     expect(stockState([row({ source: "MANUAL", stockCheckedAt: hoursAgo(72) })], now)).toBe("in");
   });
 
+  it("an imported row's stock is always fresh, like a MANUAL one", () => {
+    expect(stockState([row({ source: "IMPORT", stockCheckedAt: hoursAgo(24 * 30) })], now)).toBe("in");
+  });
+
   it("judges freshness per variant: a stale in-stock variant next to a fresh sold-out one is unconfirmed", () => {
     expect(stockState([row({ stockCheckedAt: hoursAgo(80) }), row({ inStock: false })], now)).toBe("unconfirmed");
   });

@@ -1,0 +1,129 @@
+import { z } from "zod";
+import { IMPORT_FIELDS, type ImportPreviewDto, type ImportResultDto } from "@/shared";
+import { fromAccessError, problemResponse, uploadLengthStatus } from "@/server/api/http-error";
+import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
+import { effectivePermissions } from "@/server/auth/permissions";
+import { hitRateLimit } from "@/server/auth/rate-limit";
+import { parseSheet } from "@/server/catalog/import-file";
+import { guessMapping, matchStored, toRows, vouchedFields } from "@/server/catalog/import-products";
+import { cannotVouch } from "@/server/catalog/products";
+import { CatalogBusy, lockedSave } from "@/server/catalog/sync";
+import { prisma } from "@/server/db/prisma";
+
+export const maxDuration = 60;
+
+const MAX_BYTES = 5 * 1024 * 1024;
+// ponytail: per process. Each file being read holds up to 5 MB of body plus its rows; past 2 at once, ask to retry.
+// Several server instances each allow 2; a shared limit would need a table or Redis.
+const AT_ONCE = 2;
+let reading = 0;
+
+const invalid = (detail: string, status = 400) =>
+  problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid import", status, detail });
+
+/** One field or null per header; each field at most once, the name exactly once. */
+const Mapping = (columns: number) =>
+  z
+    .array(z.enum(IMPORT_FIELDS).nullable())
+    .length(columns, "Choose a field (or none) for every column.")
+    .refine((m) => new Set(m.filter(Boolean)).size === m.filter(Boolean).length, "Each field can be chosen for one column only.")
+    .refine((m) => m.includes("title"), "Choose the column that holds the product name.");
+
+/** Price and stock come in pairs: a pair the file has no column for keeps what's stored, see importFile. */
+const PAIRS = [["price", "compareAtPrice"], ["inStock", "stockQuantity"]] as const;
+
+type Scope = { userId: string; workspaceId: string; brandId: string };
+
+/**
+ * Import products from a CSV or .xlsx file (form field `file`), as IMPORT rows. `?dryRun=1` previews: the columns
+ * matched to fields (or the `mapping` sent), the first rows and what would be skipped; nothing is written. Without it,
+ * `mapping` (JSON, one field or null per column) is required and the import updates the rows a previous import made
+ * (by SKU, link, then name), adds new ones and archives the ones the file no longer has. A file with no good row
+ * changes nothing. Stock, prices and facts need rules.approve. The file is never stored.
+ * ponytail: parsing is synchronous; a 5 MB file holds the request for about a second, bounded by the rate limits and
+ * AT_ONCE.
+ */
+export async function POST(request: Request, context: { params: Promise<BrandRouteParams> }) {
+  try {
+    const scope = await authorizeBrandRoute(request, context.params, "context.edit");
+    if (scope instanceof Response) return scope;
+    const dryRun = new URL(request.url).searchParams.get("dryRun") === "1";
+    // Previews have their own, higher limits: the screen previews again each time a column's field is changed.
+    const [kind, perBrand, perUser] = dryRun ? ["product-import-preview", 120, 240] : ["product-import", 30, 60];
+    const busy = () => invalid("Too many imports. Try again in a while.", 429);
+    if (!(await hitRateLimit(`${kind}:${scope.brandId}:${scope.userId}`, perBrand, 3_600_000)).allowed) return busy();
+    if (!(await hitRateLimit(`${kind}:${scope.userId}`, perUser, 3_600_000)).allowed) return busy();
+    const length = uploadLengthStatus(request, MAX_BYTES + 64 * 1024);
+    if (length === 411) return invalid("Send the file with a Content-Length", 411);
+    if (length === 413) return invalid("Files can be up to 5 MB", 413);
+
+    if (reading >= AT_ONCE) return invalid("Too many imports right now. Try again shortly.", 429);
+    reading++;
+    try {
+      return await importFile(request, scope, dryRun);
+    } finally {
+      reading--;
+    }
+  } catch (error) {
+    return fromAccessError(error);
+  }
+}
+
+async function importFile(request: Request, scope: Scope, dryRun: boolean) {
+  const form = (await request.formData().catch(() => null)) ?? new FormData();
+  const file = form.get("file");
+  if (!(file instanceof File)) return invalid("Choose a CSV or Excel file to import");
+  const sheet = parseSheet(new Uint8Array(await file.arrayBuffer()));
+  if ("error" in sheet) return invalid(sheet.error);
+
+  const sent = form.get("mapping");
+  let mapping = guessMapping(sheet.headers);
+  if (typeof sent === "string" || !dryRun) {
+    let json: unknown = null;
+    try {
+      json = typeof sent === "string" ? JSON.parse(sent) : null;
+    } catch {
+      // refused below
+    }
+    const parsed = Mapping(sheet.headers.length).safeParse(json);
+    if (!parsed.success) return invalid(parsed.error.issues[0]?.message ?? "Choose a field for every column.");
+    mapping = parsed.data;
+  }
+  const approves = (await effectivePermissions(scope.workspaceId, scope.userId, scope.brandId)).has("rules.approve");
+  const { rows, skipped, duplicates, problems } = toRows(sheet, mapping);
+
+  if (dryRun) {
+    const preview: ImportPreviewDto = {
+      headers: sheet.headers,
+      mapping,
+      sample: sheet.rows.slice(0, 20),
+      rowCount: sheet.rows.length,
+      skipped,
+      duplicates,
+      problems,
+      needsApproval: approves ? [] : vouchedFields(IMPORT_FIELDS),
+    };
+    return Response.json(preview);
+  }
+  if (vouchedFields(mapping).length && !approves) return cannotVouch();
+  if (!rows.length) return invalid("No row in this file could be imported, so nothing was changed.", 422);
+
+  // A price or stock pair the file has no column for keeps what's stored (writing it needs rules.approve, and a file
+  // without prices isn't saying there are none). With one of a pair mapped, the other is written empty, so a stored
+  // "5 in stock" can't contradict an imported "out of stock". An empty cell in a mapped column clears it (toRows).
+  const keep = PAIRS.filter((pair) => !pair.some((f) => mapping.includes(f))).flat();
+  // 15 s for another import or the sync to finish, leaving the save well inside maxDuration.
+  const saved = await lockedSave(scope, "IMPORT", { rows, complete: true }, { match: matchStored, keep }, 15_000).catch((e: unknown) => {
+    if (e instanceof CatalogBusy) return null;
+    throw e;
+  });
+  if (!saved) return invalid("Another import or sync of your products is running. Try again in a minute.", 409);
+  const result: ImportResultDto = { created: saved.created, updated: saved.updated, unchanged: saved.unchanged, archived: saved.archived, skipped, duplicates, problems };
+  await prisma.auditEvent.create({
+    data: {
+      workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "product.import", entityType: "Brand", entityId: scope.brandId,
+      metadata: { fields: mapping.filter(Boolean), created: result.created, updated: result.updated, unchanged: result.unchanged, archived: result.archived, skipped, duplicates },
+    },
+  });
+  return Response.json(result);
+}
