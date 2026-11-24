@@ -206,6 +206,7 @@ model Brand {
   photoShoots   PhotoShoot[]
   reelAssets    ReelAsset[]
   products      Product[]
+  catalogPages  CatalogPage[]
   campaigns     Campaign[]
   tasks         Task[]
   workProjects  WorkProject[]
@@ -1088,6 +1089,29 @@ model Product {
 
   @@unique([brandId, source, externalId])
   @@index([workspaceId, brandId])
+}
+
+/// One product page the site reader knows about (from the sitemap): resumable state across days.
+model CatalogPage {
+  id          String    @id @default(cuid())
+  workspaceId String
+  brandId     String
+  url         String
+  lastmod     DateTime?
+  readAt      DateTime?
+  /// last attempt (read or failed): the daily budget counts these
+  triedAt     DateTime?
+  etag        String?
+  modifiedAt  String?
+  /// externalIds of the SITE rows this page produced
+  productKeys String[]  @default([])
+  /// ok | no-product | gone | failed
+  state       String?
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([brandId, url])
+  @@index([brandId, triedAt])
 }
 
 /**
