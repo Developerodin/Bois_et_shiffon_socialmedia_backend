@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Gunzip } from "fflate";
 import { prisma } from "@/server/db/prisma";
-import { ROBOTS_AGENT, robotsAllows, robotsSitemaps, safeFetchBytes } from "@/server/research/crawl";
+import { ROBOTS_AGENT, robotsAllows, robotsRules, robotsSitemaps, safeFetchBytes } from "@/server/research/crawl";
 
 /**
  * Finds a website's product pages from its sitemap (robots.txt `Sitemap:` lines, else /sitemap.xml or
@@ -204,11 +204,12 @@ export async function discoverProductUrls(origin: string, robots: string, signal
 
   const source = product.size ? product : other;
   const pages = new Map<string, FoundPage>();
+  const rules = robotsRules(robots, ROBOTS_AGENT);
   for (const [loc, lastmod] of source) {
     const u = sameSite(loc, base);
     if (!u || pages.has(u.toString())) continue;
     if (!product.size && !PRODUCT_PATH.test(u.pathname)) continue;
-    if (!robotsAllows(robots, u.pathname + u.search, ROBOTS_AGENT)) continue;
+    if (!robotsAllows(rules, u.pathname + u.search)) continue;
     const t = lastmod ? Date.parse(lastmod) : NaN;
     pages.set(u.toString(), { url: u.toString(), lastmod: Number.isFinite(t) ? new Date(t) : null });
   }

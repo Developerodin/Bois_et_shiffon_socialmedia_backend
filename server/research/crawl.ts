@@ -81,7 +81,7 @@ export async function assertPublicUrl(raw: string): Promise<URL> {
  * IP-literal hosts skip lookup; assertPublicUrl already checked them and they can't rebind.
  * ponytail: one shared Agent (undici's default pool limits); no proxy support.
  */
-const pinnedLookup: LookupFunction = (hostname, options, callback) => {
+export const pinnedLookup: LookupFunction = (hostname, options, callback) => {
   dnsLookup(hostname, { ...options, all: true }, (err, addresses) => {
     if (err) return callback(err, "", 0);
     if (addresses.length === 0 || addresses.some((a) => isPrivateAddress(a.address))) {
@@ -154,7 +154,7 @@ function readRobots(txt: string) {
     if (key === "user-agent") {
       if (inRules) agents = [];
       inRules = false;
-      const ua = value.toLowerCase();
+      const ua = token(value);
       agents.push(ua);
       if (!groups.has(ua)) groups.set(ua, { disallow: [], allow: [], crawlDelay: null });
     } else if (key === "disallow" || key === "allow") {
@@ -171,16 +171,19 @@ function readRobots(txt: string) {
   return { groups, sitemaps };
 }
 
-/** Rules per user-agent (lower-cased). Consecutive User-agent lines share one group; repeated agents merge. */
+/** A user-agent's product token: "BrandpilotResearchBot/0.1" matches a `User-agent: brandpilotresearchbot` group. */
+const token = (agent: string) => agent.split("/")[0].trim().toLowerCase();
+
+/** Rules per user-agent (product token, lower-cased). Consecutive User-agent lines share one group; repeated agents merge. */
 export function robotsGroups(txt: string): Map<string, RobotsGroup> {
   return readRobots(txt).groups;
 }
 
-/** The group that applies to `agent`: its own, else `*`. */
-const groupFor = (txt: string, agent: string) => {
+/** Parse once, then check many paths: the group that applies to `agent` (its own, else `*`); empty when none. */
+export function robotsRules(txt: string, agent: string): RobotsGroup {
   const groups = robotsGroups(txt);
-  return groups.get(agent.toLowerCase()) ?? groups.get("*");
-};
+  return groups.get(token(agent)) ?? groups.get("*") ?? { disallow: [], allow: [], crawlDelay: null };
+}
 
 /** `*` matches any run, a trailing `$` anchors the end; otherwise a prefix match. Two pointers: O(path × rule), no regex backtracking on hostile rules. */
 function robotsMatch(rule: string, path: string) {
@@ -197,19 +200,12 @@ function robotsMatch(rule: string, path: string) {
 }
 
 /**
- * Whether `agent` may fetch `path` (path + query). Google semantics: the longest matching rule wins, Allow beats
- * Disallow on equal length, no match = allowed. ponytail: no percent-encoding normalisation of rules or paths.
+ * Whether `rules` (from robotsRules) let us fetch `path` (path + query). Google semantics: the longest matching rule
+ * wins, Allow beats Disallow on equal length, no match = allowed. ponytail: no percent-encoding normalisation.
  */
-export function robotsAllows(txt: string, path: string, agent: string) {
-  const group = groupFor(txt, agent);
-  if (!group) return true;
-  const longest = (rules: string[]) => Math.max(-1, ...rules.filter((r) => robotsMatch(r, path)).map((r) => r.length));
-  return longest(group.allow) >= longest(group.disallow);
-}
-
-/** Crawl-delay in seconds for `agent` (its own group, else `*`), null when unset. */
-export function robotsCrawlDelay(txt: string, agent: string) {
-  return groupFor(txt, agent)?.crawlDelay ?? null;
+export function robotsAllows(rules: RobotsGroup, path: string) {
+  const longest = (list: string[]) => list.reduce((n, r) => (r.length > n && robotsMatch(r, path) ? r.length : n), -1);
+  return longest(rules.allow) >= longest(rules.disallow);
 }
 
 /** `Sitemap:` URLs as written (callers validate them). */
@@ -595,16 +591,25 @@ function inlineSvgLogos(html: string, base: URL): string[] {
   return out;
 }
 
+/**
+ * A site's robots.txt, RFC 9309 status rules: 2xx → its text; 4xx → none (everything allowed);
+ * 5xx, network failure or more than 3 redirects → `disallowAll` (stricter than the RFC's "unavailable" for redirects).
+ */
+export async function fetchRobots(origin: string, signal?: AbortSignal): Promise<{ txt: string | null; disallowAll: boolean }> {
+  const res = await safeFetch(new URL("/robots.txt", origin).toString(), "text/plain", signal).catch(() => null);
+  if (res && res.status >= 200 && res.status < 300) return { txt: res.body, disallowAll: false };
+  return { txt: null, disallowAll: !res || res.status < 400 || res.status >= 500 };
+}
+
 const PRIORITY = /about|a-propos|histoire|story|qui-sommes|collection|produit|product|shop|boutique|catalog|materi|savoir/i;
 
 export type CrawledPage = { url: string; title: string | null; description: string | null; text: string; seo?: PageSeo; assets?: PageAssets };
 
 export async function crawlSite(startUrl: string, onPage?: (p: CrawledPage) => Promise<void>) {
   const start = await assertPublicUrl(startUrl);
-  const robotsTxt = await safeFetch(new URL("/robots.txt", start).toString(), "text/plain")
-    .then((r) => (r.status === 200 ? r.body : null))
-    .catch(() => null);
-  const allowed = (u: string) => !robotsTxt || robotsAllows(robotsTxt, new URL(u).pathname + new URL(u).search, ROBOTS_AGENT);
+  const { txt: robotsTxt, disallowAll } = await fetchRobots(start.origin);
+  const rules = robotsRules(robotsTxt ?? "", ROBOTS_AGENT);
+  const allowed = (u: string) => !disallowAll && robotsAllows(rules, new URL(u).pathname + new URL(u).search);
 
   const queue = [start.toString()];
   const seen = new Set(queue);

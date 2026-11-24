@@ -1,5 +1,5 @@
 import type { CrawledPage } from "@/server/research/crawl";
-import { robotsGroups, type RobotsGroup } from "@/server/research/crawl";
+import { robotsRules } from "@/server/research/crawl";
 
 /**
  * Deterministic SEO/GEO checks (no AI): same site in → same findings and score out.
@@ -59,7 +59,7 @@ export function seoChecks({ startUrl, pages, robotsTxt, hasSitemap }: SiteFacts)
   }
   if (robotsTxt === null) {
     add({ id: "robots-missing", category: "Crawlability", severity: "low", title: "No robots.txt", detail: "Crawlers fall back to defaults; you can't point them to your sitemap.", fix: "Add /robots.txt with a Sitemap: line." });
-  } else if ((robotsGroups(robotsTxt).get("*")?.disallow ?? []).includes("/")) {
+  } else if (robotsRules(robotsTxt, "*").disallow.includes("/")) {
     add({ id: "robots-blocks-all", category: "Crawlability", severity: "critical", title: "robots.txt blocks all crawlers", detail: "`User-agent: *` has `Disallow: /`, so search engines are told not to crawl the site.", fix: "Remove `Disallow: /` for `User-agent: *` (keep blocks only for private paths like /cart)." });
   }
   if (!hasSitemap) {
@@ -131,9 +131,8 @@ export const AI_CRAWLERS = [
 
 /** Whether each AI crawler may fetch "/" (its own group wins over `*`). */
 export function aiCrawlerAccess(robotsTxt: string | null) {
-  const groups = robotsTxt ? robotsGroups(robotsTxt) : new Map<string, RobotsGroup>();
   return AI_CRAWLERS.map((c) => {
-    const rules = (groups.get(c.ua.toLowerCase()) ?? groups.get("*"))?.disallow ?? [];
+    const rules = robotsRules(robotsTxt ?? "", c.ua).disallow;
     return { ...c, allowed: !rules.includes("/") };
   });
 }

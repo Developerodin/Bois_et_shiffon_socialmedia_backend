@@ -22,5 +22,7 @@ export async function POST(request: Request) {
   // Only an address that doesn't exist stops onboarding (bad URL, no such domain, private address). A real site
   // that refuses automated reading (bot check, 403, dropped connection) passes: Research then finds it online.
   const error = await safeFetch(body.data.url).then(() => null, (e: unknown) => e);
-  return Response.json({ ok: !(error instanceof CrawlError) });
+  // A private address refused at connect (pinned lookup) arrives as fetch's TypeError with the CrawlError as cause.
+  const refused = error instanceof CrawlError || (error instanceof Error && error.cause instanceof CrawlError);
+  return Response.json({ ok: !refused });
 }
