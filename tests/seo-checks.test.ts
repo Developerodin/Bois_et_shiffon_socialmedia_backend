@@ -18,8 +18,8 @@ const GOOD = `<html lang="fr"><head><title>Table en chêne massif | Bois & Chiff
 describe("robots groups", () => {
   it("shares rules across consecutive user-agents and falls back to *", () => {
     const g = robotsGroups("User-agent: GPTBot\nUser-agent: CCBot\nDisallow: /\n\nUser-agent: *\nDisallow: /cart\n");
-    expect(g.get("gptbot")).toEqual(["/"]);
-    expect(g.get("ccbot")).toEqual(["/"]);
+    expect(g.get("gptbot")?.disallow).toEqual(["/"]);
+    expect(g.get("ccbot")?.disallow).toEqual(["/"]);
     const access = aiCrawlerAccess("User-agent: GPTBot\nDisallow: /\n\nUser-agent: *\nDisallow: /cart\n");
     expect(access.find((a) => a.ua === "GPTBot")!.allowed).toBe(false);
     expect(access.find((a) => a.ua === "OAI-SearchBot")!.allowed).toBe(true);

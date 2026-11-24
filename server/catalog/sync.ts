@@ -17,9 +17,12 @@ import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/c
  * rows of the other synced source, are archived only after a complete fetch.
  */
 export const CATALOG_SYNC_JOB = "catalog.sync";
+/** The site reader (server/catalog/page-reader.ts): a brand whose website has no feed has its product pages read. */
+export const CATALOG_PAGES_JOB = "catalog.pages";
 
 type Scope = { workspaceId: string; brandId: string };
-type Note = { error: string; reason: SyncReason };
+/** `error` null: a status, not a failure ("reading"). */
+export type Note = { error: string | null; reason: SyncReason };
 
 /** What a sync writes: every field it owns, except stockCheckedAt and archivedAt, which saving sets. */
 export type SyncedRow = {
@@ -54,8 +57,11 @@ const BLOCKED: Note = { error: "Your website blocks our product reader, so we ca
 const PARTIAL: Note = { error: "Only part of the catalogue could be read, so no products were archived.", reason: "partial" };
 const FAILED: Note = { error: "The last sync couldn't read the products. Press Sync now to try again.", reason: "failed" };
 const REFUSED: Note = { error: SHOPIFY_REFUSED, reason: "shopify-refused" };
+export const READING: Note = { error: null, reason: "reading" };
+// A website whose feed worked answered "not a feed" once (a deploy, a hiccup): kept a day before reading its pages.
+const FEED_MISSING: Note = { error: "Your website's product feed didn't answer today. We'll check again tomorrow.", reason: "feed-missing" };
 
-const str = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+export const str = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
 
 /** "12.50", 12.5 → "12.50"; empty, negative, NaN, ≥ 1e9 (ProductInput's cap) or non-numeric → null (the feed is untrusted). */
 export function parsePrice(v: unknown): string | null {
@@ -81,6 +87,30 @@ export function variantTitle(product: string, variant: unknown) {
   return (v && v !== "Default Title" ? `${product} — ${v}` : product).slice(0, 300);
 }
 
+/**
+ * One row from a page or feed's untrusted values, through the caps every source gets. `title` and `url` are final;
+ * `description` is already plain text (htmlText), so a product's variants convert it once.
+ */
+export function syncedRow(v: {
+  externalId: string; title: string; url: string | null; description: string | null; currency: string | null;
+  sku: unknown; category: unknown; price: unknown; compareAtPrice: unknown; inStock: unknown; image: unknown;
+}): SyncedRow {
+  return {
+    externalId: v.externalId,
+    sku: str(v.sku, 100),
+    title: v.title,
+    url: v.url,
+    category: str(v.category, 120),
+    description: str(v.description, 5000),
+    price: parsePrice(v.price),
+    compareAtPrice: parsePrice(v.compareAtPrice),
+    currency: v.currency,
+    inStock: typeof v.inStock === "boolean" ? v.inStock : null,
+    stockQuantity: null,
+    imageUrl: httpUrl(v.image),
+  };
+}
+
 /** Rows from one page of a public /products.json feed: one per variant. Malformed entries are skipped. */
 export function websiteRows(products: unknown[], origin: string, currency: string | null): SyncedRow[] {
   return products.flatMap((raw) => {
@@ -89,27 +119,25 @@ export function websiteRows(products: unknown[], origin: string, currency: strin
     const handle = str(p?.handle, 255);
     if (!p || !title || !handle || !Array.isArray(p.variants)) return [];
     const url = new URL(`/products/${encodeURIComponent(handle)}`, origin).toString();
-    const description = str(typeof p.body_html === "string" ? htmlText(p.body_html) : null, 5000);
-    const category = str(p.product_type, 120);
+    const description = typeof p.body_html === "string" ? htmlText(p.body_html) : null;
     const productImage = Array.isArray(p.images) ? p.images[0]?.src : undefined;
     return p.variants.flatMap((v) => {
       const id = typeof v?.id === "number" || typeof v?.id === "string" ? String(v.id).trim().slice(0, 100) : "";
       if (!id) return [];
       const image = v.featured_image?.src ?? productImage;
-      return [{
+      return [syncedRow({
         externalId: id,
-        sku: str(v.sku, 100),
+        sku: v.sku,
         title: variantTitle(title, v.title),
         url,
-        category,
+        category: p.product_type,
         description,
-        price: parsePrice(v.price),
-        compareAtPrice: parsePrice(v.compare_at_price),
+        price: v.price,
+        compareAtPrice: v.compare_at_price,
         currency,
-        inStock: typeof v.available === "boolean" ? v.available : null,
-        stockQuantity: null,
-        imageUrl: typeof image === "string" ? httpUrl(shopifySized(image)) : null,
-      }];
+        inStock: v.available,
+        image: typeof image === "string" ? shopifySized(image) : null,
+      })];
     });
   });
 }
@@ -210,15 +238,22 @@ async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal): Pr
   return capRows({ rows: shopifyRows(variants, currency), complete, note: complete ? undefined : PARTIAL });
 }
 
-/** Which source a brand syncs from: its newest working Shopify connection, else a broken one, else the website. */
-export async function catalogSource(scope: Scope) {
-  const shop = await prisma.integrationConnection.findFirst({
+/**
+ * Which source a brand syncs from: its newest working Shopify connection, else a broken one, else the website: its
+ * product pages (SITE) once its last sync found no feed there (catalogSync.source), else its feed (WEBSITE).
+ */
+export async function catalogSource(scope: Scope, db: Db = prisma) {
+  const shop = await db.integrationConnection.findFirst({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId, provider: "SHOPIFY", status: { not: "REVOKED" } },
     orderBy: [{ status: "asc" }, { updatedAt: "desc" }],
   });
   if (shop) return { source: "SHOPIFY" as const, shop };
-  const profile = await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { websiteUrl: true } });
-  return profile?.websiteUrl ? { source: "WEBSITE" as const, websiteUrl: profile.websiteUrl } : { source: null };
+  const profile = await db.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { websiteUrl: true, catalogSync: true } });
+  if (!profile?.websiteUrl) return { source: null };
+  const last = profile.catalogSync as CatalogSync | null;
+  return last?.source === "SITE"
+    ? { source: "SITE" as const, websiteUrl: profile.websiteUrl, capped: last.pages?.capped ?? false }
+    : { source: "WEBSITE" as const, websiteUrl: profile.websiteUrl, last };
 }
 
 /** The fields a save writes (SavedRow's keys), read back to tell changed rows from unchanged ones. */
@@ -266,10 +301,25 @@ type SaveOptions = {
 type KeptField = "price" | "compareAtPrice" | "inStock" | "stockQuantity";
 const kept = (p: Stored, f: KeptField) => (f === "price" || f === "compareAtPrice" ? (p[f]?.toFixed(2) ?? null) : p[f]);
 
+/** A link without its #fragment or trailing slash, so "…/chair/" and "…/chair#reviews" are one product. */
+/** sameLink with a leading www. dropped: the same product page on a site read as www.x and as x (pages vs feed). */
+export const siteLink = (url: string) => sameLink(url).replace(/^(https?:\/\/)www\./i, "$1");
+
+export function sameLink(url: string) {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    return u.toString().replace(/\/+(\?|$)/, "$1");
+  } catch {
+    return url; // a stored link typed before links were checked
+  }
+}
+
 /**
  * Write what changed, then archive what the source no longer has (complete fetches only, archiveWhere). Returns rows
  * seen and what happened to them. `db` may be a transaction. A row sent without a currency (the website's /cart.js failed) keeps the stored one.
- * New SHOPIFY rows take the person's facts from the same variant's WEBSITE row, so switching to Shopify keeps them.
+ * New SHOPIFY rows take the person's facts from the same variant's WEBSITE row, and new SHOPIFY or WEBSITE rows from
+ * the SITE row with the same link, else SKU (the website's product pages), so switching keeps them.
  * Queries: one read of the source (or of `keys`), changed rows in one UPDATE … FROM unnest per 1,000 (their stock
  * freshness included), createMany per 1,000 new rows, one stockCheckedAt update per 1,000 unchanged rows that report
  * stock, and the archive. Changed rows go first, so a key a matched row gives up is free for a new row.
@@ -345,10 +395,25 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
     });
     for (const { externalId, ...f } of website) if (externalId) facts.set(externalId, f);
   }
+  // From the product pages: only SITE rows carrying a fact are read (few; at most MAX_ROWS), matched here by link, then SKU.
+  const siteFacts = new Map<string, { materials: string | null; dimensions: string | null; certifications: string | null }>();
+  if ((source === "SHOPIFY" || source === "WEBSITE") && created.length) {
+    const site = await db.product.findMany({
+      where: { workspaceId: scope.workspaceId, brandId: scope.brandId, source: "SITE", OR: [{ materials: { not: null } }, { dimensions: { not: null } }, { certifications: { not: null } }] },
+      select: { url: true, sku: true, materials: true, dimensions: true, certifications: true },
+      orderBy: [{ archivedAt: { sort: "desc", nulls: "first" } }, { externalId: "asc" }],
+    });
+    for (const { url, sku, ...f } of site) {
+      if (url && !siteFacts.has(`url:${siteLink(url)}`)) siteFacts.set(`url:${siteLink(url)}`, f);
+      if (sku && !siteFacts.has(`sku:${sku}`)) siteFacts.set(`sku:${sku}`, f);
+    }
+  }
+  const factsOf = (r: SavedRow) =>
+    facts.get(variantNumericId(r.externalId) ?? "") ?? (r.url && siteFacts.get(`url:${siteLink(r.url)}`)) ?? (r.sku && siteFacts.get(`sku:${r.sku}`)) ?? undefined;
   let added = 0;
   for (const part of chunks(created)) {
     added += (await db.product.createMany({
-      data: part.map((r) => ({ ...facts.get(variantNumericId(r.externalId) ?? ""), ...r, ...where, ...(reports(r) && { stockCheckedAt: now }) })),
+      data: part.map((r) => ({ ...factsOf(r), ...r, ...where, ...(reports(r) && { stockCheckedAt: now }) })),
       skipDuplicates: true,
     })).count;
   }
@@ -366,6 +431,11 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
  */
 export class CatalogBusy extends Error {}
 export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL">, fetched: { rows: SavedRow[]; complete: boolean }, opts: SaveOptions, lockWaitMs: number) {
+  return withCatalogLock(scope, lockWaitMs, (tx) => saveRows(tx, scope, source, fetched, opts));
+}
+
+/** `fn` in a transaction holding the brand's catalogue lock (lockedSave's lock, wait and timeout), for saves that write more than saveRows. */
+export function withCatalogLock<T>(scope: Scope, lockWaitMs: number, fn: (tx: Db) => Promise<T>) {
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('lock_timeout', ${String(lockWaitMs)}, true)`;
     try {
@@ -375,7 +445,7 @@ export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL"
       throw e;
     }
     await tx.$executeRaw`SELECT set_config('lock_timeout', '0', true)`;
-    return saveRows(tx, scope, source, fetched, opts);
+    return fn(tx);
   }, { timeout: lockWaitMs + 60_000 });
 }
 
@@ -383,8 +453,8 @@ export function lockedSave(scope: Scope, source: Exclude<ProductSource, "MANUAL"
 const archiveShopifyRows = (scope: Scope) =>
   prisma.product.updateMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, source: "SHOPIFY", archivedAt: null }, data: { archivedAt: new Date() } });
 
-const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count">, note: Note | null) =>
-  prisma.brandProfile.updateMany({
+export const record = (scope: Scope, sync: Pick<CatalogSync, "at" | "source" | "count" | "pages">, note: Note | null, db: Db = prisma) =>
+  db.brandProfile.updateMany({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId },
     data: { catalogSync: { ...sync, error: note?.error ?? null, reason: note?.reason ?? null } },
   });
@@ -409,18 +479,39 @@ export async function runCatalogSync(payload: unknown) {
   }
   const signal = AbortSignal.timeout(DEADLINE_MS);
   try {
+    // A SITE brand's feed is checked every day too: once the site has one, the feed takes over (and archives SITE rows).
     const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal) : await websiteFeed(found.websiteUrl, signal);
-    if (fetched.note === NOT_A_FEED) await archiveShopifyRows(scope);
+    // A SITE brand stays one when its feed URL turns readers away for a day: only a feed that answers moves it.
+    // A feed that worked must say "not a feed" on two different days before its products are left for the pages.
+    const last = found.source === "WEBSITE" ? found.last : null;
+    if (fetched.note === NOT_A_FEED && last?.source === "WEBSITE" && last.count > 0 && (last.reason !== "feed-missing" || last.at.slice(0, 10) === at.slice(0, 10))) {
+      return void (await record(scope, { at, source: "WEBSITE", count: last.count }, FEED_MISSING));
+    }
+    if (fetched.note === NOT_A_FEED || (fetched.note === BLOCKED && found.source === "SITE")) {
+      await archiveShopifyRows(scope);
+      // Recorded first: the chain's first step reads the source from this record.
+      await record(scope, { at, source: "SITE", ...(await siteProgress(scope, found.source === "SITE" && found.capped)) }, READING);
+      return void (await startPageChain(scope));
+    }
+    const source = found.source === "SHOPIFY" ? "SHOPIFY" : "WEBSITE";
     // Up to 2 minutes behind an import or another sync's save; past that the job is retried, nothing recorded.
-    const { seen: count } = await lockedSave(scope, found.source, fetched, {}, 120_000);
-    await record(scope, { at, source: found.source, count }, fetched.note ?? null);
+    // The save and the record share the catalogue lock's transaction: the site reader checks the source under the
+    // same lock, so it never writes SITE rows (or archives these) after the brand moved.
+    await withCatalogLock(scope, 120_000, async (tx) => {
+      const { seen: count } = await saveRows(tx, scope, source, fetched, {});
+      // A complete save archived any SITE rows: forget what the site reader read, so a switch back reads every page again.
+      if (fetched.complete) await tx.catalogPage.updateMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { readAt: null, etag: null, modifiedAt: null } });
+      await record(scope, { at, source, count }, fetched.note ?? null, tx);
+    });
   } catch (error) {
     if (error instanceof CatalogBusy) throw error;
     const refused = error instanceof ReconnectNeeded;
     if (refused && found.source === "SHOPIFY") await markReconnect(found.shop.id, SHOPIFY_REFUSED);
     // Messages here carry statuses and Shopify error codes only, never a token.
     console.warn("[catalog] sync failed", scope.brandId, found.source, error instanceof Error ? error.message : error);
-    await record(scope, { at, source: found.source, count: 0 }, refused ? REFUSED : FAILED);
+    // A SITE brand keeps its reader's progress on screen.
+    const kept = found.source === "SITE" ? await siteProgress(scope, found.capped) : { count: 0 };
+    await record(scope, { at, source: found.source, ...kept }, refused ? REFUSED : FAILED);
     throw error;
   }
 }
@@ -436,13 +527,53 @@ export function enqueueCatalogSync(scope: Scope, key?: string) {
   });
 }
 
-/** True while a sync for this brand is queued or running (what the screens poll for). */
+/** True while a sync or the site reader for this brand is queued or running (what the screens poll for). */
 export async function catalogSyncRunning(scope: Scope) {
   const job = await prisma.job.findFirst({
-    where: { type: CATALOG_SYNC_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["PENDING", "RUNNING"] } },
+    where: { type: { in: [CATALOG_SYNC_JOB, CATALOG_PAGES_JOB] }, workspaceId: scope.workspaceId, brandId: scope.brandId, status: { in: ["PENDING", "RUNNING"] } },
     select: { id: true },
   });
   return job !== null;
+}
+
+/** The site reader's job key: one per step of a day's chain; a chain started again by hand that day is `manual:<n>`. */
+export const pagesKey = (brandId: string, day: string, step: number, manual?: number) =>
+  `catalog-pages:${brandId}:${day}:${manual ? `manual:${manual}:` : ""}${step}`;
+
+/**
+ * Starts today's site-reader chain, unless one is queued or running for the brand. When today's chain already ran and
+ * stopped (its budget, the site refused, or it finished), this is Sync now (or a second daily sync): a new `manual:<n>`
+ * chain, since the completed `:0` job would swallow its key. The budgets still hold, so a spent day reads nothing more.
+ * ponytail: check-then-create like requestCatalogSync; two at once can queue two chains, and the second one's
+ * handler exits while the first runs (one chain per brand).
+ */
+export async function startPageChain(scope: Scope, day = new Date().toISOString().slice(0, 10)) {
+  const where = { type: CATALOG_PAGES_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId };
+  // A step left from an earlier day doesn't count: it ends without reading when it runs.
+  const alive = await prisma.job.findFirst({ where: { ...where, status: { in: ["PENDING", "RUNNING"] }, payload: { path: ["day"], equals: day } }, select: { id: true } });
+  if (alive) return;
+  const ranToday = await prisma.job.findUnique({ where: { idempotencyKey: pagesKey(scope.brandId, day, 0) }, select: { id: true } });
+  const manual = ranToday
+    ? 1 + (await prisma.job.count({ where: { ...where, idempotencyKey: { startsWith: `catalog-pages:${scope.brandId}:${day}:manual:`, endsWith: ":0" } } }))
+    : undefined;
+  await enqueueJob({
+    type: CATALOG_PAGES_JOB,
+    workspaceId: scope.workspaceId,
+    brandId: scope.brandId,
+    payload: { workspaceId: scope.workspaceId, brandId: scope.brandId, day, step: 0, ...(manual && { manual }) },
+    idempotencyKey: pagesKey(scope.brandId, day, 0, manual),
+  });
+}
+
+/** What the site reader has so far: live SITE products, and its pages read of those known. */
+export async function siteProgress(scope: Scope, capped: boolean) {
+  const where = { workspaceId: scope.workspaceId, brandId: scope.brandId };
+  const [count, total, read] = await Promise.all([
+    prisma.product.count({ where: { ...where, source: "SITE", archivedAt: null } }),
+    prisma.catalogPage.count({ where }),
+    prisma.catalogPage.count({ where: { ...where, readAt: { not: null } } }),
+  ]);
+  return { count, pages: { read, total, capped } };
 }
 
 /**

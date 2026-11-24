@@ -4,10 +4,19 @@ import type { ProductRow } from "@/server/content/product-checks";
 vi.mock("@/server/db/prisma", () => ({ prisma: {} })); // sync.ts imports it; linkedProducts uses the db it's given
 import { linkedProducts } from "@/server/catalog/linked";
 
-type Row = ProductRow & { workspaceId: string; brandId: string };
+type Row = ProductRow & { workspaceId: string; brandId: string; sku?: string | null };
 type Where = {
   workspaceId: string; brandId: string; id?: { in: string[] }; archivedAt?: null;
-  OR?: ({ url: { contains: string } } | { source: string; externalId: string })[];
+  OR?: Clause[];
+};
+type Clause =
+  | { url: { contains: string } } | { source: string; externalId: string }
+  | { source: { in: string[] }; url: { in: string[] } } | { source: { in: string[] }; sku: string };
+const matches = (r: Row, c: Clause) => {
+  if ("externalId" in c) return r.source === c.source && r.externalId === c.externalId;
+  if ("sku" in c) return c.source.in.includes(r.source) && r.sku === c.sku;
+  if ("source" in c) return c.source.in.includes(r.source) && !!r.url && c.url.in.includes(r.url);
+  return !!r.url?.toLowerCase().includes(c.url.contains.toLowerCase());
 };
 
 /** A product table that answers the two shapes of query linkedProducts sends. */
@@ -17,7 +26,7 @@ function fakeDb(rows: Row[]) {
       r.workspaceId === where.workspaceId && r.brandId === where.brandId &&
       (!where.id || where.id.in.includes(r.id)) &&
       (where.archivedAt !== null || r.archivedAt === null) &&
-      (!where.OR || where.OR.some((c) => ("url" in c ? !!r.url?.toLowerCase().includes(c.url.contains.toLowerCase()) : r.source === c.source && r.externalId === c.externalId))),
+      (!where.OR || where.OR.some((c) => matches(r, c))),
     ),
   );
   return { db: { product: { findMany } } as never, findMany };
@@ -53,6 +62,34 @@ describe("linkedProducts", () => {
     const website = row("w9", { externalId: "9" });
     ({ db } = fakeDb([archivedShopify, website]));
     expect((await linkedProducts(db, scope, ["s9"], now))[0]!.row?.id).toBe("w9");
+  });
+
+  it("a post linked to a SITE row resolves after the brand moves to Shopify: by link, then by SKU", async () => {
+    const pageRow = row("site1", { source: "SITE", externalId: "url:https://shop.example/p/milo-sofa", url: "https://shop.example/p/milo-sofa", archivedAt: now });
+    const shopify = row("s1", { source: "SHOPIFY", externalId: "gid://shopify/ProductVariant/1", url: "https://shop.example/p/milo-sofa/", price: "12.00" });
+    let { db } = fakeDb([pageRow, shopify, row("s2", { source: "SHOPIFY", externalId: "gid://shopify/ProductVariant/2", url: "https://shop.example/p/other" })]);
+    expect((await linkedProducts(db, scope, ["site1"], now))[0]).toMatchObject({ row: { id: "s1" }, state: "in" });
+
+    const bySku = row("site2", { source: "SITE", externalId: "sku:MS-1", sku: "MS-1", url: "https://old.example/milo", archivedAt: now });
+    ({ db } = fakeDb([bySku, row("w5", { externalId: "5", sku: "MS-1", url: "https://shop.example/products/milo?variant=5" })]));
+    expect((await linkedProducts(db, scope, ["site2"], now))[0]!.row?.id).toBe("w5");
+  });
+
+  it("a SITE row whose key changed resolves to the new SITE row by link, with or without www.", async () => {
+    const old = row("site3", { source: "SITE", externalId: "url:https://www.shop.example/p/lamp", url: "https://www.shop.example/p/lamp", archivedAt: now });
+    const renamed = row("site4", { source: "SITE", externalId: "sku:L-1", sku: "L-1", url: "https://shop.example/p/lamp" });
+    const { db } = fakeDb([old, renamed]);
+    expect((await linkedProducts(db, scope, ["site3"], now))[0]!.row?.id).toBe("site4");
+  });
+
+  it("a post linked to a feed row resolves to the SITE row that replaced it; feed and Shopify still match only by variant", async () => {
+    const feedRow = row("w7", { externalId: "7", url: "https://shop.example/chair", archivedAt: now });
+    const site = row("site7", { source: "SITE", externalId: "url:https://shop.example/chair", url: "https://shop.example/chair" });
+    let { db } = fakeDb([feedRow, site]);
+    expect((await linkedProducts(db, scope, ["w7"], now))[0]!.row?.id).toBe("site7");
+
+    ({ db } = fakeDb([feedRow, row("s8", { source: "SHOPIFY", externalId: "gid://shopify/ProductVariant/8", url: "https://shop.example/chair" })]));
+    expect((await linkedProducts(db, scope, ["w7"], now))[0]!.row).toBeNull();
   });
 
   it("a deleted variant of a live product maps to its first live sibling; with none it's gone, named from its row", async () => {

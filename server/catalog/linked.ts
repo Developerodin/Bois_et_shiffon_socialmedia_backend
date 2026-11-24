@@ -1,5 +1,5 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
-import { variantNumericId } from "@/server/catalog/sync";
+import { sameLink, siteLink, variantNumericId } from "@/server/catalog/sync";
 import {
   REMOVED_PRODUCT_NAME, byExternalId, groupKey, handleOf, productName, stockState, type LinkedProduct, type ProductRow,
 } from "@/server/content/product-checks";
@@ -18,10 +18,37 @@ function otherSourceId(row: ProductRow) {
 }
 
 /**
+ * The automatic sources that read the same products as `source` under other keys: SITE rows (product pages) and the
+ * WEBSITE/SHOPIFY rows (feed, store) share no externalId, so a link crosses between them by product link, then SKU.
+ * SITE also to SITE: a page that changes a product's key (a SKU added) archives the old row and makes a new one.
+ */
+const acrossSite = (source: string): ("WEBSITE" | "SHOPIFY" | "SITE")[] =>
+  source === "SITE" ? ["SHOPIFY", "WEBSITE", "SITE"] : source === "SHOPIFY" || source === "WEBSITE" ? ["SITE"] : [];
+/** Rows read here carry their SKU (only `description` is left out); ProductRow doesn't name it. */
+const skuOf = (row: ProductRow) => (row as ProductRow & { sku?: string | null }).sku ?? null;
+/** The stored spellings of one link ("…/chair", "…/chair/", as written): the query matches them exactly. */
+const linkForms = (url: string) => {
+  const same = sameLink(url);
+  const hosts = [same, same.replace(/^(https?:\/\/)www\./i, "$1"), same.replace(/^(https?:\/\/)(?!www\.)/i, "$1www.")];
+  return [...new Set([url, ...hosts.flatMap((h) => [h, ...(h.includes("?") ? [] : [`${h}/`])])])];
+};
+/** Where an archived row's product may live on now, across the SITE switch (`acrossSite`). */
+function acrossWhere(row: ProductRow): Prisma.ProductWhereInput[] {
+  const sku = skuOf(row);
+  const across = acrossSite(row.source);
+  if (!across.length) return [];
+  return [
+    ...(row.url ? [{ source: { in: across }, url: { in: linkForms(row.url) } }] : []),
+    ...(sku ? [{ source: { in: across }, sku }] : []),
+  ];
+}
+
+/**
  * linkedProducts(db, scope, ids) → one LinkedProduct per distinct id, in order: the live row the link reads (null =
  * gone), its variant group (live rows), its name and its stockState. The only way content code reads products.
  * Ids outside the workspace + brand are gone. An archived id maps to the other synced source's live row of the
- * same variant, else to the first live row (by externalId) of its own source with the same /products/<handle>.
+ * same variant, else (across the SITE switch) to the first live row with the same link, then the same SKU, else to
+ * the first live row (by externalId) of its own source with the same /products/<handle>.
  * A gone link is named from its archived row, or "a removed product" when the row was deleted.
  * Queries: the ids, then the live rows they map to and their groups (a third only when a store switch lands on
  * a handle the first two didn't ask for). `db` may be a transaction.
@@ -33,19 +60,27 @@ export async function linkedProducts(db: Db, scope: Scope, ids: string[], now = 
   const own = new Map((await db.product.findMany({ where: { ...where, id: { in: unique } }, omit: { description: true } })).map((r) => [r.id, r]));
 
   const live: ProductRow[] = [];
-  const fetchLive = async (handles: string[], others: { source: "WEBSITE" | "SHOPIFY"; externalId: string }[]) => {
+  const fetchLive = async (handles: string[], others: Prisma.ProductWhereInput[]) => {
     const or = [...handles.map((h) => ({ url: { contains: `/products/${h}`, mode: "insensitive" as const } })), ...others];
     if (or.length) live.push(...(await db.product.findMany({ where: { ...where, archivedAt: null, OR: or }, omit: { description: true } })));
   };
   const handles = (rows: ProductRow[]) => [...new Set(rows.flatMap((r) => (r.source === "MANUAL" ? [] : handleOf(r.url) ?? [])))];
   const rows = [...own.values()];
-  await fetchLive(handles(rows), rows.flatMap((r) => (r.archivedAt ? otherSourceId(r) ?? [] : [])));
+  await fetchLive(handles(rows), rows.flatMap((r) => (r.archivedAt ? [...[otherSourceId(r) ?? []].flat(), ...acrossWhere(r)] : [])));
 
   const resolve = (row: ProductRow): ProductRow | null => {
     if (!row.archivedAt) return row;
     const other = otherSourceId(row);
     const switched = other && live.find((r) => r.source === other.source && r.externalId === other.externalId);
     if (switched) return switched;
+    const across = acrossSite(row.source);
+    if (across.length) {
+      const candidates = live.filter((r) => across.some((s) => s === r.source)).sort(byExternalId);
+      const link = row.url && siteLink(row.url);
+      const sku = skuOf(row);
+      const moved = (link && candidates.find((r) => r.url && siteLink(r.url) === link)) || (sku && candidates.find((r) => skuOf(r) === sku));
+      if (moved) return moved;
+    }
     const key = groupKey(row);
     return key.startsWith("id:") ? null : live.filter((r) => groupKey(r) === key).sort(byExternalId)[0] ?? null;
   };

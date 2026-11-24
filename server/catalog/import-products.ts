@@ -1,7 +1,7 @@
 import { IMPORT_FIELDS, type ImportField, type ImportProblem } from "@/shared";
 import type { Sheet } from "@/server/catalog/import-file";
 import { ProductInput, VOUCHED_FIELDS } from "@/server/catalog/products";
-import { httpUrl, type SavedRow } from "@/server/catalog/sync";
+import { httpUrl, sameLink, type SavedRow } from "@/server/catalog/sync";
 import { amountOf } from "@/server/content/product-checks";
 import { htmlText } from "@/server/research/crawl";
 
@@ -79,16 +79,6 @@ function count(cell: string) {
 
 const line = (s: string, max: number) => s.replace(/\s+/g, " ").trim().slice(0, max) || null;
 const block = (s: string, max: number) => s.trim().slice(0, max) || null;
-/** A link without its #fragment or trailing slash, so "…/chair/" and "…/chair#reviews" are one product. */
-function sameLink(url: string) {
-  try {
-    const u = new URL(url);
-    u.hash = "";
-    return u.toString().replace(/\/+(\?|$)/, "$1");
-  } catch {
-    return url; // a stored link typed before links were checked
-  }
-}
 
 /**
  * "Ava  Chair!" → "ava chair": a name compared in any script (Greek, Arabic, Hindi, CJK keep their letters), Latin

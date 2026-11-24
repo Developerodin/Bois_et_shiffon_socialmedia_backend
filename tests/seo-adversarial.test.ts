@@ -33,7 +33,7 @@ describe("seoSignals — attribute order and quoting", () => {
 describe("robots.txt edge cases", () => {
   it("handles CRLF, a BOM and mixed-case directives", () => {
     const g = robotsGroups("﻿User-Agent: GPTBot\r\nDISALLOW: /\r\n");
-    expect(g.get("gptbot")).toEqual(["/"]);
+    expect(g.get("gptbot")?.disallow).toEqual(["/"]);
     expect(aiCrawlerAccess("﻿User-Agent: GPTBot\r\nDISALLOW: /\r\n").find((a) => a.ua === "GPTBot")!.allowed).toBe(false);
   });
 });
