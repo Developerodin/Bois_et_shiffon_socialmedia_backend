@@ -1,4 +1,4 @@
-import type { IntegrationConnection, IntegrationProvider } from "@prisma/client";
+import type { IntegrationConnection, IntegrationProvider, Prisma } from "@prisma/client";
 import { requireBrandAccess } from "@/server/auth/access";
 import { requirePermission } from "@/server/auth/permissions";
 import { hashToken, newToken } from "@/server/auth/tokens";
@@ -6,6 +6,8 @@ import { currentKeyVersion, decryptCredentials, encryptCredentials } from "@/ser
 import { prisma } from "@/server/db/prisma";
 import { PROVIDERS, ProviderError, providerConfig, type ConnectedAccount, type OAuthProvider } from "@/server/integrations/providers";
 import { postedCount, storyTargetOf } from "@/server/services/publishing";
+import { askCartConfig } from "@/server/shopify/askcart";
+import { catalogMcpProfileUrl, isShopifyMcp } from "@/server/shopify/catalog-mcp";
 
 const STATE_TTL_MS = 10 * 60_000; // DEC-017: ≤10 min
 
@@ -99,7 +101,10 @@ export async function refreshExpiringTokens() {
 export function listProviders() {
   return [
     ...(Object.keys(PROVIDERS) as OAuthProvider[]).map((p) => ({ provider: p, label: PROVIDERS[p].label, configured: providerConfig(p) !== null, kind: "oauth" as const })),
-    { provider: "SHOPIFY" as const, label: "Shopify", configured: true, kind: "token" as const },
+    // askCart: how this deployment can read a store through AskCart: "per-brand" (each brand connects its own store),
+    // "single-store" (INTERIM: one store, one brand per deployment) or null (not set up). mcp: Shopify MCP can connect
+    // (a public https agent profile URL is set; server/shopify/catalog-mcp.ts).
+    { provider: "SHOPIFY" as const, label: "Shopify", configured: true, kind: "token" as const, askCart: askCartConfig()?.mode ?? null, mcp: catalogMcpProfileUrl() !== null },
   ];
 }
 
@@ -111,6 +116,8 @@ export const toConnectionDto = (c: IntegrationConnection) => ({
   lastError: c.lastError,
   tokenExpiresAt: c.tokenExpiresAt?.toISOString() ?? null,
   connectedAt: c.createdAt.toISOString(),
+  // A Shopify store read through the Catalog MCP: products only, no orders.
+  ...(c.provider === "SHOPIFY" && isShopifyMcp(c) && { via: "mcp" as const }),
 });
 
 export const listConnections = (workspaceId: string, brandId: string) =>
@@ -130,16 +137,58 @@ export async function startConnect(input: {
 }) {
   const cfg = providerConfig(input.provider);
   if (!cfg) throw new ConnectionError(`${PROVIDERS[input.provider].label} isn't set up yet (missing app keys)`);
-  const { raw, hash } = newToken();
-  await prisma.oAuthStateTransaction.create({
-    data: { ...input, client: input.client ?? "web", stateHash: hash, expiresAt: new Date(Date.now() + STATE_TTL_MS) },
-  });
   return PROVIDERS[input.provider].authorizeUrl({
     clientId: cfg.clientId,
     redirectUri: cfg.redirectUri,
-    state: raw,
+    state: await createConnectState(input),
     scope: PROVIDERS[input.provider].scopes.join(","),
   });
+}
+
+/**
+ * A single-use connect state (DEC-017: only its hash is stored, ≤10 min); returns the raw state for the URL. A PKCE
+ * verifier is kept encrypted like a token (it redeems the code), and cleared when the state is used.
+ */
+export async function createConnectState(input: {
+  workspaceId: string; brandId: string; userId: string; provider: IntegrationProvider; client?: "web" | "mobile"; codeVerifier?: string; shop?: string;
+}) {
+  const { raw, hash } = newToken();
+  await prisma.oAuthStateTransaction.create({
+    data: { ...input, codeVerifier: input.codeVerifier ? encryptCredentials(input.codeVerifier) : undefined, client: input.client ?? "web", stateHash: hash, expiresAt: new Date(Date.now() + STATE_TTL_MS) },
+  });
+  return raw;
+}
+
+/**
+ * Consume the state atomically *before* any code exchange, so a replayed or concurrent callback gets nothing, then
+ * re-check access (a role revoked mid-flow must not still connect). A repeat of a callback that already connected
+ * returns `replay` instead.
+ */
+export async function claimConnectState(input: { provider: IntegrationProvider; state: string; userId: string }) {
+  const stateHash = hashToken(input.state);
+  // The PKCE verifier is read before the consume clears it, so a used state holds none; only the consumer uses it.
+  const stored = (await prisma.oAuthStateTransaction.findUnique({ where: { stateHash }, select: { codeVerifier: true } }))?.codeVerifier ?? null;
+  // ponytail: a state started before verifiers were encrypted holds it plain; such states live 10 min, then this can go.
+  const verifier = stored && stored.startsWith("v1:") ? decryptCredentials<string>(stored) : stored;
+  const consumed = await prisma.oAuthStateTransaction.updateMany({
+    where: {
+      stateHash,
+      provider: input.provider,
+      userId: input.userId,
+      consumedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+    data: { consumedAt: new Date(), codeVerifier: null },
+  });
+  if (consumed.count !== 1) {
+    const replay = await replayedConnect(stateHash, input);
+    if (replay) return { replay };
+    throw new ConnectionError("This connect link expired or was already used. Try again.");
+  }
+  const st = { ...(await prisma.oAuthStateTransaction.findUniqueOrThrow({ where: { stateHash } })), codeVerifier: verifier };
+  await requireBrandAccess(st.workspaceId, st.brandId, input.userId);
+  await requirePermission(st.workspaceId, input.userId, "integrations.manage", st.brandId);
+  return { st };
 }
 
 /**
@@ -153,26 +202,9 @@ export async function completeConnect(input: {
   code: string;
   userId: string;
 }) {
-  const stateHash = hashToken(input.state);
-  const consumed = await prisma.oAuthStateTransaction.updateMany({
-    where: {
-      stateHash,
-      provider: input.provider,
-      userId: input.userId,
-      consumedAt: null,
-      expiresAt: { gt: new Date() },
-    },
-    data: { consumedAt: new Date() },
-  });
-  if (consumed.count !== 1) {
-    const replay = await replayedConnect(stateHash, input);
-    if (replay) return replay;
-    throw new ConnectionError("This connect link expired or was already used. Try again.");
-  }
-  const st =await prisma.oAuthStateTransaction.findUniqueOrThrow({ where: { stateHash } });
-
-  await requireBrandAccess(st.workspaceId, st.brandId, input.userId);
-  await requirePermission(st.workspaceId, input.userId, "integrations.manage", st.brandId);
+  const claimed = await claimConnectState(input);
+  if (claimed.replay) return claimed.replay;
+  const { st } = claimed;
 
   const cfg = providerConfig(input.provider);
   if (!cfg) throw new ConnectionError("Provider keys were removed during connect");
@@ -186,9 +218,14 @@ export async function completeConnect(input: {
  * Save connected accounts (tokens encrypted; a reconnect replaces them in place) and the `integration.connected`
  * audit event in one transaction. Used by the OAuth callback and by Shopify's token connect.
  */
-export async function saveConnections(input: { workspaceId: string; brandId: string; provider: IntegrationProvider; userId: string; accounts: ConnectedAccount[] }) {
+export async function saveConnections(input: {
+  workspaceId: string; brandId: string; provider: IntegrationProvider; userId: string; accounts: ConnectedAccount[];
+  /** Runs first in the same transaction; throw to save nothing (AskCart's one-brand rule). */
+  guard?: (tx: Prisma.TransactionClient) => Promise<void>;
+}) {
   const keyVersion = currentKeyVersion();
   return prisma.$transaction(async (tx) => {
+    await input.guard?.(tx);
     const rows = [];
     for (const a of input.accounts) {
       const data = {
@@ -236,7 +273,7 @@ export async function saveConnections(input: { workspaceId: string; brandId: str
  * same success, not "already used". Only the same user, the same state, within 2 minutes, and it
  * never issues or touches tokens. Waits briefly in case the first request is still exchanging.
  */
-async function replayedConnect(stateHash: string, input: { provider: OAuthProvider; userId: string }) {
+async function replayedConnect(stateHash: string, input: { provider: IntegrationProvider; userId: string }) {
   const st = await prisma.oAuthStateTransaction.findUnique({ where: { stateHash } });
   if (!st?.consumedAt || st.userId !== input.userId || st.provider !== input.provider) return null;
   if (Date.now() - st.consumedAt.getTime() > 2 * 60_000) return null;

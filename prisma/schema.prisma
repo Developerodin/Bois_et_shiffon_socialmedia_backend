@@ -38,6 +38,8 @@ model User {
   sessionVersion  Int        @default(0)
   /// May change platform-wide settings (Settings → AI models). Set directly in the database; no workspace role grants it.
   isPlatformAdmin Boolean    @default(false)
+  /// Email me the weekly digest (opt-in; the in-app digest is for everyone). Off by the signed unsubscribe link too.
+  digestEmail     Boolean    @default(false)
   createdAt       DateTime   @default(now())
   updatedAt       DateTime   @updatedAt
 
@@ -55,6 +57,7 @@ model User {
   blockingTasks   Task[]               @relation("TaskBlockedOn")
   ownedProjects   WorkProject[]        @relation("WorkProjectOwner")
   notifications   Notification[]
+  digests         Digest[]
 }
 
 /// A phone that gets push notifications (reel ready / couldn't be made). messages: the notification texts in the
@@ -131,6 +134,28 @@ model Workspace {
   credits      CreditEntry[]
   voices       Voice[]
   subscription Subscription?
+  digests      Digest[]
+}
+
+/// One reader's weekly digest for one workspace (server/digest/build.ts). Re-filtered by current permissions on read and
+/// at email send; deleted when the member is removed; pruned after 12 weeks (pruneOldRows).
+model Digest {
+  id          String    @id @default(cuid())
+  userId      String
+  workspaceId String
+  /// Monday of the covered week (UTC label; each brand section carries its own range)
+  weekStart   DateTime  @db.Date
+  /// DigestBody (shared/digest.ts): per brand, the sections the reader could see at build time
+  body        Json
+  emailedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId, weekStart])
+  @@index([workspaceId, weekStart])
+  @@index([createdAt])
 }
 
 enum SubscriptionStatus {
@@ -217,6 +242,9 @@ model Brand {
   shopOrders    ShopOrder[]
   searchDays    SearchDay[]
   adDays        AdDay[]
+  shopifyWrites ShopifyWrite[]
+  blogArticles  BlogArticle[]
+  quotes        Quote[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -225,36 +253,42 @@ model Brand {
 }
 
 model BrandProfile {
-  id           String   @id @default(cuid())
-  workspaceId  String
-  brandId      String   @unique
-  websiteUrl   String?
+  id              String   @id @default(cuid())
+  workspaceId     String
+  brandId         String   @unique
+  websiteUrl      String?
   /// What the owner said they mainly want to create (mobile onboarding A04): social-plan | marketing-videos | fashion-photoshoot | product-photoshoot
-  goal         String?
+  goal            String?
   /// Typed by owners without a website (mobile onboarding A07); Research looks the business up from these
-  about        String?
-  location     String?
+  about           String?
+  location        String?
   /// Logo, colours, fonts and product photos read from the website by Research (server/research/brand-assets.ts)
-  assets       Json?
+  assets          Json?
   /// Tagline, tags, audience, strengths drafted by Research; fields people edited are kept (server/research/brand-summary.ts)
-  summary      Json?
+  summary         Json?
   /// Creative tones the owner picked (mobile A10); the content language lives in `locales`
-  preferences  Json?
+  preferences     Json?
   /// The Google Maps listing the owner picked in onboarding (server/integrations/places.ts PlaceListing)
-  place        Json?
+  place           Json?
   /// Photos the owner added to the brand's library (mobile Business M08): [{ key, title, addedAt }]; Research never touches it
-  uploads      Json?
+  uploads         Json?
   /// The owner's automations (mobile Business M10): { monthlyPlan, autoPublish } (server/services/automations.ts)
-  automations  Json?
+  automations     Json?
   /// Last product catalogue sync: { at, source, count, error } (server/catalog/sync.ts)
-  catalogSync  Json?
+  catalogSync     Json?
   /// IANA zone every campaign time is entered and shown in (server/content/offer-checks.ts zonedInstant/wallTime)
-  timeZone     String?
-  voiceSummary String?
-  pillars      Json?
-  locales      Json?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  timeZone        String?
+  /// The Shopify blog articles go to (server/blog/shopify-articles.ts); null = the store's first blog
+  shopifyBlogId   String?
+  /// The next quote's number for this brand ("Q-0042"); taken and bumped in the quote's create transaction
+  nextQuoteNumber Int      @default(1)
+  /// The currency of the brand's quotes when it has no Shopify catalogue: the first quote's, required after that
+  quoteCurrency   String?
+  voiceSummary    String?
+  pillars         Json?
+  locales         Json?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 
@@ -675,6 +709,9 @@ model EmailOutbox {
   attempts  Int         @default(0)
   error     String?
   sentAt    DateTime?
+  /// What the email is about, for the send path: "digest:<digestId>" is rebuilt from that Digest at send time (after
+  /// re-checking the reader) and scrubbed to "[digest]" after (scrubSent). Null for invites and resets.
+  ref       String?
   createdAt DateTime    @default(now())
 
   @@index([status, createdAt])
@@ -729,17 +766,21 @@ model IntegrationConnection {
  * Single-use OAuth state (DEC-017): only the hash is stored; consumed atomically on callback.
  */
 model OAuthStateTransaction {
-  id          String              @id @default(cuid())
-  stateHash   String              @unique
-  workspaceId String
-  brandId     String
-  userId      String
-  provider    IntegrationProvider
+  id           String              @id @default(cuid())
+  stateHash    String              @unique
+  workspaceId  String
+  brandId      String
+  userId       String
+  provider     IntegrationProvider
   /// "mobile": the callback hands the code back to the app, which completes with its own token (never by state alone)
-  client      String              @default("web")
-  expiresAt   DateTime
-  consumedAt  DateTime?
-  createdAt   DateTime            @default(now())
+  client       String              @default("web")
+  /// PKCE code_verifier for a connect that uses one (AskCart); sent once with the code, never to the browser
+  codeVerifier String?
+  /// The store a connect was started for (AskCart): the token answer must name the same one
+  shop         String?
+  expiresAt    DateTime
+  consumedAt   DateTime?
+  createdAt    DateTime            @default(now())
 
   @@index([expiresAt])
 }
@@ -1367,6 +1408,7 @@ enum TaskArea {
   WEBSITE
   SEO
   GENERAL
+  CRM
 }
 
 enum WebsiteChangeKind {
@@ -1472,6 +1514,7 @@ model Task {
   attachments   TaskAttachment[]
   comments      TaskComment[]
   notifications Notification[]
+  blogArticles  BlogArticle[]
 
   @@unique([brandId, requestId])
   @@index([workProjectId, status])
@@ -1604,6 +1647,8 @@ enum DataSourceKind {
   POST_METRICS
   SHOPIFY_ORDERS
   META_ADS
+  /// quote status, expiry and payment reminders (server/quotes/status-sync.ts); no connection, externalId ""
+  SHOPIFY_QUOTES
 }
 
 enum DataSourceStatus {
@@ -1769,4 +1814,166 @@ model AdDay {
 
   @@unique([brandId, platform, accountId, campaignId, day])
   @@index([brandId, platform, accountId, day])
+}
+
+enum ShopifyWriteEntity {
+  QUOTE
+  BLOG_ARTICLE
+}
+
+enum ShopifyWriteAction {
+  DRAFT_ORDER_CREATE
+  DRAFT_ORDER_UPDATE
+  DRAFT_ORDER_INVOICE_SEND
+  ARTICLE_CREATE
+  ARTICLE_UPDATE
+  ARTICLE_PUBLISH
+}
+
+/// PENDING: being sent. DONE: Shopify has it. FAILED: Shopify refused it (nothing written; the row is reused on the
+/// next confirm). UNKNOWN: no answer, so it may have been written; reconciled before anything is sent again.
+enum ShopifyWriteStatus {
+  PENDING
+  DONE
+  FAILED
+  UNKNOWN
+}
+
+/// One confirmed write to Shopify (server/shopify/writes.ts): at most one per entity version, action and attempt.
+model ShopifyWrite {
+  id          String             @id @default(cuid())
+  workspaceId String
+  brandId     String
+  entityType  ShopifyWriteEntity
+  entityId    String
+  /// the entity version that was confirmed
+  version     Int
+  action      ShopifyWriteAction
+  /// a deliberate re-send (invoice, or "Send again" after an unconfirmed attempt) takes the next attempt
+  attempt     Int                @default(1)
+  payloadHash String
+  status      ShopifyWriteStatus @default(PENDING)
+  /// times this row was sent (a FAILED row is sent again); the request id is "<id>.<runs>"
+  runs        Int                @default(1)
+  /// when the latest send started: PENDING goes stale and UNKNOWN may be sent again from here
+  startedAt   DateTime           @default(now())
+  shopifyId   String?
+  actorUserId String
+  /// fixed text per reason, never Shopify's or the customer's words
+  error       String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([entityType, entityId, version, action, attempt])
+  @@index([status, startedAt])
+}
+
+enum BlogArticleStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+  HIDDEN_IN_SHOPIFY
+  PUBLISHED
+  ARCHIVED
+}
+
+/// A blog article written in our app (server/blog/articles.ts) and sent to the brand's Shopify blog hidden, then published.
+model BlogArticle {
+  id            String            @id @default(cuid())
+  workspaceId   String
+  brandId       String
+  /// <= 200
+  title         String
+  /// slug, unique per brand; how a create whose answer was lost is found in Shopify
+  handle        String
+  /// <= 500
+  summary       String?
+  /// ArticleBlock[] (shared/blog.ts), <= 30,000 characters of text
+  blocks        Json
+  tags          String[]
+  /// re-read with brand scope
+  productIds    String[]
+  taskId        String?
+  status        BlogArticleStatus @default(DRAFT)
+  /// the confirm token binds it; bumped by edits (a person's or the writer's) only
+  version       Int               @default(1)
+  shopifyBlogId String?
+  shopifyId     String?
+  publishedAt   DateTime?
+  approvedById  String?
+  createdById   String?
+  /// who changed the text last (creator, editor, or whoever ran the writer): approving your own needs nobody else to approve
+  editedById    String?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  task  Task? @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@unique([brandId, handle])
+  @@index([brandId, status, updatedAt])
+}
+
+enum QuoteStatus {
+  DRAFT
+  CREATED
+  SENT
+  ACCEPTED
+  EXPIRED
+  CANCELLED
+}
+
+/// A quote drafted in our app (server/quotes/quotes.ts) and created in Shopify as a draft order (server/quotes/shopify-draft-orders.ts).
+model Quote {
+  id               String      @id @default(cuid())
+  workspaceId      String
+  brandId          String
+  /// per brand, shown "Q-0042", from BrandProfile.nextQuoteNumber
+  number           Int
+  status           QuoteStatus @default(DRAFT)
+  /// the confirm token binds it; bumped by edits only
+  version          Int         @default(1)
+  /// PII, a snapshot (not linked to a customer record)
+  contactName      String?
+  /// PII: sent to Shopify only on invoice send; never in audit metadata or logs
+  contactEmail     String?
+  /// tier 2
+  customerId       String?
+  /// tier 2
+  conversationId   String?
+  /// the shop's currency
+  currency         String
+  /// QuoteLine[] snapshot (shared/quotes.ts): title, variant and unit price frozen when added; <= 100
+  lines            Json
+  /// QuoteDiscount { kind, value } or null
+  discount         Json?
+  /// <= 2,000, shown to the customer
+  note             String?
+  /// <= 2,000, never sent
+  internalNote     String?
+  /// the invoice send day + 30 (brand day); null until sent, so a draft never expires
+  validUntil       DateTime?   @db.Date
+  shopifyId        String?
+  shopifyName      String?
+  /// the version Shopify's draft order holds; invoice send needs it to equal `version`
+  syncedVersion    Int?
+  /// as Shopify computed it after create/update (before shipping and tax)
+  shopifySubtotal  String?
+  /// the Shopify subtotal a person accepted when it differs from ours; invoice send needs it to match shopifySubtotal
+  subtotalAccepted String?
+  invoiceUrl       String?
+  orderId          String?
+  sentAt           DateTime?
+  /// who sent the invoice last: owns the payment reminders
+  sentById         String?
+  createdById      String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([brandId, number])
+  @@index([brandId, status, updatedAt])
 }

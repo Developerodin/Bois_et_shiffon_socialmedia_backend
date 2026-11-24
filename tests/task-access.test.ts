@@ -28,14 +28,14 @@ beforeEach(() => {
 describe("visibleTaskSql", () => {
   it("tasks.all sees every task of the brand", () => {
     const s = visibleTaskSql(viewer(["brand.read", "tasks.read", "tasks.all"]));
-    expect(s.sql).toBe('(t."workspaceId" = ? AND t."brandId" = ?)');
+    expect(s.sql).toBe(`(t."workspaceId" = ? AND t."brandId" = ? AND NOT ('CRM' = ANY(t.areas)))`);
     expect(s.values).toEqual(["w1", "b1"]);
   });
 
   it("other staff see what they own (or their role owns), review, unblock or created", () => {
     const s = visibleTaskSql(viewer(["brand.read", "tasks.read", "tasks.manage"]));
     expect(s.sql).toBe(
-      '(t."workspaceId" = ? AND t."brandId" = ? AND ((t."ownerId" = ? OR (t."ownerRoleId" IS NOT NULL AND EXISTS (SELECT 1 FROM "BrandMember" bm WHERE bm."brandId" = t."brandId" AND bm."userId" = ? AND bm."roleId" = t."ownerRoleId"))) OR t."reviewerId" = ? OR t."blockedOnId" = ? OR t."createdById" = ?))',
+      `(t."workspaceId" = ? AND t."brandId" = ? AND NOT ('CRM' = ANY(t.areas)) AND ((t."ownerId" = ? OR (t."ownerRoleId" IS NOT NULL AND EXISTS (SELECT 1 FROM "BrandMember" bm WHERE bm."brandId" = t."brandId" AND bm."userId" = ? AND bm."roleId" = t."ownerRoleId"))) OR t."reviewerId" = ? OR t."blockedOnId" = ? OR t."createdById" = ?))`,
     );
     expect(s.values).toEqual(["w1", "b1", "u1", "u1", "u1", "u1", "u1"]);
   });
@@ -55,9 +55,22 @@ describe("visibleTaskSql", () => {
   it("client predicate has the reviewer-or-shared clause", () => {
     const s = visibleTaskSql(viewer(["brand.read", "tasks.read"], true), "x");
     expect(s.sql).toBe(
-      '(x."workspaceId" = ? AND x."brandId" = ? AND (x."reviewerId" = ? OR EXISTS (SELECT 1 FROM "WorkProject" p WHERE p.id = x."workProjectId" AND p."brandId" = x."brandId" AND p."clientVisible")))',
+      `(x."workspaceId" = ? AND x."brandId" = ? AND NOT ('CRM' = ANY(x.areas)) AND (x."reviewerId" = ? OR EXISTS (SELECT 1 FROM "WorkProject" p WHERE p.id = x."workProjectId" AND p."brandId" = x."brandId" AND p."clientVisible")))`,
     );
     expect(s.values).toEqual(["w1", "b1", "u1"]);
+  });
+
+  it("CRM tasks: hidden without inbox.read or crm.manage, also from tasks.all; either key shows them", () => {
+    expect(visibleTaskSql(viewer(["tasks.read", "tasks.all", "crm.read"])).sql).toContain(`NOT ('CRM' = ANY(t.areas))`);
+    for (const key of ["inbox.read", "crm.manage"] as const) {
+      const v = viewer(["tasks.read", "tasks.all", key]);
+      expect(v.crm).toBe(true);
+      expect(visibleTaskSql(v).sql).toBe('(t."workspaceId" = ? AND t."brandId" = ?)');
+    }
+    // A client given inbox.read in the matrix sees CRM tasks under the client clause.
+    const client = visibleTaskSql(viewer(["tasks.read", "inbox.read"], true)).sql;
+    expect(client).not.toContain("CRM");
+    expect(client).toContain("clientVisible");
   });
 
   it("no tasks.read is FALSE", () => {
@@ -83,7 +96,7 @@ describe("visibleTaskSql", () => {
 
 describe("taskViewer and comments", () => {
   it("reads the route scope without another query", () => {
-    expect(viewer(["tasks.read", "tasks.manage"])).toEqual({ ...scope, canRead: true, canManage: true, all: false, client: false });
+    expect(viewer(["tasks.read", "tasks.manage"])).toEqual({ ...scope, canRead: true, canManage: true, all: false, client: false, crm: false });
     expect(viewer(["tasks.read", "tasks.all"]).all).toBe(true);
     expect(db.workspaceMember.findFirst).not.toHaveBeenCalled();
   });
@@ -170,6 +183,24 @@ describe("canBeAssigned", () => {
     expect(await canBeAssigned(tx, scope, "u2", task)).toBe(false);
   });
 
+  it("a CRM task needs inbox.read or crm.manage too (workspace role or staff grant)", async () => {
+    const crm = { ...task, areas: ["CRM"] };
+    const holds = (keys: string[]) =>
+      db.workspaceMember.findFirst.mockImplementation(async ({ where }: Where) => (keys.includes((where.roleRef as { permissions: { has: string } }).permissions.has) ? { id: "m" } : null));
+    holds(["tasks.read"]);
+    expect(await canBeAssigned(tx, scope, "u2", crm)).toBe(false);
+    expect(await canBeAssigned(tx, scope, "u2", task)).toBe(true);
+    holds(["tasks.read", "crm.manage"]);
+    expect(await canBeAssigned(tx, scope, "u2", crm)).toBe(true);
+  });
+
+  it("a client on a CRM task: only when the client role holds a key", async () => {
+    people({ clients: ["u2"] });
+    expect(await canBeAssigned(tx, scope, "u2", { reviewerId: "u2", workProjectId: null, areas: ["CRM"] })).toBe(false);
+    people({ clients: ["u2"], clientPerms: ["brand.read", "tasks.read", "inbox.read"] });
+    expect(await canBeAssigned(tx, scope, "u2", { reviewerId: "u2", workProjectId: null, areas: ["CRM"] })).toBe(true);
+  });
+
   it("a client grant without tasks.read is refused", async () => {
     people({ clients: ["u2"], clientPerms: ["brand.read"] });
     expect(await canBeAssigned(tx, scope, "u2", { reviewerId: "u2", workProjectId: null })).toBe(false);
@@ -229,6 +260,15 @@ describe("visibleTasksAcrossSql per brand", () => {
     const s = await sqlFor([], [grant("b1", ["brand.read", "tasks.read", "tasks.all"]), grant("b2", ["brand.read", "tasks.read"])]);
     expect(s.sql).toContain('(t."brandId" IN (?) OR (t."brandId" IN (?) AND ((t."ownerId" = ?');
     expect(s.values.slice(2, 4)).toEqual(["b1", "b2"]);
+  });
+
+  it("CRM tasks: every brand with a key in the workspace role, else only brands whose grant adds one", async () => {
+    expect((await sqlFor(["brand.read", "tasks.read", "tasks.all", "inbox.read"], [])).sql).not.toContain("CRM");
+    const s = await sqlFor(["brand.read", "tasks.read", "tasks.all"], [grant("b2", ["crm.manage"]), grant("b3", ["brand.read"])]);
+    expect(s.sql).toContain(`(NOT ('CRM' = ANY(t.areas)) OR t."brandId" IN (?))`);
+    expect(s.values).toContain("b2");
+    expect(s.values).not.toContain("b3");
+    expect((await sqlFor(["brand.read", "tasks.read"], [])).sql).toContain(`(NOT ('CRM' = ANY(t.areas)) OR FALSE)`);
   });
 
   it("a client grant's tasks.all is ignored (client clause)", async () => {

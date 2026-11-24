@@ -103,10 +103,11 @@ export async function safeFetch(raw: string, accept = "text/html", signal?: Abor
  * Same guard as safeFetch, raw bytes (images). `truncated` = the body hit maxBytes and was cut. `signal` = caller's overall deadline.
  * `opts.headers`: more request headers (conditional ones: If-None-Match, If-Modified-Since); `headers` = the final response's.
  * `opts.sameSite`: a redirect to another site (host other than the asked one, www. ignored) throws instead of being followed.
+ * `opts.body`: POST it as JSON instead of a GET (Shopify's Catalog MCP); a redirect is then followed same-site only.
  */
 export async function safeFetchBytes(
   raw: string, accept: string, maxBytes = MAX_BYTES, signal?: AbortSignal, timeoutMs = TIMEOUT_MS,
-  opts: { headers?: Record<string, string>; sameSite?: boolean } = {},
+  opts: { headers?: Record<string, string>; sameSite?: boolean; body?: string } = {},
 ): Promise<{ url: URL; status: number; bytes: Uint8Array; contentType: string; truncated: boolean; headers: Pick<Headers, "get"> }> {
   let url = await assertPublicUrl(raw);
   const host = url.hostname;
@@ -114,13 +115,14 @@ export async function safeFetchBytes(
     const res = await fetch(url, {
       dispatcher: PINNED,
       redirect: "manual",
-      headers: { ...opts.headers, "user-agent": USER_AGENT, accept },
+      ...(opts.body !== undefined && { method: "POST", body: opts.body }),
+      headers: { ...opts.headers, ...(opts.body !== undefined && { "content-type": "application/json" }), "user-agent": USER_AGENT, accept },
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
       await res.body?.cancel();
       url = await assertPublicUrl(new URL(res.headers.get("location")!, url).toString());
-      if (opts.sameSite && !sameSite(url.hostname, host)) throw new CrawlError("Redirected to another site");
+      if ((opts.sameSite || opts.body !== undefined) && !sameSite(url.hostname, host)) throw new CrawlError("Redirected to another site");
       continue;
     }
     const reader = res.body?.getReader();

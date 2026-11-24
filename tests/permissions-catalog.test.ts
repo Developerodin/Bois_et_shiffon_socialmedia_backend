@@ -73,10 +73,14 @@ describe("rolePermissions", () => {
     }));
     // Later migrations add keys to built-in rows; with those applied, the snapshot is the catalog (as sets: appended keys
     // land at the end of a stored row).
-    const added = readFileSync(join(dir, readdirSync(dir).find((d) => d.endsWith("_crm_ads_read"))!, "migration.sql"), "utf8");
-    const addedKeys = [...added.match(/unnest\(ARRAY\[([^\]]*)\]/)![1]!.matchAll(/'([^']+)'/g)].map((k) => k[1]!);
-    const addedTo = [...added.match(/"slug" IN \(([^)]*)\)/)![1]!.matchAll(/'([^']+)'/g)].map((k) => k[1]);
-    const migrated = rows.map((r) => ({ ...r, permissions: (addedTo.includes(r.slug) ? [...r.permissions, ...addedKeys] : r.permissions).sort() }));
+    let migrated = rows;
+    for (const name of ["_crm_ads_read", "_crm_manage"]) {
+      const added = readFileSync(join(dir, readdirSync(dir).find((d) => d.endsWith(name))!, "migration.sql"), "utf8");
+      const addedKeys = [...added.match(/unnest\(ARRAY\[([^\]]*)\]/)![1]!.matchAll(/'([^']+)'/g)].map((k) => k[1]!);
+      const addedTo = [...added.match(/"slug" IN \(([^)]*)\)/)![1]!.matchAll(/'([^']+)'/g)].map((k) => k[1]);
+      migrated = migrated.map((r) => ({ ...r, permissions: addedTo.includes(r.slug) ? [...r.permissions, ...addedKeys] : r.permissions }));
+    }
+    migrated = migrated.map((r) => ({ ...r, permissions: [...r.permissions].sort() }));
     expect(migrated).toEqual(SYSTEM_ROLES.map((r) => ({ slug: r.slug, name: r.name, description: r.description, scope: r.scope, permissions: [...r.permissions].sort() })));
     for (const table of ["BrandMember", "WorkspaceMember", "Invitation"]) expect(sql).toContain(`UPDATE "${table}"`);
     expect(sql).toMatch(/DELETE FROM "Role" co\s+WHERE co."isSystem" AND co.slug = 'commercial-owner'/);

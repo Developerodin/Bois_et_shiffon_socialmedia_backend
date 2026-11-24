@@ -2,10 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const m = vi.hoisted(() => ({
   fetchOrders: vi.fn(),
+  fetchAskCartOrders: vi.fn(),
   executeRaw: vi.fn(async () => 0),
   markReconnect: vi.fn(async () => undefined),
 }));
-vi.mock("@/server/data/shopify-orders", async (orig) => ({ ...(await orig<object>()), fetchOrders: m.fetchOrders }));
+vi.mock("@/server/data/shopify-orders", async (orig) => ({ ...(await orig<object>()), fetchOrders: m.fetchOrders, fetchAskCartOrders: m.fetchAskCartOrders }));
+vi.mock("@/server/shopify/askcart-token", () => ({ askCartToken: async () => "askcart_token" }));
 vi.mock("@/server/db/prisma", () => ({ prisma: { $executeRaw: m.executeRaw } }));
 vi.mock("@/server/services/connections", async (orig) => ({ ...(await orig<object>()), accessToken: async () => "shpat_secret", markReconnect: m.markReconnect }));
 
@@ -14,6 +16,7 @@ import type { ShopOrderRow } from "@/server/data/shopify-orders";
 import { FIRST_RUN_DAYS, syncShopifyOrders } from "@/server/data/shopify-orders-sync";
 import { parseRange } from "@/shared";
 import { ReconnectNeeded } from "@/server/services/connections";
+import { ASKCART_KEY_REFUSED } from "@/server/shopify/askcart";
 
 const conn = { id: "c1", externalAccountId: "shop.myshopify.com" } as IntegrationConnection;
 const now = new Date("2026-11-23T12:00:00Z");
@@ -63,6 +66,17 @@ describe("syncShopifyOrders", () => {
     m.fetchOrders.mockResolvedValue({ orders: [order(1)], cursorEnd });
     await syncShopifyOrders(ctx(null), now);
     expect(JSON.stringify(m.executeRaw.mock.calls)).not.toContain("shpat_secret");
+  });
+
+  it("an AskCart connection reads through AskCart (no token) and a refusal says to reconnect AskCart", async () => {
+    const askCart = { ...ctx(null), connection: { id: "c2", externalAccountId: "askcart" } as IntegrationConnection };
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [order(1)], cursorEnd, stoppedReason: "rate_limited" });
+    expect(await syncShopifyOrders(askCart, now)).toEqual({ count: 1, reason: "rate_limited", cursor: cursorEnd.toISOString() });
+    expect(m.fetchAskCartOrders).toHaveBeenCalledWith("askcart_token", new Date(now.getTime() - FIRST_RUN_DAYS * 86_400_000), askCart.signal);
+    expect(m.fetchOrders).not.toHaveBeenCalled();
+    m.fetchAskCartOrders.mockRejectedValueOnce(new ReconnectNeeded("AskCart 401 unauthorized"));
+    await expect(syncShopifyOrders(askCart, now)).rejects.toBeInstanceOf(ReconnectNeeded);
+    expect(m.markReconnect).toHaveBeenCalledWith("c2", ASKCART_KEY_REFUSED);
   });
 });
 

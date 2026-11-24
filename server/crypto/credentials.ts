@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 
 /**
  * AES-256-GCM envelope for connector tokens (DEC-002/018):
@@ -14,6 +14,12 @@ function key(version: number) {
   if (buf.length !== 32) throw new Error(`Credential key v${version} missing or not 32 bytes (base64)`);
   return buf;
 }
+
+/**
+ * A 32-byte key for one purpose (`info`, e.g. "shopify-confirm"), derived with HKDF from the current credentials key, so
+ * signed tokens and links need no secret of their own. Rotating the credentials key voids everything signed with the old one.
+ */
+export const subKey = (info: string) => Buffer.from(hkdfSync("sha256", key(currentKeyVersion()), Buffer.alloc(0), info, 32));
 
 export function encryptCredentials(data: unknown, version = currentKeyVersion()) {
   const iv = randomBytes(12);

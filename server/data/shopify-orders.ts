@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { shopifyQuery } from "@/server/catalog/shopify";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
+import { AskCartError, askCartOrders, type AskCartMoney, type AskCartOrder, type AskCartPage } from "@/server/shopify/askcart";
 import type { SyncStop } from "@/server/data/sync-stop";
 
 /**
@@ -164,6 +165,88 @@ export async function fetchOrders(
     orders.push(...data.orders.nodes.map(mapOrder));
     if (!data.orders.pageInfo.hasNextPage) return done();
     after = data.orders.pageInfo.endCursor;
+  }
+  return done("capped");
+}
+
+const shopMoney = (m: AskCartMoney | null | undefined): Money | null => (m && typeof m.amount === "string" ? { shopMoney: m } : null);
+
+/**
+ * An AskCart order (the same fields, money without the shopMoney wrapper) as a ShopOrder row, through mapOrder; null
+ * when it lacks what a row needs (id, dates, subtotal, total), so the caller stops cleanly instead of crashing.
+ */
+export function mapAskCartOrder(o: AskCartOrder): ShopOrderRow | null {
+  const subtotal = shopMoney(o?.currentSubtotalPriceSet);
+  const total = shopMoney(o?.currentTotalPriceSet);
+  if (!subtotal || !total || !o.id || !o.processedAt || !o.updatedAt) return null;
+  return mapOrder({
+    ...o,
+    currentSubtotalPriceSet: subtotal,
+    currentTotalDiscountsSet: shopMoney(o.currentTotalDiscountsSet),
+    currentShippingPriceSet: shopMoney(o.currentShippingPriceSet),
+    currentTotalPriceSet: total,
+    totalRefundedSet: shopMoney(o.totalRefundedSet),
+    currentTaxLines: (o.currentTaxLines ?? []).flatMap((t) => {
+      const priceSet = shopMoney(t?.priceSet);
+      return priceSet ? [{ priceSet }] : [];
+    }),
+  });
+}
+
+/**
+ * fetchOrders for a brand reading through AskCart (server/shopify/askcart.ts): AskCart's incremental mode
+ * (`updatedSince`, oldest update first, 100 a page) with the same overlap, caps and stops, so the runner can't tell
+ * them apart. A page AskCart cut short (`rateLimited`), its 429 after the client's retries, or Shopify's throttle →
+ * `rate_limited` with the pages before it (a sorted prefix). 401 / store not connected throw ReconnectNeeded; 403 access_denied →
+ * `missing_scope`; anything else → `failed`. Orders seen twice (same updatedAt at a page edge) keep their last read.
+ * AskCart's read_all_orders_pending warning (orders created before visibleSince left out) is logged only: the
+ * pasted-token path has the same 60-day reach.
+ */
+export async function fetchAskCartOrders(bearer: string, sinceUpdatedAt: Date, signal?: AbortSignal): Promise<FetchOrdersResult> {
+  const updatedSince = new Date(sinceUpdatedAt.getTime() - OVERLAP_MS);
+  const started = Date.now();
+  const byId = new Map<string, ShopOrderRow>();
+  let cursor: string | null = null;
+  const done = (stoppedReason?: SyncStop): FetchOrdersResult => {
+    const orders = [...byId.values()];
+    return {
+      orders,
+      cursorEnd: orders.reduce((max, o) => (o.shopifyUpdatedAt > max ? o.shopifyUpdatedAt : max), sinceUpdatedAt),
+      ...(stoppedReason ? { stoppedReason } : {}),
+    };
+  };
+  const none = (stoppedReason: SyncStop): FetchOrdersResult => ({ orders: [], cursorEnd: sinceUpdatedAt, stoppedReason });
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    if (page > 0 && (Date.now() - started > MAX_MS || signal?.aborted)) return done("capped");
+    let res: AskCartPage<AskCartOrder>;
+    try {
+      res = await askCartOrders(bearer, { updatedSince }, cursor, signal);
+    } catch (err) {
+      // The caller marks the connection with AskCart's own reason (our access vs the store's install).
+      if (err instanceof ReconnectNeeded) throw err;
+      if (signal?.aborted) return done("capped");
+      if (err instanceof AskCartError && err.rateLimited) return done("rate_limited");
+      if (err instanceof AskCartError && err.code === "access_denied") return none("missing_scope");
+      if (err instanceof AskCartError || err instanceof TypeError || (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError"))) {
+        console.error("[askcart-orders] failed", err.name, err instanceof AskCartError ? err.message : "");
+        return none("failed");
+      }
+      throw err;
+    }
+    if (res.warning?.code === "read_all_orders_pending" && page === 0) console.warn("[askcart-orders] orders created before", res.warning.visibleSince, "aren't visible yet");
+    for (const o of res.items ?? []) {
+      const row = mapAskCartOrder(o);
+      // An order AskCart sent without its totals: the run fails cleanly (nothing written, retried), never half a page.
+      if (!row) {
+        console.error("[askcart-orders] an order came without its totals");
+        return none("failed");
+      }
+      byId.set(row.shopifyId, row);
+    }
+    if (res.rateLimited) return done("rate_limited");
+    if (res.complete || !res.nextCursor) return done();
+    cursor = res.nextCursor;
   }
   return done("capped");
 }

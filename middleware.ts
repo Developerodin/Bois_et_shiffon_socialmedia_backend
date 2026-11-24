@@ -8,6 +8,8 @@ const authMiddleware = NextAuth(authConfig).auth as unknown as (request: NextReq
 const READS = new Set(["GET", "HEAD", "OPTIONS"]);
 // Callers that never hold the session cookie: providers (webhooks), the job trigger, the phone's own sign-in routes.
 const NO_COOKIE_PATHS = ["/api/v1/webhooks/", "/api/v1/jobs/run", "/api/v1/mobile/", "/api/v1/integrations/"];
+// Exact paths only: a mail provider's one-click unsubscribe (signed link, server/digest/unsubscribe.ts).
+const NO_COOKIE_EXACT = ["/api/v1/digest/unsubscribe"];
 
 /** AUTH_URL's origin (the website) plus WEB_ORIGINS, a comma list for dev hosts such as a LAN address. */
 function allowedOrigins() {
@@ -24,7 +26,7 @@ export function crossOriginWrite(request: NextRequest) {
   if (READS.has(request.method)) return false;
   if (request.headers.get("authorization")?.startsWith("Bearer ")) return false;
   const path = request.nextUrl.pathname;
-  if (NO_COOKIE_PATHS.some((p) => path === p || path.startsWith(p))) return false;
+  if (NO_COOKIE_EXACT.includes(path) || NO_COOKIE_PATHS.some((p) => path === p || path.startsWith(p))) return false;
   const site = request.headers.get("sec-fetch-site");
   if (site === "same-origin" || site === "none") return false;
   const origin = request.headers.get("origin");

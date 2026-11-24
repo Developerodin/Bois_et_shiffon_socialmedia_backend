@@ -3,6 +3,7 @@ import nodemailer from "nodemailer";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
+import { digestEmailFor } from "@/server/digest/email";
 import { LOGO_ATTACHMENT } from "./sign-in-code";
 
 /**
@@ -17,7 +18,8 @@ type Db = Prisma.TransactionClient | typeof prisma;
 
 export async function queueEmail(
   db: Db,
-  email: { to: string; subject: string; text: string; html?: string },
+  /** `ref`: what the email is about ("digest:<id>": built from that Digest at send time). */
+  email: { to: string; subject: string; text: string; html?: string; ref?: string },
 ) {
   const row = await db.emailOutbox.create({ data: email });
   await enqueueJob(
@@ -35,6 +37,13 @@ export const emailConfigured = () => Boolean(process.env.SMTP_HOST && process.en
  * ponytail: a send that keeps failing keeps its link until the token expires (reset 1 h, invite 7 days).
  */
 export const scrubLinks = (text: string) => text.replace(/https?:\/\/\S*(?:\/invite\/|reset-password)\S*/g, "[link removed after sending]");
+
+/**
+ * What the outbox keeps of an email once it is out of our hands: a digest keeps nothing of its body (it is the Digest
+ * row's) nor the address (read from the user at send time).
+ */
+export const scrubSent = (row: { ref: string | null; text: string }) =>
+  row.ref?.startsWith("digest:") ? { to: "", text: "[digest]", html: null } : { text: scrubLinks(row.text), html: null };
 
 let transport: nodemailer.Transporter | undefined;
 function smtp() {
@@ -58,19 +67,30 @@ export async function sendOutboxEmail(rawPayload: unknown) {
   if (!row || row.status === "SENT") return; // deleted (e.g. the invite was cleaned up) or already sent
   if (!emailConfigured()) {
     // The inviter was shown a copy-able link instead; nothing will send this later.
-    await prisma.emailOutbox.update({ where: { id: row.id }, data: { status: "NOT_CONFIGURED", text: scrubLinks(row.text), html: null } });
+    await prisma.emailOutbox.update({ where: { id: row.id }, data: { status: "NOT_CONFIGURED", ...scrubSent(row) } });
     console.warn(`[email] not configured; "${row.subject}" to ${row.to} not sent`);
     return;
+  }
+  let mail: { to: string; subject: string; text: string; html?: string | null; headers?: Record<string, string> } = row;
+  if (row.ref?.startsWith("digest:")) {
+    // Re-checked now: a reader removed, opted out or left with nothing they may still see gets nothing, and the row goes.
+    const digest = await digestEmailFor(row.ref.slice("digest:".length));
+    if (!digest) {
+      await prisma.emailOutbox.deleteMany({ where: { id: row.id } });
+      return;
+    }
+    mail = digest;
   }
   // ponytail: SMTP has no idempotency key — if the send succeeds but the SENT update
   // below fails, the retry sends a duplicate. Rare; acceptable for invites/resets.
   try {
     await smtp().sendMail({
       from: process.env.EMAIL_FROM,
-      to: row.to,
-      subject: row.subject,
-      text: row.text,
-      ...(row.html && { html: row.html, attachments: [LOGO_ATTACHMENT] }),
+      to: mail.to,
+      subject: mail.subject,
+      text: mail.text,
+      ...(mail.html && { html: mail.html, attachments: [LOGO_ATTACHMENT] }),
+      ...(mail.headers && { headers: mail.headers }),
     });
   } catch (e) {
     const error = (e instanceof Error ? e.message : String(e)).slice(0, 500);
@@ -82,6 +102,6 @@ export async function sendOutboxEmail(rawPayload: unknown) {
   }
   await prisma.emailOutbox.update({
     where: { id: row.id },
-    data: { status: "SENT", sentAt: new Date(), attempts: { increment: 1 }, error: null, text: scrubLinks(row.text), html: null },
+    data: { status: "SENT", sentAt: new Date(), attempts: { increment: 1 }, error: null, ...scrubSent(row) },
   });
 }

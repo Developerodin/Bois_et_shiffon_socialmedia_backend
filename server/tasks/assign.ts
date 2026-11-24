@@ -44,8 +44,10 @@ export async function assignTasks(scope: TaskScope, v: TaskViewer, input: Assign
     await lockRows(tx, "task", ids);
     const seen = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT t.id FROM "Task" t WHERE t.id IN (${Prisma.join(ids)}) AND ${visibleTaskSql(v)}`);
     if (seen.length !== ids.length) throw new TaskError("Task not found", 404);
-    await checkTaskLinks(tx, scope, { ownerId, ownerRoleId });
-    const rows = await tx.task.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, status: true, reviewerId: true, ownerId: true, ownerRoleId: true } });
+    const rows = await tx.task.findMany({ where: { id: { in: ids } }, select: { id: true, title: true, status: true, reviewerId: true, ownerId: true, ownerRoleId: true, areas: true } });
+    // The new owner is checked as for a CRM task when any of them is one (a CRM_TASK_KEYS key).
+    const areas = rows.some((t) => t.areas.includes("CRM")) ? ["CRM"] : [];
+    await checkTaskLinks(tx, scope, { ownerId, ownerRoleId }, { reviewerId: null, workProjectId: null, areas });
     const open = rows.filter((t) => OPEN.includes(t.status));
     const skipped = rows.length - open.length;
     // The submitForReview rule, kept while in review (as patchTask): the owner doesn't review their own task.

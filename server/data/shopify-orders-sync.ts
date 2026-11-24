@@ -4,7 +4,10 @@ import { prisma } from "@/server/db/prisma";
 import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
 import { accessToken, markReconnect } from "@/server/services/connections";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
-import { fetchOrders, type ShopOrderRow } from "./shopify-orders";
+import { AskCartError, askCartReason, askCartShop, isAskCart } from "@/server/shopify/askcart";
+import { isShopifyMcp } from "@/server/shopify/catalog-mcp";
+import { askCartToken } from "@/server/shopify/askcart-token";
+import { fetchAskCartOrders, fetchOrders, type ShopOrderRow } from "./shopify-orders";
 import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from "./sources";
 
 /**
@@ -57,8 +60,17 @@ export async function syncShopifyOrders(
 ): Promise<SyncOutcome> {
   const conn = ctx.connection;
   if (!conn) return { count: 0, reason: stopReason("reconnect") };
+  // The Catalog MCP has no orders (turnOnShopifyOrders refuses it); a source left on a store reconnected that way stops.
+  if (isShopifyMcp(conn)) return { count: 0, reason: stopReason("missing_scope") };
   const since = ctx.source.cursor ? new Date(ctx.source.cursor) : new Date(now.getTime() - FIRST_RUN_DAYS * 86_400_000);
-  const read = await fetchOrders({ shop: conn.externalAccountId, accessToken: await accessToken(conn) }, since, ctx.signal);
+  const read = isAskCart(conn)
+    ? await (async () => fetchAskCartOrders(await askCartToken(conn), since, ctx.signal))().catch(async (e: unknown) => {
+        // AskCart refused our access, lost the store, or the connection is from the other mode: the connection's
+        // fault, like a refused token.
+        if (e instanceof ReconnectNeeded) await markReconnect(conn.id, askCartReason(e));
+        throw e;
+      })
+    : await fetchOrders({ shop: conn.externalAccountId, accessToken: await accessToken(conn) }, since, ctx.signal);
   const stop = read.stoppedReason;
   // A refused token is the connection's fault (products stop too); a missing scope or permission is not.
   if (stop === "reconnect") await markReconnect(conn.id, SHOPIFY_REFUSED);
@@ -76,7 +88,8 @@ registerSync("SHOPIFY_ORDERS", (ctx) => syncShopifyOrders(ctx));
 
 export type TurnOn =
   | { ok: true; sourceId: string }
-  | { ok: false; problem: "not-connected" | "missing-scope" | "refused" | "unreachable" };
+  /** askCart: the connection reads through AskCart, so the problem is worded without tokens. */
+  | { ok: false; problem: "not-connected" | "missing-scope" | "refused" | "unreachable" | "needs-askcart"; askCart?: true };
 
 /**
  * Turn the orders sync on for one of the brand's Shopify connections: its stored token only (a token never comes in a
@@ -92,6 +105,22 @@ export async function turnOnShopifyOrders(scope: { workspaceId: string; brandId:
   });
   if (!conn) return { ok: false, problem: "not-connected" };
   const shop = conn.externalAccountId;
+  // Shopify MCP reads the catalogue only: orders need AskCart (or a token).
+  if (isShopifyMcp(conn)) return { ok: false, problem: "needs-askcart" };
+  if (isAskCart(conn)) {
+    // AskCart holds the scopes; asking for the shop proves it answers. access_denied on orders shows on the first run.
+    try {
+      await askCartShop(await askCartToken(conn));
+    } catch (e) {
+      console.warn("[askcart] orders turn-on check failed", scope.brandId, e instanceof Error ? e.message : e);
+      if (e instanceof ReconnectNeeded) {
+        await markReconnect(conn.id, askCartReason(e));
+        return { ok: false, problem: "refused", askCart: true };
+      }
+      return { ok: false, problem: e instanceof AskCartError && e.code === "access_denied" ? "missing-scope" : "unreachable", askCart: true };
+    }
+    return { ok: true, sourceId: await startOrders(scope, conn, shop, conn.displayName) };
+  }
   let scopes: string[];
   try {
     ({ scopes } = await grantedScopes(shop, await accessToken(conn)));
@@ -104,11 +133,16 @@ export async function turnOnShopifyOrders(scope: { workspaceId: string; brandId:
   await prisma.integrationConnection.updateMany({ where: { id: conn.id, workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { scopes } });
   if (!SHOPIFY_ORDER_SCOPES.every((s) => scopes.includes(s))) return { ok: false, problem: "missing-scope" };
 
+  return { ok: true, sourceId: await startOrders(scope, conn, shop, shop) };
+}
+
+/** Upserts the orders source (switching an OFF one back on) and queues its first run. */
+async function startOrders(scope: { workspaceId: string; brandId: string }, conn: IntegrationConnection, shop: string, label: string) {
   const source = await prisma.dataSource.upsert({
     where: { brandId_kind_externalId: { brandId: scope.brandId, kind: "SHOPIFY_ORDERS", externalId: shop } },
-    create: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SHOPIFY_ORDERS", externalId: shop, connectionId: conn.id, label: shop },
-    update: { connectionId: conn.id, label: shop, status: "ACTIVE" },
+    create: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SHOPIFY_ORDERS", externalId: shop, connectionId: conn.id, label },
+    update: { connectionId: conn.id, label, status: "ACTIVE" },
   });
   await enqueueSourceSync(source, "manual", { key: `data:${source.id}:turn-on:${source.updatedAt.getTime()}` });
-  return { ok: true, sourceId: source.id };
+  return source.id;
 }
