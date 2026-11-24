@@ -28,6 +28,8 @@ const CONFIRM_TTL_MS = 10 * 60_000;
 const PENDING_STALE_MS = 2 * 60_000;
 const UNKNOWN_WAIT_MS = 10 * 60_000;
 const HOUR = 3_600_000;
+/** A send with no answer by then counts as unanswered (UNKNOWN), well inside PENDING_STALE_MS. */
+const RUN_TIMEOUT_MS = 60_000;
 const REPEATABLE = new Set<ShopifyWriteAction>(["DRAFT_ORDER_INVOICE_SEND"]);
 
 /** A refused preview or confirm; routes answer it with shopifyWriteProblem. Messages are fixed text, never Shopify's. */
@@ -71,7 +73,7 @@ export function readConfirmToken(token: string, now = new Date()): Claims | null
   const expected = sign(body);
   if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
   const [brandId, entityType, entityId, version, action, attempt, hash, userId, exp] = Buffer.from(body, "base64url").toString("utf8").split("|");
-  if (!userId || Number(exp) < now.getTime()) return null;
+  if (!userId || !Number.isFinite(Number(exp)) || Number(exp) < now.getTime()) return null;
   return { brandId, entityType: entityType as ShopifyWriteEntity, entityId, version: Number(version), action: action as ShopifyWriteAction, attempt: Number(attempt), hash, userId, exp: Number(exp) };
 }
 
@@ -131,7 +133,7 @@ export type ConfirmHooks<P, R extends { shopifyId: string }> = {
   run: (adapter: ShopifyWriteAdapter, payload: P, requestId: string) => Promise<ShopifyResult<R>>;
   /** Whether an unanswered send reached Shopify: the written object, or null when Shopify has no sign of it. */
   reconcile: (adapter: ShopifyWriteAdapter, write: ShopifyWrite) => Promise<ShopifyResult<R | null>>;
-  /** Runs in the transaction that marks the write DONE: update the entity from Shopify's answer. */
+  /** Runs in the transaction that marks the write DONE: update the entity from Shopify's answer. Database writes only, no network calls. */
   onDone?: (tx: Prisma.TransactionClient, result: R, write: ShopifyWrite) => Promise<void>;
 };
 
@@ -158,7 +160,6 @@ export async function confirmWrite<P, R extends { shopifyId: string }>(
   let row = await prisma.shopifyWrite.findFirst({ where: { ...where, attempt: c.attempt } });
   if (!row) {
     if (c.attempt > 1) await mayTryAgain(await prisma.shopifyWrite.findFirst({ where: { ...where, attempt: c.attempt - 1 } }), hooks, adapter, now);
-    await rateLimit(scope);
     try {
       row = await prisma.shopifyWrite.create({
         data: { ...where, attempt: c.attempt, payloadHash: c.hash, actorUserId: scope.userId, startedAt: now },
@@ -167,12 +168,17 @@ export async function confirmWrite<P, R extends { shopifyId: string }>(
       if (isUniqueViolation(e)) throw new ShopifyWriteError("Already sending", 409, "ALREADY_SENDING");
       throw e;
     }
+    // Counted only once this confirm won the row; refused → the row goes, nothing was sent.
+    const created = row;
+    await rateLimit(scope, () => prisma.shopifyWrite.deleteMany({ where: { id: created.id, status: "PENDING", runs: 1 } }));
     return send(row, payload, hooks, adapter);
   }
   if (row.status === "DONE") throw new ShopifyWriteError("Already done", 409, "ALREADY_DONE");
+  // A send in flight or unanswered was for what its own token showed; settling it can't stand for a different payload.
+  if (row.status !== "FAILED" && row.payloadHash !== c.hash) throw new ShopifyWriteError("This changed since you checked it", 409, "CHANGED");
   if (row.status === "PENDING") {
     if (now.getTime() - row.startedAt.getTime() < PENDING_STALE_MS) throw new ShopifyWriteError("Already sending", 409, "ALREADY_SENDING");
-    await prisma.shopifyWrite.updateMany({ where: { id: row.id, status: "PENDING", runs: row.runs }, data: { status: "UNKNOWN", error: "No answer from Shopify" } });
+    await settle(row, "UNKNOWN", "No answer from Shopify", {}, "PENDING");
     row = { ...row, status: "UNKNOWN" };
   }
   if (row.status === "UNKNOWN") {
@@ -181,13 +187,19 @@ export async function confirmWrite<P, R extends { shopifyId: string }>(
     throw waitOrSendAgain(row, now);
   }
   // FAILED: nothing was written, so the same row is sent again (a new run, so a new request id).
-  await rateLimit(scope);
+  const failed = row;
   const reused = await prisma.shopifyWrite.updateMany({
-    where: { id: row.id, status: "FAILED", runs: row.runs },
-    data: { status: "PENDING", runs: { increment: 1 }, startedAt: now, error: null, actorUserId: scope.userId },
+    where: { id: failed.id, status: "FAILED", runs: failed.runs },
+    data: { status: "PENDING", runs: { increment: 1 }, startedAt: now, error: null, actorUserId: scope.userId, payloadHash: c.hash },
   });
   if (!reused.count) throw new ShopifyWriteError("Already sending", 409, "ALREADY_SENDING");
-  return send({ ...row, status: "PENDING", runs: row.runs + 1, startedAt: now, actorUserId: scope.userId }, payload, hooks, adapter);
+  await rateLimit(scope, () =>
+    prisma.shopifyWrite.updateMany({
+      where: { id: failed.id, status: "PENDING", runs: failed.runs + 1 },
+      data: { status: "FAILED", runs: failed.runs, startedAt: failed.startedAt, error: failed.error, actorUserId: failed.actorUserId, payloadHash: failed.payloadHash },
+    }),
+  );
+  return send({ ...failed, status: "PENDING", runs: failed.runs + 1, startedAt: now, actorUserId: scope.userId, payloadHash: c.hash }, payload, hooks, adapter);
 }
 
 /** A next attempt may go only after a DONE repeatable one, or an UNKNOWN one Shopify still has no sign of after 10 min. */
@@ -213,16 +225,32 @@ async function reconciled<R extends { shopifyId: string }>(row: ShopifyWrite, ho
   return found.value ? done(row, found.value, hooks) : null;
 }
 
-async function rateLimit(scope: WriteScope) {
+/** `undo` puts the row back as it was when a limit refuses. */
+async function rateLimit(scope: WriteScope, undo: () => Promise<unknown>) {
   const perUser = await hitRateLimit(`shopify-writes:${scope.brandId}:${scope.userId}`, 30, HOUR);
   const perBrand = perUser.allowed && (await hitRateLimit(`shopify-writes:${scope.brandId}`, 100, HOUR));
-  if (!perUser.allowed || !perBrand || !perBrand.allowed) throw new ShopifyWriteError("Too many Shopify changes this hour. Try again later.", 429, "RATE_LIMITED");
+  if (perUser.allowed && perBrand && perBrand.allowed) return;
+  await undo();
+  throw new ShopifyWriteError("Too many Shopify changes this hour. Try again later.", 429, "RATE_LIMITED");
+}
+
+/** hooks.run, or a throw (= no answer) after RUN_TIMEOUT_MS, so a PENDING row is never still in flight when it goes stale. */
+async function withTimeout<T>(run: Promise<T>) {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error("Shopify write timed out"), { name: "TimeoutError" })), RUN_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([run, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function send<P, R extends { shopifyId: string }>(row: ShopifyWrite, payload: P, hooks: ConfirmHooks<P, R>, adapter: ShopifyWriteAdapter) {
   let res: ShopifyResult<R>;
   try {
-    res = await hooks.run(adapter, payload, `${row.id}.${row.runs}`);
+    res = await withTimeout(hooks.run(adapter, payload, `${row.id}.${row.runs}`));
   } catch (e) {
     // The outcome is unknown: it may have been written. Logged by error name only (adapter text can carry anything).
     console.error(`[shopify] write ${row.id} got no answer`, e instanceof Error ? e.name : "error");
@@ -250,9 +278,10 @@ const audit = (tx: Prisma.TransactionClient, row: ShopifyWrite, status: ShopifyW
     },
   });
 
-async function settle(row: ShopifyWrite, status: "FAILED" | "UNKNOWN", error: string, extra: Record<string, number> = {}) {
+/** `from`: only a row still in that state (the stale-PENDING path); else whatever ownRun allows. */
+async function settle(row: ShopifyWrite, status: "FAILED" | "UNKNOWN", error: string, extra: Record<string, number> = {}, from?: ShopifyWriteStatus) {
   await prisma.$transaction(async (tx) => {
-    const { count } = await tx.shopifyWrite.updateMany({ where: ownRun(row), data: { status, error } });
+    const { count } = await tx.shopifyWrite.updateMany({ where: from ? { id: row.id, runs: row.runs, status: from } : ownRun(row), data: { status, error } });
     if (count) await audit(tx, row, status, extra);
   });
 }
@@ -260,8 +289,13 @@ async function settle(row: ShopifyWrite, status: "FAILED" | "UNKNOWN", error: st
 async function done<R extends { shopifyId: string }>(row: ShopifyWrite, result: R, hooks: Pick<SettleHooks<R>, "onDone">) {
   return prisma.$transaction(async (tx) => {
     const { count } = await tx.shopifyWrite.updateMany({ where: ownRun(row), data: { status: "DONE", shopifyId: result.shopifyId, error: null } });
-    if (!count) throw new ShopifyWriteError("Already done", 409, "ALREADY_DONE");
     const write = await tx.shopifyWrite.findUniqueOrThrow({ where: { id: row.id } });
+    if (!count) {
+      // Another confirm reconciled this run to DONE (and ran onDone) while the send was still in flight: the send
+      // succeeded, so its confirmer gets the result too.
+      if (write.status === "DONE" && write.runs === row.runs && write.shopifyId === result.shopifyId) return { result, write };
+      throw new ShopifyWriteError("Already done", 409, "ALREADY_DONE");
+    }
     await hooks.onDone?.(tx, result, write);
     await audit(tx, write, "DONE", { shopifyId: result.shopifyId });
     return { result, write };
@@ -270,9 +304,12 @@ async function done<R extends { shopifyId: string }>(row: ShopifyWrite, result: 
 
 /** Daily sweep: a PENDING write with no answer for 10 min becomes UNKNOWN (reconciled at the next confirm). */
 export async function expireStaleWrites(now = new Date()) {
-  const { count } = await prisma.shopifyWrite.updateMany({
-    where: { status: "PENDING", startedAt: { lt: new Date(now.getTime() - UNKNOWN_WAIT_MS) } },
-    data: { status: "UNKNOWN", error: "No answer from Shopify" },
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.shopifyWrite.updateManyAndReturn({
+      where: { status: "PENDING", startedAt: { lt: new Date(now.getTime() - UNKNOWN_WAIT_MS) } },
+      data: { status: "UNKNOWN", error: "No answer from Shopify" },
+    });
+    for (const row of rows) await audit(tx, row, "UNKNOWN");
+    return rows.length;
   });
-  return count;
 }

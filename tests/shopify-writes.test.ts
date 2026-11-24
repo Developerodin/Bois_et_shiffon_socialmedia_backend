@@ -49,6 +49,7 @@ describe("confirm tokens", () => {
     expect(readConfirmToken(token, new Date(claims.exp + 1))).toBeNull();
     expect(readConfirmToken("x", NOW)).toBeNull();
     expect(readConfirmToken(`${token}.x`, NOW)).toBeNull();
+    expect(readConfirmToken(confirmToken({ ...claims, exp: Number.NaN }), NOW)).toBeNull();
   });
 
   it("depends on the credentials key", () => {

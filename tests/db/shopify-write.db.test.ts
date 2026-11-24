@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/server/db/prisma";
 import { AccessDeniedError } from "@/server/auth/errors";
 import type { DraftOrder, ShopifyWriteAdapter } from "@/server/shopify/adapter";
-import { confirmWrite, expireStaleWrites, previewWrite, ShopifyWriteError, type WriteKey, type WriteScope } from "@/server/shopify/writes";
+import { confirmWrite, expireStaleWrites, payloadHash, previewWrite, ShopifyWriteError, type WriteKey, type WriteScope } from "@/server/shopify/writes";
 import type { PermissionKey } from "@/shared";
 import { fakeShopify } from "../fixtures/shopify-fake";
 
@@ -31,15 +31,19 @@ let n = 0;
 /** A quote and the hooks that write it as a draft order; `action` defaults to a create. */
 function quote(action: WriteKey["action"] = "DRAFT_ORDER_CREATE") {
   const id = `q${++n}`;
-  const entity = { version: 1, payload: { currency: "EUR", lines: [{ title: "Bag", quantity: 1, unitPrice: "10.00" }], tag: `sma-quote-${id}` }, draftId: null as string | null };
+  const entity = {
+    version: 1,
+    payload: { currency: "EUR", lines: [{ title: "Bag", quantity: 1, unitPrice: "10.00" }], tag: `sma-quote-${id}` },
+    draftId: null as string | null,
+    invoice: { to: "buyer@example.test", subject: "Your quote", message: "Thanks" },
+  };
   const done: DraftOrder[] = [];
   const key: WriteKey = { entityType: "QUOTE", entityId: id, action };
-  const invoice = { to: "buyer@example.test", subject: "Your quote", message: "Thanks" };
   const hooks = {
     permission: "crm.manage" as const,
-    rebuild: async () => ({ version: entity.version, payload: action === "DRAFT_ORDER_INVOICE_SEND" ? { ...entity.payload, invoice } : entity.payload }),
+    rebuild: async () => ({ version: entity.version, payload: action === "DRAFT_ORDER_INVOICE_SEND" ? { ...entity.payload, invoice: entity.invoice } : entity.payload }),
     run: (a: ShopifyWriteAdapter, p: typeof entity.payload, requestId: string) =>
-      action === "DRAFT_ORDER_INVOICE_SEND" ? a.sendInvoice(scope, requestId, entity.draftId!, invoice) : a.createDraftOrder(scope, requestId, p),
+      action === "DRAFT_ORDER_INVOICE_SEND" ? a.sendInvoice(scope, requestId, entity.draftId!, entity.invoice) : a.createDraftOrder(scope, requestId, p),
     reconcile: (a: ShopifyWriteAdapter) => a.lookupDraftOrder(scope, { tag: entity.payload.tag }),
     onDone: async (_tx: unknown, r: DraftOrder) => void done.push(r),
   };
@@ -194,7 +198,7 @@ describe("Shopify confirmed writes", () => {
     const { payload } = await q.hooks.rebuild();
     // A send that never came back (the process died mid-request), after reaching Shopify.
     const row = await prisma.shopifyWrite.create({
-      data: { workspaceId: ws, brandId: brand, ...q.key, version: 1, payloadHash: "x", actorUserId: scope.userId, startedAt: T0 },
+      data: { workspaceId: ws, brandId: brand, ...q.key, version: 1, payloadHash: payloadHash(payload), actorUserId: scope.userId, startedAt: T0 },
     });
     await shop.adapter.createDraftOrder(scope, `${row.id}.1`, payload);
     expect(await refusal(confirmWrite(scope, p.confirmToken, q.key, q.hooks, shop.adapter, at(1)))).toMatchObject({ code: "ALREADY_SENDING" });
@@ -203,12 +207,14 @@ describe("Shopify confirmed writes", () => {
     const { write } = await confirmWrite(scope, p2.confirmToken, q.key, q.hooks, shop.adapter, at(3));
     expect(write).toMatchObject({ id: row.id, status: "DONE" });
     expect(shop.drafts.size).toBe(1);
+    expect((await prisma.auditEvent.findMany({ where: { entityId: row.id }, orderBy: { createdAt: "asc" } })).map((a) => (a.metadata as { status: string }).status)).toEqual(["UNKNOWN", "DONE"]);
 
     const stale = await prisma.shopifyWrite.create({
       data: { workspaceId: ws, brandId: brand, entityType: "QUOTE", entityId: "stale", version: 1, action: "DRAFT_ORDER_CREATE", payloadHash: "x", actorUserId: scope.userId, startedAt: T0 },
     });
     expect(await expireStaleWrites(at(11))).toBe(1);
     expect(await prisma.shopifyWrite.findUnique({ where: { id: stale.id } })).toMatchObject({ status: "UNKNOWN" });
+    expect(await prisma.auditEvent.findMany({ where: { entityId: stale.id } })).toMatchObject([{ action: "shopify.draft_order_create", metadata: { status: "UNKNOWN" } }]);
   });
 
   it("an invoice is sent again only as a deliberate next attempt; a create never is", async () => {
@@ -230,6 +236,48 @@ describe("Shopify confirmed writes", () => {
     expect((await rows(inv.id)).map((r) => [r.attempt, r.status])).toEqual([[1, "DONE"], [2, "DONE"]]);
   });
 
+  it("an unanswered invoice isn't settled by a confirm of a different message; a FAILED row takes the new payload", async () => {
+    const shop = fakeShopify();
+    const created = quote();
+    const inv = quote("DRAFT_ORDER_INVOICE_SEND");
+    inv.entity.draftId = (await confirmWrite(scope, (await previewOf(created, shop.adapter)).confirmToken, created.key, created.hooks, shop.adapter, T0)).result.shopifyId;
+    shop.fail("lost");
+    await refusal(confirmWrite(scope, (await previewOf(inv, shop.adapter)).confirmToken, inv.key, inv.hooks, shop.adapter, T0));
+    inv.entity.invoice = { ...inv.entity.invoice, message: "Something else" };
+    expect(await refusal(confirmWrite(scope, (await previewOf(inv, shop.adapter, { now: at(1) })).confirmToken, inv.key, inv.hooks, shop.adapter, at(1)))).toMatchObject({ status: 409, code: "CHANGED" });
+    expect((await rows(inv.id))[0]).toMatchObject({ status: "UNKNOWN" });
+    expect(inv.done).toEqual([]);
+
+    const q = quote("DRAFT_ORDER_INVOICE_SEND");
+    q.entity.draftId = inv.entity.draftId;
+    shop.fail({ ok: false, reason: "USER_ERROR", fields: ["email.to"] });
+    await refusal(confirmWrite(scope, (await previewOf(q, shop.adapter)).confirmToken, q.key, q.hooks, shop.adapter, T0));
+    q.entity.invoice = { ...q.entity.invoice, to: "other@example.test" };
+    const p = await previewOf(q, shop.adapter, { now: at(1) });
+    const { write } = await confirmWrite(scope, p.confirmToken, q.key, q.hooks, shop.adapter, at(1));
+    expect(write).toMatchObject({ status: "DONE", runs: 2, payloadHash: payloadHash(p.preview) });
+  });
+
+  it("a send still in flight when another confirm reconciles it gets the DONE result too", async () => {
+    const shop = fakeShopify();
+    const q = quote();
+    let second: unknown;
+    const hooks = {
+      ...q.hooks,
+      run: async (a: ShopifyWriteAdapter, p: typeof q.entity.payload, requestId: string) => {
+        const r = await a.createDraftOrder(scope, requestId, p);
+        // Three minutes on, someone confirms again: the row looks stale and reconcile finds the draft.
+        second = await confirmWrite(scope, (await previewOf(q, shop.adapter, { now: at(3) })).confirmToken, q.key, q.hooks, shop.adapter, at(3));
+        return r;
+      },
+    };
+    const first = await confirmWrite(scope, (await previewOf(q, shop.adapter)).confirmToken, q.key, hooks, shop.adapter, T0);
+    expect(first.write).toMatchObject({ status: "DONE", shopifyId: first.result.shopifyId });
+    expect(second).toMatchObject({ write: { status: "DONE", shopifyId: first.result.shopifyId } });
+    expect(shop.drafts.size).toBe(1);
+    expect(q.done).toHaveLength(1);
+  });
+
   it("stops at 30 writes an hour per person on a brand", async () => {
     const shop = fakeShopify();
     const q = quote();
@@ -237,5 +285,6 @@ describe("Shopify confirmed writes", () => {
     await prisma.rateLimitBucket.upsert({ where: { key }, create: { key, count: 30, windowStart: new Date() }, update: { count: 30, windowStart: new Date() } });
     expect(await refusal(confirmWrite(scope, (await previewOf(q, shop.adapter)).confirmToken, q.key, q.hooks, shop.adapter, T0))).toMatchObject({ status: 429, code: "RATE_LIMITED" });
     expect(shop.calls).toEqual([]);
+    expect(await rows(q.id)).toEqual([]);
   });
 });
