@@ -39,6 +39,14 @@ describe("parseSitemap", () => {
     expect(parseSitemap(`<!DOCTYPE x [<!ENTITY a "b">]><urlset><url><loc>https://a.test/p/1</loc></url></urlset>`)).toBeNull();
   });
 
+  it("needs a urlset or sitemapindex root, optionally prefixed", () => {
+    expect(parseSitemap("<html><loc>https://a.test/p/1</loc></html>")).toBeNull();
+    expect(parseSitemap("")).toBeNull();
+    expect(parseSitemap(`<sm:sitemapindex xmlns:sm="x"><sm:sitemap><loc>https://a.test/s.xml</loc></sm:sitemap></sm:sitemapindex>`)?.index).toBe(true);
+    expect(parseSitemap(`<urlset
+ xmlns="x"></urlset>`)).toEqual({ index: false, entries: [] });
+  });
+
   it("stays linear on 200,000 entries without lastmod or closing tags", () => {
     const xml = "<urlset>" + "<loc>https://a.test/p/1</loc>".repeat(200_000);
     const t = performance.now();
@@ -81,12 +89,42 @@ describe("discoverProductUrls", () => {
     expect(res.complete).toBe(true);
   });
 
+  it("an emptied sitemap is never complete, so it deletes nothing", async () => {
+    site[`${O}/sitemap.products.xml`] = urlset([]);
+    expect(await discoverProductUrls(O, `Sitemap: ${O}/sitemap.products.xml`)).toEqual({ urls: [], complete: false, capped: false, reason: "no-product-pages" });
+  });
+
+  it("a /sitemap.xml that fails other than 404/410 makes the read incomplete even when /sitemap_index.xml answers", async () => {
+    site[`${O}/sitemap.xml`] = { status: 503 };
+    site[`${O}/sitemap_index.xml`] = index([`${O}/sitemap.products.xml`]);
+    site[`${O}/sitemap.products.xml`] = urlset([`${O}/chair`]);
+    const res = await discoverProductUrls(O, "");
+    expect(res.complete).toBe(false);
+    expect(res.urls.map((u) => u.url)).toEqual([`${O}/chair`]);
+    site[`${O}/sitemap.xml`] = { status: 410 };
+    expect((await discoverProductUrls(O, "")).complete).toBe(true);
+  });
+
+  it("a 200 that isn't a sitemap (maintenance page, JSON error) makes the read incomplete", async () => {
+    site[`${O}/sitemap.products.xml`] = "<html><body>Back soon</body></html>";
+    expect((await discoverProductUrls(O, `Sitemap: ${O}/sitemap.products.xml`)).complete).toBe(false);
+    site[`${O}/sitemap.products.xml`] = '{"error":"maintenance"}';
+    expect((await discoverProductUrls(O, `Sitemap: ${O}/sitemap.products.xml`)).complete).toBe(false);
+  });
+
+  it("an http sitemap under an https site isn't fetched", async () => {
+    site[`${O}/sitemap.xml`] = index(["http://www.shop.test/products.xml", `${O}/products-2.xml`]);
+    site[`${O}/products-2.xml`] = urlset([`${O}/chair`]);
+    await discoverProductUrls(O, "Sitemap: http://www.shop.test/sitemap.xml");
+    expect(fetched().filter((u) => u.startsWith("http:"))).toEqual([]);
+  });
+
   it("without a product sitemap keeps product-looking paths only, else says no-product-pages", async () => {
     site[`${O}/sitemap.xml`] = urlset([`${O}/about`, `${O}/p/1`, `${O}/products/chair`, `${O}/table-p-42`, `${O}/produit/x`, `${O}/blog/productivity`]);
     const res = await discoverProductUrls(O, "");
     expect(res.urls.map((u) => u.url).sort()).toEqual([`${O}/p/1`, `${O}/products/chair`, `${O}/produit/x`, `${O}/table-p-42`]);
     site[`${O}/sitemap.xml`] = urlset([`${O}/about`]);
-    expect(await discoverProductUrls(O, "")).toEqual({ urls: [], complete: true, capped: false, reason: "no-product-pages" });
+    expect(await discoverProductUrls(O, "")).toEqual({ urls: [], complete: false, capped: false, reason: "no-product-pages" });
   });
 
   it("no sitemap at all → incomplete, no-product-pages", async () => {
@@ -144,6 +182,7 @@ describe("discoverProductUrls", () => {
     site[`${O}/sitemap.xml`] = urlset([...urls, urls[0], `${O}/p/undated`]);
     const res = await discoverProductUrls(O, "");
     expect(res.capped).toBe(true);
+    expect(res.complete).toBe(false); // the pages past the cap are still on the site: nothing may be deleted
     expect(res.urls).toHaveLength(5000);
     expect(res.urls[0].url).toBe(`${O}/p/5001`);
     expect(res.urls.at(-1)!.url).toBe(`${O}/p/2`);

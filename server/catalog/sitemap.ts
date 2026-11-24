@@ -31,12 +31,16 @@ export type Discovery = { urls: FoundPage[]; complete: boolean; capped: boolean;
 
 const siteHost = (u: URL) => u.hostname.toLowerCase().replace(/^www\./, "");
 
-/** An http(s) URL on the same site as `base` (host equal or its www. variant), hash dropped; else null. */
-function sameSite(raw: string, base: URL): URL | null {
+/**
+ * An http(s) URL on the same site as `base` (host equal or its www. variant), hash dropped; else null. `secure`: an
+ * https site's sitemap files must be https too.
+ */
+function sameSite(raw: string, base: URL, secure = false): URL | null {
   if (raw.length > MAX_URL) return null;
   try {
     const u = new URL(raw, base);
     if ((u.protocol !== "https:" && u.protocol !== "http:") || siteHost(u) !== siteHost(base)) return null;
+    if (secure && base.protocol === "https:" && u.protocol !== "https:") return null;
     u.hash = "";
     return u;
   } catch {
@@ -67,10 +71,19 @@ function finder(text: string, needle: string) {
   };
 }
 
-/** `<urlset>` or `<sitemapindex>` entries: each `<loc>` with the `<lastmod>` of the same `<url>`/`<sitemap>` element. */
+// The root element, optionally namespace-prefixed. Bounded prefix: linear on hostile input.
+const ROOT = /<(?:[\w.-]{1,32}:)?(urlset|sitemapindex)[\s>]/;
+
+/**
+ * `<urlset>` or `<sitemapindex>` entries: each `<loc>` with the `<lastmod>` of the same `<url>`/`<sitemap>` element.
+ * null when it isn't a sitemap (no such root: a maintenance page, a JSON error) or carries a DOCTYPE, so a 200 that
+ * isn't a sitemap never reads as an empty one.
+ */
 export function parseSitemap(xml: string): Parsed | null {
   if (/<!DOCTYPE/i.test(xml)) return null;
-  const index = xml.includes("<sitemapindex");
+  const root = ROOT.exec(xml);
+  if (!root) return null;
+  const index = root[1] === "sitemapindex";
   const close = index ? "</sitemap>" : "</url>";
   const nextLoc = finder(xml, "<loc>");
   const nextLocEnd = finder(xml, "</loc>");
@@ -119,8 +132,9 @@ function gunzip(bytes: Uint8Array, limit: number): Uint8Array | null {
 
 /**
  * The product pages a site lists. `robots` is its robots.txt text (the caller fetched it and decides what a failed
- * fetch means). `complete` is false when any sitemap was cut off, answered other than 200, failed, was skipped over
- * the child limit, or time ran out: then the list may miss pages and nothing must be deleted because of it.
+ * fetch means). `complete` is false when any sitemap was cut off, answered other than 200, wasn't a sitemap, failed,
+ * was skipped over the child limit, or time ran out; also when the list was capped (the pages past the cap are still
+ * on the site) or came out empty (an emptied sitemap): then nothing must be deleted because of it.
  * With a sitemap named product/produit only those are used; otherwise only product-looking paths count.
  */
 export async function discoverProductUrls(origin: string, robots: string, signal?: AbortSignal): Promise<Discovery> {
@@ -129,37 +143,40 @@ export async function discoverProductUrls(origin: string, robots: string, signal
   let complete = true;
   let budget = MAX_TOTAL;
 
-  /** One sitemap file, parsed; null (and `complete` false) when it can't be read whole. A partial file still yields what it had. */
-  const read = async (url: URL): Promise<Parsed | null> => {
+  /**
+   * One sitemap file, parsed; `parsed` null (and `complete` false) when it can't be read whole. A partial file still
+   * yields what it had. `status` is the answer's (null when nothing answered).
+   */
+  const read = async (url: URL): Promise<{ parsed: Parsed | null; status: number | null }> => {
     if (deadline.aborted || budget <= 0) {
       complete = false;
-      return null;
+      return { parsed: null, status: null };
     }
     try {
       const res = await safeFetchBytes(url.toString(), ACCEPT, Math.min(MAX_FILE, budget), deadline, FILE_TIMEOUT_MS);
       budget -= res.bytes.length;
-      if (res.status !== 200 || res.truncated || !sameSite(res.url.toString(), base)) complete = false;
-      if (res.status !== 200 || !sameSite(res.url.toString(), base)) return null;
+      const fail = (status: number | null = res.status) => {
+        complete = false;
+        return { parsed: null, status };
+      };
+      if (res.status !== 200 || !sameSite(res.url.toString(), base, true)) return fail();
+      if (res.truncated) complete = false;
       let bytes = res.bytes;
       if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
         const inflated = gunzip(bytes, Math.min(MAX_FILE, budget));
-        if (!inflated) {
-          complete = false;
-          return null;
-        }
+        if (!inflated) return fail();
         budget -= inflated.length;
         bytes = inflated;
       }
       const parsed = parseSitemap(new TextDecoder().decode(bytes));
-      if (!parsed) complete = false;
-      return parsed;
+      return parsed ? { parsed, status: res.status } : fail();
     } catch {
       complete = false;
-      return null;
+      return { parsed: null, status: null };
     }
   };
 
-  let roots = robotsSitemaps(robots).flatMap((s) => sameSite(s, base) ?? []);
+  let roots = robotsSitemaps(robots).flatMap((s) => sameSite(s, base, true) ?? []);
   const fromRobots = roots.length > 0;
   if (!fromRobots) roots = [new URL("/sitemap.xml", base), new URL("/sitemap_index.xml", base)];
 
@@ -172,16 +189,17 @@ export async function discoverProductUrls(origin: string, robots: string, signal
   const children = new Map<string, URL>();
   let anyRead = false;
   for (const root of uniqueUrls(roots)) {
-    // Without robots lines, /sitemap_index.xml is only a fallback: a missing one doesn't make the read incomplete.
+    // Without robots lines, /sitemap_index.xml is only a fallback: /sitemap.xml answering 404/410 (it doesn't exist)
+    // doesn't make the read incomplete; any other failure (a 503, a time-out, a page that isn't a sitemap) does.
     if (!fromRobots && anyRead) break;
     const before: boolean = complete;
-    const parsed = await read(root);
-    if (!fromRobots && !parsed) complete = before;
+    const { parsed, status } = await read(root);
+    if (!fromRobots && !parsed && (status === 404 || status === 410)) complete = before;
     if (!parsed) continue;
     anyRead = true;
     if (!parsed.index) take(root, parsed.entries);
     else for (const e of parsed.entries) {
-      const child = sameSite(e.loc, base);
+      const child = sameSite(e.loc, base, true);
       if (child) children.set(child.toString(), child);
     }
   }
@@ -195,7 +213,7 @@ export async function discoverProductUrls(origin: string, robots: string, signal
     queue = queue.slice(0, MAX_CHILDREN);
   }
   for (const child of queue) {
-    const parsed = await read(child);
+    const { parsed } = await read(child);
     if (!parsed) continue;
     // ponytail: one level of index only; a nested index is skipped (and the read marked incomplete).
     if (parsed.index) complete = false;
@@ -214,9 +232,11 @@ export async function discoverProductUrls(origin: string, robots: string, signal
     pages.set(u.toString(), { url: u.toString(), lastmod: Number.isFinite(t) ? new Date(t) : null });
   }
   const urls = [...pages.values()].sort((a, b) => (b.lastmod?.getTime() ?? -Infinity) - (a.lastmod?.getTime() ?? -Infinity));
+  // Capped: the pages past the newest 5,000 are still on the site. Empty: more likely an emptied or broken sitemap than
+  // a shop with nothing for sale. Neither may delete pages (and archive their products).
   return {
     urls: urls.slice(0, MAX_PAGES),
-    complete,
+    complete: complete && urls.length > 0 && urls.length <= MAX_PAGES,
     capped: urls.length > MAX_PAGES,
     ...(urls.length === 0 && { reason: "no-product-pages" as const }),
   };
@@ -230,7 +250,7 @@ const BATCH = 1000;
 /**
  * Stores what discovery found: new pages inserted, a changed lastmod written (an unchanged one is skipped), in one
  * INSERT … FROM unnest per 1,000. When the discovery was complete, pages no longer listed are deleted and the
- * productKeys they held are returned for the archive rule (catalog.pages); an incomplete one deletes nothing.
+ * productKeys only they held are returned for the archive rule (catalog.pages); an incomplete or empty one deletes nothing.
  * ponytail: the delete passes every listed URL (≤ MAX_PAGES) in one array parameter.
  */
 export async function syncCatalogPages(scope: Scope, found: { urls: FoundPage[]; complete: boolean }) {
@@ -246,10 +266,25 @@ export async function syncCatalogPages(scope: Scope, found: { urls: FoundPage[];
       ON CONFLICT ("brandId", url) DO UPDATE SET lastmod = EXCLUDED.lastmod
       WHERE "CatalogPage"."workspaceId" = ${scope.workspaceId} AND "CatalogPage".lastmod IS DISTINCT FROM EXCLUDED.lastmod`;
   }
-  if (!found.complete) return { upserted, deleted: 0, goneKeys: [] as string[] };
-  const gone = await prisma.$queryRaw<{ productKeys: string[] | null }[]>`
-    DELETE FROM "CatalogPage"
-    WHERE "workspaceId" = ${scope.workspaceId} AND "brandId" = ${scope.brandId} AND NOT (url = ANY(${pages.map((p) => p.url)}::text[]))
-    RETURNING "productKeys"`;
-  return { upserted, deleted: gone.length, goneKeys: [...new Set(gone.flatMap((g) => g.productKeys ?? []))] };
+  if (!found.complete || pages.length === 0) return { upserted, deleted: 0, goneKeys: [] as string[] };
+  // goneKeys: keys of the deleted pages that no remaining page of the brand still holds (a product listed on two pages
+  // stays). The statement's other parts see the table as it was before the DELETE, so "remaining" = the listed URLs.
+  // The delete and the archive (the caller's) are separate steps: a crash between them leaves those products
+  // unarchived, the safe side.
+  const listed = pages.map((p) => p.url);
+  const [res] = await prisma.$queryRaw<{ deleted: number; keys: string[] }[]>`
+    WITH gone AS (
+      DELETE FROM "CatalogPage"
+      WHERE "workspaceId" = ${scope.workspaceId} AND "brandId" = ${scope.brandId} AND NOT (url = ANY(${listed}::text[]))
+      RETURNING "productKeys"
+    )
+    SELECT (SELECT count(*) FROM gone)::int AS deleted,
+      ARRAY(
+        SELECT DISTINCT k FROM gone, unnest(gone."productKeys") AS k
+        WHERE NOT EXISTS (
+          SELECT 1 FROM "CatalogPage" c
+          WHERE c."workspaceId" = ${scope.workspaceId} AND c."brandId" = ${scope.brandId} AND c.url = ANY(${listed}::text[]) AND k = ANY(c."productKeys")
+        )
+      ) AS keys`;
+  return { upserted, deleted: res.deleted, goneKeys: res.keys };
 }

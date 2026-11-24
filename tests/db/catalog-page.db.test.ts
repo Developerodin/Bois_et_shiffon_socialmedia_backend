@@ -48,9 +48,19 @@ describe("syncCatalogPages", () => {
     expect(await urls("cp-b")).toEqual([page(2).url]);
   });
 
-  it("a complete discovery that found nothing empties the brand's pages", async () => {
+  it("an empty list deletes nothing, even when called complete", async () => {
     await syncCatalogPages(scope(), { urls: [page(1)], complete: true });
-    expect((await syncCatalogPages(scope(), { urls: [], complete: true })).deleted).toBe(1);
-    expect(await urls()).toEqual([]);
+    expect((await syncCatalogPages(scope(), { urls: [], complete: true })).deleted).toBe(0);
+    expect(await urls()).toEqual([page(1).url]);
+  });
+
+  it("a key another remaining page still holds isn't returned", async () => {
+    await syncCatalogPages(scope(), { urls: [page(1), page(2)], complete: true });
+    await syncCatalogPages(scope("cp-b"), { urls: [page(1)], complete: true });
+    await prisma.catalogPage.updateMany({ where: { brandId: "cp-a", url: page(1).url }, data: { productKeys: ["sku:A"] } });
+    await prisma.catalogPage.updateMany({ where: { brandId: "cp-a", url: page(2).url }, data: { productKeys: ["sku:A", "sku:B"] } });
+    await prisma.catalogPage.updateMany({ where: { brandId: "cp-b" }, data: { productKeys: ["sku:B"] } }); // another brand's hold doesn't count
+    const res = await syncCatalogPages(scope(), { urls: [page(1)], complete: true });
+    expect(res).toMatchObject({ deleted: 1, goneKeys: ["sku:B"] });
   });
 });
