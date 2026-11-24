@@ -1,6 +1,7 @@
-import type { IntegrationConnection, Prisma } from "@prisma/client";
+import type { IntegrationConnection, Prisma, ProductSource } from "@prisma/client";
 import { z } from "zod";
 import type { CatalogSync, SyncReason } from "@/shared";
+import type { PERSON_FIELDS } from "@/server/catalog/products";
 import { SHOPIFY_REFUSED, shopifyVariants, type ShopifyVariant } from "@/server/catalog/shopify";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
@@ -18,7 +19,6 @@ import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/c
 export const CATALOG_SYNC_JOB = "catalog.sync";
 
 type Scope = { workspaceId: string; brandId: string };
-type SyncedSource = "WEBSITE" | "SHOPIFY";
 type Note = { error: string; reason: SyncReason };
 
 /** What a sync writes: every field it owns, except stockCheckedAt and archivedAt, which saving sets. */
@@ -37,6 +37,8 @@ export type SyncedRow = {
   imageUrl: string | null;
 };
 type Fetched = { rows: SyncedRow[]; complete: boolean; note?: Note };
+/** What saveRows writes: IMPORT rows also carry the person fields from the file (null = empty cell, keeps the stored value). */
+export type SavedRow = SyncedRow & { materials?: string | null; dimensions?: string | null; certifications?: string | null };
 
 const FEED_PAGES = 20;
 const FEED_PAGE_SIZE = 250;
@@ -137,17 +139,23 @@ export function capRows(fetched: Fetched): Fetched {
   return fetched.rows.length > MAX_ROWS ? { rows: fetched.rows.slice(0, MAX_ROWS), complete: false, note: PARTIAL } : fetched;
 }
 
+/** Sources a sync fills; a brand reads from one of them at a time. */
+const AUTOMATIC: ProductSource[] = ["SHOPIFY", "WEBSITE", "SITE"];
+
 /**
- * The rows a sync archives, or null when it must archive nothing (a partial fetch). MANUAL rows never match.
- * An empty `seen` after a complete fetch archives every row of that source: the store really is empty.
+ * The rows a save archives, or null when it must archive nothing (a partial fetch, or MANUAL, which no save owns).
+ * An automatic source archives its rows it didn't see and every row of the other automatic sources (the brand moved);
+ * IMPORT archives only its own unseen rows. An empty `seen` after a complete fetch archives every row of that source:
+ * the store (or the file) really is empty.
  */
-export function archiveWhere(scope: Scope, source: SyncedSource, seen: string[], complete: boolean): Prisma.ProductWhereInput | null {
-  if (!complete) return null;
+export function archiveWhere(scope: Scope, source: ProductSource, seen: string[], complete: boolean): Prisma.ProductWhereInput | null {
+  if (!complete || source === "MANUAL") return null;
+  const others = AUTOMATIC.includes(source) ? AUTOMATIC.filter((s) => s !== source) : [];
   return {
     workspaceId: scope.workspaceId,
     brandId: scope.brandId,
     archivedAt: null,
-    OR: [{ source: source === "SHOPIFY" ? "WEBSITE" : "SHOPIFY" }, { source, externalId: { notIn: seen } }],
+    OR: [...(others.length ? [{ source: { in: others } }] : []), { source, externalId: { notIn: seen } }],
   };
 }
 
@@ -213,61 +221,125 @@ export async function catalogSource(scope: Scope) {
   return profile?.websiteUrl ? { source: "WEBSITE" as const, websiteUrl: profile.websiteUrl } : { source: null };
 }
 
-/** The fields a sync owns (SyncedRow's keys), read back to tell changed rows from unchanged ones. */
+/** The fields a save writes (SavedRow's keys), read back to tell changed rows from unchanged ones. */
 const OWNED = {
   id: true, externalId: true, archivedAt: true, sku: true, title: true, url: true, category: true, description: true,
   price: true, compareAtPrice: true, currency: true, inStock: true, stockQuantity: true, imageUrl: true,
+  materials: true, dimensions: true, certifications: true,
 } satisfies Prisma.ProductSelect;
+type Stored = Prisma.ProductGetPayload<{ select: typeof OWNED }>;
+// PERSON_FIELDS (products.ts imports this module, so only its type is imported here)
+const PERSON = new Set<string>(["materials", "dimensions", "certifications"] satisfies (typeof PERSON_FIELDS)[number][]);
 const CHUNK = 1000;
 const chunks = <T>(list: T[]) => Array.from({ length: Math.ceil(list.length / CHUNK) }, (_, i) => list.slice(i * CHUNK, (i + 1) * CHUNK));
 
-/** True when a stored row already holds what the source says (prices compared as numbers: Decimal prints "12.5"). */
-export function sameRow(stored: Record<keyof SyncedRow, unknown> & { archivedAt: Date | null }, row: SyncedRow) {
+/**
+ * True when a stored row already holds what the source says (prices compared as numbers: Decimal prints "12.5").
+ * An empty person field (IMPORT) keeps the stored value, so it never counts as a change.
+ */
+export function sameRow(stored: Record<keyof SyncedRow, unknown> & { archivedAt: Date | null } & Partial<Record<keyof SavedRow, unknown>>, row: SavedRow) {
   if (stored.archivedAt) return false;
-  return (Object.keys(row) as (keyof SyncedRow)[]).every((k) =>
-    k === "price" || k === "compareAtPrice" ? (stored[k] == null ? row[k] === null : row[k] !== null && Number(stored[k]) === Number(row[k])) : (stored[k] ?? null) === row[k],
+  return (Object.keys(row) as (keyof SavedRow)[]).every((k) =>
+    k === "price" || k === "compareAtPrice"
+      ? stored[k] == null ? row[k] === null : row[k] !== null && Number(stored[k]) === Number(row[k])
+      : (PERSON.has(k) && row[k] == null) || (stored[k] ?? null) === row[k],
   );
 }
 
+type Db = Prisma.TransactionClient;
+type SaveOptions = {
+  /** Read only the stored rows with these externalIds (the unique index) instead of the whole source: partial batches. */
+  keys?: string[];
+  /**
+   * IMPORT: incoming externalId -> id of a stored row it updates (that row takes the new externalId), asked only for rows
+   * whose own key isn't stored. A stored row is claimed once; a second claim or an unknown id creates a new row instead.
+   */
+  match?: (rows: SavedRow[], stored: Stored[]) => Map<string, string>;
+};
+
 /**
- * Write what changed, then archive what the source no longer has (complete fetches only). Returns rows seen.
- * A row sent without a currency (the website's /cart.js failed) keeps the stored one. New SHOPIFY rows take the
- * person's facts from the same variant's WEBSITE row, so switching to Shopify keeps them.
- * New rows go in with createMany, changed rows are updated one by one, and every row whose stock the source
- * reported gets `stockCheckedAt` in one bulk update: a daily sync of an unchanged catalogue is a handful of queries.
- * ponytail: a run where most rows changed (e.g. a store-wide price change) still updates row by row, ~0.1 s each
- * from far away; batch with UPDATE … FROM (VALUES …) if that shows up.
+ * Write what changed, then archive what the source no longer has (complete fetches only, archiveWhere). Returns rows
+ * seen. `db` may be a transaction. A row sent without a currency (the website's /cart.js failed) keeps the stored one.
+ * New SHOPIFY rows take the person's facts from the same variant's WEBSITE row, so switching to Shopify keeps them.
+ * Queries: one read of the source (or of `keys`), changed rows in one UPDATE … FROM unnest per 1,000 (their stock
+ * freshness included), createMany per 1,000 new rows, one stockCheckedAt update per 1,000 unchanged rows that report
+ * stock, and the archive. Changed rows go first, so a key a matched row gives up is free for a new row.
+ * ponytail: the default read holds the whole source in memory (≤ MAX_ROWS rows); `keys` is the batch path.
  */
-async function saveRows(scope: Scope, source: SyncedSource, fetched: Fetched) {
+export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSource, "MANUAL">, fetched: { rows: SavedRow[]; complete: boolean }, opts: SaveOptions = {}) {
   const now = new Date();
   const where = { workspaceId: scope.workspaceId, brandId: scope.brandId, source };
-  const stored = new Map(
-    (await prisma.product.findMany({ where, select: OWNED })).map((p) => [p.externalId, p]),
-  );
-  const rows = [...new Map(fetched.rows.map((r) => [r.externalId, r])).values()].map((r) => {
-    const keep = r.currency === null ? stored.get(r.externalId)?.currency : null;
+  const stored = await db.product.findMany({ where: opts.keys ? { ...where, externalId: { in: opts.keys } } : where, select: OWNED });
+  const byKey = new Map(stored.map((p) => [p.externalId, p]));
+  const unique = [...new Map(fetched.rows.map((r) => [r.externalId, r])).values()];
+  // incoming externalId -> the stored row it writes: its own key, else the one `match` names
+  const target = new Map(unique.flatMap((r) => { const p = byKey.get(r.externalId); return p ? [[r.externalId, p] as const] : []; }));
+  if (opts.match) {
+    const byId = new Map(stored.map((p) => [p.id, p]));
+    const claimed = new Set([...target.values()].map((p) => p.id));
+    for (const [key, id] of opts.match(unique.filter((r) => !target.has(r.externalId)), stored)) {
+      const p = byId.get(id);
+      if (p && !claimed.has(id) && !target.has(key)) {
+        target.set(key, p);
+        claimed.add(id);
+      }
+    }
+  }
+  const rows = unique.map((r) => {
+    const keep = r.currency === null ? target.get(r.externalId)?.currency : null;
     return keep ? { ...r, currency: keep } : r;
   });
-  const created = rows.filter((r) => !stored.has(r.externalId));
+  const reports = (r: SavedRow) => r.inStock !== null || r.stockQuantity !== null;
+  const created = rows.filter((r) => !target.has(r.externalId));
+  const changed: (SavedRow & { id: string })[] = [];
+  const unchangedReporting: string[] = [];
+  for (const r of rows) {
+    const p = target.get(r.externalId);
+    if (p && !sameRow(p, r)) changed.push({ ...r, id: p.id });
+    else if (p && reports(r)) unchangedReporting.push(p.id);
+  }
+
+  const at = now.toISOString(); // text -> timestamp(3): the columns hold UTC without a zone, as Prisma writes them
+  for (const part of chunks(changed)) {
+    const col = (f: (r: SavedRow & { id: string }) => string | null | undefined) => part.map((r) => f(r) ?? null);
+    const text = (v: boolean | number | null) => (v === null ? null : String(v));
+    await db.$executeRaw`
+      UPDATE "Product" p SET
+        "externalId" = u.external_id, sku = u.sku, title = u.title, url = u.url, category = u.category, description = u.description,
+        price = u.price, "compareAtPrice" = u.compare_at_price, currency = u.currency, "inStock" = u.in_stock,
+        "stockQuantity" = u.stock_quantity, "imageUrl" = u.image_url,
+        materials = COALESCE(u.materials, p.materials), dimensions = COALESCE(u.dimensions, p.dimensions),
+        certifications = COALESCE(u.certifications, p.certifications),
+        "stockCheckedAt" = CASE WHEN u.in_stock IS NOT NULL OR u.stock_quantity IS NOT NULL THEN ${at}::timestamp(3) ELSE p."stockCheckedAt" END,
+        "archivedAt" = NULL, "updatedAt" = ${at}::timestamp(3)
+      FROM unnest(
+        ${col((r) => r.id)}::text[], ${col((r) => r.externalId)}::text[], ${col((r) => r.sku)}::text[], ${col((r) => r.title)}::text[],
+        ${col((r) => r.url)}::text[], ${col((r) => r.category)}::text[], ${col((r) => r.description)}::text[],
+        ${col((r) => r.price)}::text[]::numeric[], ${col((r) => r.compareAtPrice)}::text[]::numeric[], ${col((r) => r.currency)}::text[],
+        ${col((r) => text(r.inStock))}::text[]::boolean[], ${col((r) => text(r.stockQuantity))}::text[]::int[], ${col((r) => r.imageUrl)}::text[],
+        ${col((r) => r.materials)}::text[], ${col((r) => r.dimensions)}::text[], ${col((r) => r.certifications)}::text[]
+      ) AS u(id, external_id, sku, title, url, category, description, price, compare_at_price, currency, in_stock, stock_quantity,
+             image_url, materials, dimensions, certifications)
+      WHERE p.id = u.id AND p."workspaceId" = ${scope.workspaceId} AND p."brandId" = ${scope.brandId} AND p.source = ${source}::"ProductSource"`;
+  }
+
   const facts = new Map<string, { materials: string | null; dimensions: string | null; certifications: string | null }>();
   if (source === "SHOPIFY" && created.length) {
-    const website = await prisma.product.findMany({
+    const website = await db.product.findMany({
       where: { workspaceId: scope.workspaceId, brandId: scope.brandId, source: "WEBSITE", externalId: { in: created.flatMap((r) => variantNumericId(r.externalId) ?? []) } },
       select: { externalId: true, materials: true, dimensions: true, certifications: true },
     });
     for (const { externalId, ...f } of website) if (externalId) facts.set(externalId, f);
   }
   for (const part of chunks(created)) {
-    await prisma.product.createMany({ data: part.map((r) => ({ ...facts.get(variantNumericId(r.externalId) ?? ""), ...r, ...where })), skipDuplicates: true });
+    await db.product.createMany({
+      data: part.map((r) => ({ ...facts.get(variantNumericId(r.externalId) ?? ""), ...r, ...where, ...(reports(r) && { stockCheckedAt: now }) })),
+      skipDuplicates: true,
+    });
   }
-  for (const r of rows) {
-    const s = stored.get(r.externalId);
-    if (s && !sameRow(s, r)) await prisma.product.update({ where: { id: s.id }, data: { ...r, archivedAt: null } });
-  }
-  const reported = rows.filter((r) => r.inStock !== null || r.stockQuantity !== null).map((r) => r.externalId);
-  for (const part of chunks(reported)) await prisma.product.updateMany({ where: { ...where, externalId: { in: part } }, data: { stockCheckedAt: now } });
+  for (const part of chunks(unchangedReporting)) await db.product.updateMany({ where: { ...where, id: { in: part } }, data: { stockCheckedAt: now } });
   const gone = archiveWhere(scope, source, rows.map((r) => r.externalId), fetched.complete);
-  if (gone) await prisma.product.updateMany({ where: gone, data: { archivedAt: now } });
+  if (gone) await db.product.updateMany({ where: gone, data: { archivedAt: now } });
   return rows.length;
 }
 
@@ -303,7 +375,7 @@ export async function runCatalogSync(payload: unknown) {
   try {
     const fetched = found.source === "SHOPIFY" ? await shopifyFeed(found.shop, signal) : await websiteFeed(found.websiteUrl, signal);
     if (fetched.note === NOT_A_FEED) await archiveShopifyRows(scope);
-    const count = await saveRows(scope, found.source, fetched);
+    const count = await saveRows(prisma, scope, found.source, fetched);
     await record(scope, { at, source: found.source, count }, fetched.note ?? null);
   } catch (error) {
     const refused = error instanceof ReconnectNeeded;

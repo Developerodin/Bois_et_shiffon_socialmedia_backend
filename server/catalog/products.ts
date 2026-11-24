@@ -8,7 +8,8 @@ export const PERSON_FIELDS = ["materials", "dimensions", "certifications"] as co
 
 /**
  * Fields only `rules.approve` holders may write, null included: typed stock and prices clear the publishing gate,
- * and facts decide whether Quality accepts a product claim. Stock and prices are writable on MANUAL rows only.
+ * and facts decide whether Quality accepts a product claim. Stock and prices are writable on person-owned rows only
+ * (MANUAL, IMPORT: `personOwned`).
  */
 export const VOUCHED_FIELDS = [...PERSON_FIELDS, "inStock", "stockQuantity", "price", "compareAtPrice"] as const;
 type Vouched = (typeof VOUCHED_FIELDS)[number];

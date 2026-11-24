@@ -1,6 +1,6 @@
 import type { Product } from "@prisma/client";
 import { z } from "zod";
-import { byExternalId, groupKey, handleOf, productName, REMOVED_PRODUCT_NAME } from "@/shared";
+import { byExternalId, groupKey, handleOf, personOwned, productName, REMOVED_PRODUCT_NAME } from "@/shared";
 
 export { byExternalId, groupKey, handleOf, productName, REMOVED_PRODUCT_NAME };
 
@@ -67,14 +67,14 @@ export const linkedIds = (body: unknown) => (body as { productIds?: string[] } |
 /**
  * stockState(group of live variant rows, now) → gone (empty group) / in (a fresh variant claims stock) /
  * unconfirmed (only stale variants claim stock) / out (none claims, one reports) / unknown (none reports).
- * MANUAL rows are always fresh; a synced row is fresh when its `stockCheckedAt` is null or at most 50 h old.
+ * Person-owned rows (MANUAL, IMPORT) are always fresh; a synced row is fresh when its `stockCheckedAt` is null or at most 50 h old.
  * ponytail: rows past the sync's MAX_ROWS cap are never stamped, so their stock turns unconfirmed after 50 h;
  * paging the sync past the cap is the upgrade.
  */
 export function stockState(group: StockFields[], now: Date): StockState {
   if (!group.length) return "gone";
   const claims = (r: StockFields) => (r.stockQuantity !== null && r.stockQuantity > 0) || r.inStock === true;
-  const fresh = (r: StockFields) => r.source === "MANUAL" || r.stockCheckedAt === null || now.getTime() - r.stockCheckedAt.getTime() <= STALE_MS;
+  const fresh = (r: StockFields) => personOwned(r.source) || r.stockCheckedAt === null || now.getTime() - r.stockCheckedAt.getTime() <= STALE_MS;
   if (group.some((r) => claims(r) && fresh(r))) return "in";
   if (group.some(claims)) return "unconfirmed";
   return group.some((r) => r.inStock !== null || r.stockQuantity !== null) ? "out" : "unknown";
@@ -85,7 +85,7 @@ const CODES = "EUR|USD|GBP|CHF|CAD";
 const PRICE = new RegExp(`(?:[€$£]|\\b(?:${CODES})\\b)\\s?(${AMOUNT})|(${AMOUNT})\\s?(?:[€$£]|(?:${CODES}|euros?)\\b)`, "gi");
 
 /** "1 299,00" / "1.299,00" / "1,299.00" / "1299" → 1299: a trailing 1–2 digit group is the decimals. */
-function amountOf(s: string) {
+export function amountOf(s: string) {
   const t = s.replace(/\s/g, "");
   const dec = /[.,](\d{1,2})$/.exec(t);
   const whole = (dec ? t.slice(0, -dec[0].length) : t).replace(/[.,]/g, "");

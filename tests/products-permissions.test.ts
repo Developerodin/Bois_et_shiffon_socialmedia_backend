@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => ({
-  product: { create: vi.fn(), findFirst: vi.fn(), updateMany: vi.fn() },
+  product: { create: vi.fn(), findFirst: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn() },
   auditEvent: { create: vi.fn() },
 }));
 const perms = vi.hoisted(() => ({ set: new Set<string>() }));
@@ -12,7 +12,7 @@ vi.mock("@/server/auth/permissions", () => ({ effectivePermissions: vi.fn(async 
 vi.mock("@/server/jobs/runner", () => ({ kickIfDue: vi.fn() }));
 
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/products/route";
-import { PATCH } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/products/[productId]/route";
+import { DELETE, PATCH } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/products/[productId]/route";
 
 const params = Promise.resolve({ workspaceId: "w1", brandId: "b1", productId: "p1" });
 const req = (method: string, body: unknown) => new Request("http://x/api", { method, body: JSON.stringify(body) });
@@ -62,5 +62,28 @@ describe("who may vouch for product data", () => {
       fields: ["title", "materials", "inStock"],
       changes: { materials: ["Oak", null], inStock: [null, true] },
     });
+  });
+});
+
+describe("imported rows are the person's, like MANUAL ones", () => {
+  it("an IMPORT row takes any field, price included with rules.approve; a synced row doesn't", async () => {
+    perms.set.add("rules.approve");
+    db.product.findFirst.mockResolvedValue({ ...stored, source: "IMPORT", externalId: "sku:M-1" });
+    expect((await PATCH(req("PATCH", { title: "Milo", price: 499 }), { params })).status).toBe(200);
+    expect(db.product.updateMany.mock.calls[0]![0].data).toMatchObject({ title: "Milo", price: "499.00" });
+
+    db.product.findFirst.mockResolvedValue({ ...stored, source: "SHOPIFY", externalId: "gid://shopify/ProductVariant/1" });
+    expect((await PATCH(req("PATCH", { price: 499 }), { params })).status).toBe(400);
+  });
+
+  it("an IMPORT row can be deleted, by its own source; a synced row can't", async () => {
+    db.product.findFirst.mockResolvedValue({ source: "IMPORT" });
+    db.product.deleteMany.mockResolvedValue({ count: 1 });
+    expect((await DELETE(req("DELETE", null), { params })).status).toBe(204);
+    expect(db.product.deleteMany.mock.calls[0]![0].where).toEqual({ id: "p1", workspaceId: "w1", brandId: "b1", source: "IMPORT" });
+
+    db.product.findFirst.mockResolvedValue({ source: "WEBSITE" });
+    expect((await DELETE(req("DELETE", null), { params })).status).toBe(400);
+    expect(db.product.deleteMany).toHaveBeenCalledTimes(1);
   });
 });

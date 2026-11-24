@@ -3,6 +3,7 @@ import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-r
 import { PERSON_FIELDS, ProductInput, cannotVouch, productData, toProductDto, vouchedChanges, vouchedIn } from "@/server/catalog/products";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
+import { personOwned } from "@/shared";
 
 type Params = BrandRouteParams & { productId: string };
 
@@ -23,7 +24,7 @@ export async function GET(request: Request, context: { params: Promise<Params> }
 }
 
 /**
- * Edit a product. Synced rows take only the person-owned fields (the sync owns the rest); MANUAL rows take any.
+ * Edit a product. Synced rows take only the person-owned fields (the sync owns the rest); MANUAL and IMPORT rows take any.
  * Stock, prices and facts need rules.approve (VOUCHED_FIELDS), and the audit records their before and after.
  */
 export async function PATCH(request: Request, context: { params: Promise<Params> }) {
@@ -38,7 +39,7 @@ export async function PATCH(request: Request, context: { params: Promise<Params>
     const where = { id: productId, workspaceId: scope.workspaceId, brandId: scope.brandId };
     const current = await prisma.product.findFirst({ where, omit: { description: true } });
     if (!current) return notFound();
-    if (current.source !== "MANUAL" && fields.some((f) => !(PERSON_FIELDS as readonly string[]).includes(f))) {
+    if (!personOwned(current.source) && fields.some((f) => !(PERSON_FIELDS as readonly string[]).includes(f))) {
       return invalid("This product comes from your store, so only materials, dimensions and certifications can be edited here.");
     }
     const vouched = vouchedIn(body.data);
@@ -58,7 +59,7 @@ export async function PATCH(request: Request, context: { params: Promise<Params>
   }
 }
 
-/** Delete a MANUAL product. A synced one would come back on the next sync, so it can't be deleted here. */
+/** Delete a MANUAL or IMPORT product (a re-import may add it back). A synced one would come back on the next sync, so it can't be deleted here. */
 export async function DELETE(request: Request, context: { params: Promise<Params> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "context.edit");
@@ -67,11 +68,11 @@ export async function DELETE(request: Request, context: { params: Promise<Params
     const where = { id: productId, workspaceId: scope.workspaceId, brandId: scope.brandId };
     const current = await prisma.product.findFirst({ where, select: { source: true } });
     if (!current) return notFound();
-    if (current.source !== "MANUAL") return invalid("This product comes from your store and would come back on the next sync. Remove it there instead.");
-    const { count } = await prisma.product.deleteMany({ where: { ...where, source: "MANUAL" } });
+    if (!personOwned(current.source)) return invalid("This product comes from your store and would come back on the next sync. Remove it there instead.");
+    const { count } = await prisma.product.deleteMany({ where: { ...where, source: current.source } });
     if (!count) return notFound();
     await prisma.auditEvent.create({
-      data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "product.deleted", entityType: "Product", entityId: productId, metadata: { source: "MANUAL" } },
+      data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "product.deleted", entityType: "Product", entityId: productId, metadata: { source: current.source } },
     });
     return new Response(null, { status: 204 });
   } catch (error) {
