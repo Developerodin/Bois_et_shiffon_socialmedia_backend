@@ -41,14 +41,24 @@ export type SyncedRow = {
   inStock: boolean | null;
   stockQuantity: number | null;
   imageUrl: string | null;
+  /**
+   * AskCart products only, and only when AskCart sent them (an absent key keeps the stored value; every other source
+   * leaves them out). Collections are the product's, on each of its variants.
+   */
+  vendor?: string | null;
+  tags?: string[];
+  collections?: ProductCollection[];
 };
+export type ProductCollection = { id: string; title: string; handle: string | null };
+type ShopExtras = Pick<SyncedRow, "vendor" | "tags" | "collections">;
 type Fetched = { rows: SyncedRow[]; complete: boolean; note?: Note; walk?: Walk; seenSince?: Date; emptyRuns?: number };
 /**
  * An AskCart walk that spans runs: the cursor to resume from, when the walk began, and the connection it reads (a
  * walk of another connection, e.g. another store after a reconnect, is ignored). Kept in catalogSync, server only
- * (the products route strips it). Its final, complete run archives the rows no run of the walk saw (saveRows' seenSince).
+ * (the products route strips it). Its final, complete run archives the rows no run of the walk saw (saveRows' seenSince),
+ * unless a run of it met a product AskCart sent without all its variants (`truncated`): then it archives nothing.
  */
-export type Walk = { cursor: string; startedAt: string; connectionId: string };
+export type Walk = { cursor: string; startedAt: string; connectionId: string; truncated?: true };
 /** The saved walk, only when it belongs to this connection. */
 const walkOf = (last: CatalogSync | null, connectionId: string) => {
   const walk = last?.source === "SHOPIFY" ? (last as CatalogSync & { walk?: Walk }).walk : undefined;
@@ -69,6 +79,8 @@ const NOT_A_FEED: Note = { error: "Your website doesn't publish a product feed w
 // 401/403 on the feed: the site turns automated readers away (bot protection), so we can't tell whether it has a feed.
 const BLOCKED: Note = { error: "Your website blocks our product reader, so we can't read its products. Connect Shopify or add products by hand.", reason: "blocked" };
 const PARTIAL: Note = { error: "Only part of the catalogue could be read, so no products were archived.", reason: "partial" };
+// AskCart sent a product without all its variants (Shopify was busy): the missing variants may still be on sale.
+const VARIANTS_PARTIAL: Note = { error: "Some products came without all their variants (your store was busy), so no products were archived.", reason: "partial" };
 const FAILED: Note = { error: "The last sync couldn't read the products. Press Sync now to try again.", reason: "failed" };
 const REFUSED: Note = { error: SHOPIFY_REFUSED, reason: "shopify-refused" };
 const EMPTY_ONCE: Note = { error: "Your store listed no products. We'll check again before removing any.", reason: "partial" };
@@ -171,7 +183,28 @@ export function shopifyRows(variants: ShopifyVariant[], currency: string | null)
     inStock: typeof v.availableForSale === "boolean" ? v.availableForSale : null,
     stockQuantity: Number.isInteger(v.inventoryQuantity) ? v.inventoryQuantity : null,
     imageUrl: httpUrl(v.product.featuredMedia?.preview?.image?.url),
+    ...shopExtras(v.product),
   }));
+}
+
+/** AskCart's vendor, tags and collections, cleaned leniently (bad entries dropped, capped); a key not sent stays out. */
+function shopExtras(p: ShopifyVariant["product"]): ShopExtras {
+  const list = (v: unknown) => (Array.isArray(v) ? v.slice(0, 100) : []);
+  return {
+    ...(p.vendor !== undefined && { vendor: str(p.vendor, 200) }),
+    // Sorted (tags by text, collections by id), so AskCart's ordering never counts as a change (sameRow).
+    ...(p.tags !== undefined && { tags: [...new Set(list(p.tags).flatMap((t) => str(t, 100) ?? []))].sort().slice(0, 50) }),
+    ...(p.collections !== undefined && {
+      collections: list(p.collections)
+        .flatMap((c) => {
+          const id = str(c?.id, 200);
+          const title = str(c?.title, 200);
+          return id && title ? [{ id, title, handle: str(c?.handle, 200) }] : [];
+        })
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .slice(0, 50),
+    }),
+  };
 }
 
 /** "gid://shopify/ProductVariant/123" → "123": the same variant's id in the public feed (WEBSITE rows). */
@@ -261,8 +294,15 @@ async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, wal
     // A walk carries on from the last run's cursor, so a store past one run's MAX_ROWS completes over several runs.
     const read = await askCartCatalog(await askCartToken(conn), walk?.cursor ?? null, MAX_ROWS, signal);
     const rows = shopifyRows(read.variants, read.currency);
-    if (read.complete) return { rows, complete: true, seenSince: walk && new Date(walk.startedAt) };
-    return { rows, complete: false, note: PARTIAL, walk: read.cursor ? { cursor: read.cursor, startedAt: walk?.startedAt ?? at, connectionId: conn.id } : undefined };
+    // A variant missing from a product sent incomplete isn't gone: a walk that met one archives nothing.
+    const truncated = read.truncated > 0 || walk?.truncated === true;
+    if (read.complete) return truncated ? { rows, complete: false, note: VARIANTS_PARTIAL } : { rows, complete: true, seenSince: walk && new Date(walk.startedAt) };
+    return {
+      rows,
+      complete: false,
+      note: PARTIAL,
+      walk: read.cursor ? { cursor: read.cursor, startedAt: walk?.startedAt ?? at, connectionId: conn.id, ...(truncated && { truncated: true as const }) } : undefined,
+    };
   }
   if (isShopifyMcp(conn)) {
     // Storefront Catalog MCP: public, no token; the account id is the store's host. Products only.
@@ -309,7 +349,7 @@ export async function catalogSource(scope: Scope, db: Db = prisma) {
 const OWNED = {
   id: true, externalId: true, archivedAt: true, sku: true, title: true, url: true, category: true, description: true,
   price: true, compareAtPrice: true, currency: true, inStock: true, stockQuantity: true, imageUrl: true,
-  materials: true, dimensions: true, certifications: true,
+  materials: true, dimensions: true, certifications: true, vendor: true, tags: true, collections: true,
 } satisfies Prisma.ProductSelect;
 type Stored = Prisma.ProductGetPayload<{ select: typeof OWNED }>;
 // PERSON_FIELDS (products.ts imports this module, so only its type is imported here)
@@ -321,14 +361,20 @@ const chunks = <T>(list: T[]) => Array.from({ length: Math.ceil(list.length / CH
  * True when a stored row already holds what the source says (prices compared as numbers: Decimal prints "12.5").
  * An empty person field (IMPORT) keeps the stored value, so it never counts as a change.
  */
-export function sameRow(stored: Record<keyof SyncedRow, unknown> & { archivedAt: Date | null } & Partial<Record<keyof SavedRow, unknown>>, row: SavedRow) {
+export function sameRow(stored: Record<Exclude<keyof SyncedRow, keyof ShopExtras>, unknown> & { archivedAt: Date | null } & Partial<Record<keyof SavedRow, unknown>>, row: SavedRow) {
   if (stored.archivedAt) return false;
   return (Object.keys(row) as (keyof SavedRow)[]).every((k) =>
     k === "price" || k === "compareAtPrice"
       ? stored[k] == null ? row[k] === null : row[k] !== null && Number(stored[k]) === Number(row[k])
-      : (PERSON.has(k) && row[k] == null) || (stored[k] ?? null) === row[k],
+      : k === "tags" || k === "collections"
+        ? listKey(stored[k]) === listKey(row[k])
+        : (PERSON.has(k) && row[k] == null) || (stored[k] ?? null) === row[k],
   );
 }
+
+/** Tags or collections as one comparable string (jsonb reorders object keys, so collections compare field by field). */
+const listKey = (v: unknown) =>
+  JSON.stringify(Array.isArray(v) ? v.map((x) => (x && typeof x === "object" ? [x.id, x.title, x.handle ?? null] : x)) : []);
 
 type Db = Prisma.TransactionClient;
 type SaveOptions = {
@@ -414,6 +460,9 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
   }
 
   const at = now.toISOString(); // text -> timestamp(3): the columns hold UTC without a zone, as Prisma writes them
+  // AskCart's vendor/tags/collections as one JSON text per row (ragged lists can't go through unnest); a key the row
+  // doesn't carry keeps the stored value. "{}" for the other sources.
+  const extras = (r: SavedRow) => JSON.stringify({ vendor: r.vendor, tags: r.tags, collections: r.collections });
   for (const part of chunks(changed)) {
     const col = (f: (r: SavedRow & { id: string }) => string | null | undefined) => part.map((r) => f(r) ?? null);
     const text = (v: boolean | number | null) => (v === null ? null : String(v));
@@ -425,6 +474,9 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
         materials = COALESCE(u.materials, p.materials), dimensions = COALESCE(u.dimensions, p.dimensions),
         certifications = COALESCE(u.certifications, p.certifications),
         "stockCheckedAt" = CASE WHEN u.reports THEN ${at}::timestamp(3) ELSE p."stockCheckedAt" END,
+        vendor = CASE WHEN u.extras::jsonb -> 'vendor' IS NOT NULL THEN u.extras::jsonb->>'vendor' ELSE p.vendor END,
+        tags = CASE WHEN u.extras::jsonb -> 'tags' IS NOT NULL THEN ARRAY(SELECT jsonb_array_elements_text(u.extras::jsonb->'tags')) ELSE p.tags END,
+        collections = CASE WHEN u.extras::jsonb -> 'collections' IS NOT NULL THEN NULLIF(u.extras::jsonb->'collections', 'null') ELSE p.collections END,
         "archivedAt" = NULL, "updatedAt" = ${at}::timestamp(3)
       FROM unnest(
         ${col((r) => r.id)}::text[], ${col((r) => r.externalId)}::text[], ${col((r) => r.sku)}::text[], ${col((r) => r.title)}::text[],
@@ -432,9 +484,9 @@ export async function saveRows(db: Db, scope: Scope, source: Exclude<ProductSour
         ${col((r) => r.price)}::text[]::numeric[], ${col((r) => r.compareAtPrice)}::text[]::numeric[], ${col((r) => r.currency)}::text[],
         ${col((r) => text(r.inStock))}::text[]::boolean[], ${col((r) => text(r.stockQuantity))}::text[]::int[], ${col((r) => r.imageUrl)}::text[],
         ${col((r) => r.materials)}::text[], ${col((r) => r.dimensions)}::text[], ${col((r) => r.certifications)}::text[],
-        ${col((r) => text(reports(r)))}::text[]::boolean[]
+        ${col((r) => text(reports(r)))}::text[]::boolean[], ${col(extras)}::text[]
       ) AS u(id, external_id, sku, title, url, category, description, price, compare_at_price, currency, in_stock, stock_quantity,
-             image_url, materials, dimensions, certifications, reports)
+             image_url, materials, dimensions, certifications, reports, extras)
       WHERE p.id = u.id AND p."workspaceId" = ${scope.workspaceId} AND p."brandId" = ${scope.brandId} AND p.source = ${source}::"ProductSource"`;
   }
 

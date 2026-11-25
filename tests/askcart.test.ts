@@ -1,13 +1,20 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Waits return at once (Retry-After values are checked on the calls, not by waiting them out).
+vi.mock("node:timers/promises", async (orig) => {
+  const real = await orig<typeof import("node:timers/promises")>();
+  return { ...real, setTimeout: vi.fn((_ms: number, value?: unknown, opts?: object) => real.setTimeout(0, value, opts)) };
+});
 
 vi.mock("@/server/db/prisma", () => ({ prisma: {} }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn() }));
 
-import { shopifyRows } from "@/server/catalog/sync";
+import { sameRow, shopifyRows } from "@/server/catalog/sync";
 import { fetchAskCartOrders } from "@/server/data/shopify-orders";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import {
-  ASKCART_KEY_REFUSED, ASKCART_REFUSED, AskCartError, askCartCatalog, askCartConfig, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
+  ASKCART_KEY_REFUSED, ASKCART_REFUSED, AskCartError, askCartCatalog, askCartConfig, askCartVariants, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
   askCartShop, askCartTokenRequest, isAskCart,
 } from "@/server/shopify/askcart";
 
@@ -168,8 +175,25 @@ describe("fetchAskCartOrders", () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
-  it("a page AskCart cut short (rateLimited) keeps the orders read so far", async () => {
-    stubFetch({ body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1", rateLimited: true }) });
+  it("a page AskCart cut short (rateLimited) is normal: it waits the page's Retry-After and resumes from nextCursor", async () => {
+    vi.mocked(sleep).mockClear();
+    const f = stubFetch(
+      { body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1", rateLimited: true }), headers: { "retry-after": "5" } },
+      // an empty partial page: nothing read, so the same cursor is asked again
+      { body: page([], { complete: false, nextCursor: null, rateLimited: true }), headers: { "retry-after": "2" } },
+      { body: page([order(2, "2026-11-04T10:00:00Z")]) },
+    );
+    const { orders, stoppedReason } = await fetchAskCartOrders(SECRET, SINCE);
+    expect(stoppedReason).toBeUndefined();
+    expect(orders.map((o) => o.name)).toEqual(["#1", "#2"]);
+    // waited exactly what each page said (the sleep is stubbed to return at once)
+    expect(vi.mocked(sleep).mock.calls.map((c) => c[0])).toEqual([5_000, 2_000]);
+    expect(urlOf(f.mock.calls[1]).searchParams.get("cursor")).toBe("c1");
+    expect(urlOf(f.mock.calls[2]).searchParams.get("cursor")).toBe("c1");
+  });
+
+  it("a Retry-After over 30 s stops as rate_limited with the orders read so far", async () => {
+    stubFetch({ body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1", rateLimited: true }), headers: { "retry-after": "31" } });
     const { orders, cursorEnd, stoppedReason } = await fetchAskCartOrders(SECRET, SINCE);
     expect(stoppedReason).toBe("rate_limited");
     expect(orders).toHaveLength(1);
@@ -235,6 +259,48 @@ describe("askCartCatalog", () => {
         inStock: false, stockQuantity: null, imageUrl: "https://cdn.shopify.com/a.jpg",
       },
     ]);
+  });
+
+  it("carries AskCart's vendor, tags and collections onto every variant's row, cleaned; absent keys stay out", async () => {
+    const extras = {
+      vendor: " Atelier ", tags: ["linen", "", 3, "linen", "summer"],
+      collections: [{ id: "gid://shopify/Collection/1", title: "Shirts", handle: "shirts" }, { id: "gid://shopify/Collection/2" }, null, { id: "c3", title: "Sale" }],
+    };
+    stubFetch({ body: page([{ ...PRODUCT, ...extras }]) });
+    const { variants, currency } = await askCartCatalog(SECRET, null, 5000);
+    for (const row of shopifyRows(variants, currency)) {
+      expect(row).toMatchObject({
+        vendor: "Atelier", tags: ["linen", "summer"],
+        collections: [{ id: "c3", title: "Sale", handle: null }, { id: "gid://shopify/Collection/1", title: "Shirts", handle: "shirts" }],
+      });
+    }
+    stubFetch({ body: page([{ ...PRODUCT, vendor: null, tags: null, collections: "x" }]) });
+    const again = await askCartCatalog(SECRET, null, 5000);
+    expect(shopifyRows(again.variants, again.currency)[0]).toMatchObject({ vendor: null, tags: [], collections: [] });
+  });
+
+  it("sameRow compares tags and collections by value (jsonb reorders object keys)", () => {
+    const [row] = shopifyRows(askCartVariants({ ...PRODUCT, tags: ["a"], collections: [{ id: "c1", title: "T", handle: "t" }] } as never), "INR");
+    const stored = { ...row, archivedAt: null, collections: [{ handle: "t", id: "c1", title: "T" }], price: "499.0", compareAtPrice: "599" };
+    expect(sameRow(stored, row)).toBe(true);
+    expect(sameRow({ ...stored, tags: ["a", "b"] }, row)).toBe(false);
+    // a row without the extras (another source, or an AskCart that doesn't send them) doesn't compare them
+    const plain = shopifyRows(askCartVariants(PRODUCT as never), "INR")[0];
+    expect(sameRow({ ...stored, vendor: "X", tags: ["z"] }, plain)).toBe(true);
+  });
+
+  it("counts (and logs) products AskCart sent without all their variants", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    stubFetch({ body: page([{ ...PRODUCT, variantsTruncated: true }, { ...PRODUCT, id: "gid://shopify/Product/2", variants: [] }]) });
+    expect(await askCartCatalog(SECRET, null, 5000)).toMatchObject({ complete: true, truncated: 1 });
+    expect(console.warn).toHaveBeenCalledOnce();
+  });
+
+  it("orders tags and collections, so AskCart's order never counts as a change", () => {
+    const rows = (tags: string[], ids: string[]) =>
+      shopifyRows(askCartVariants({ ...PRODUCT, tags, collections: ids.map((id) => ({ id, title: id, handle: id })) } as never), "INR")[0];
+    expect(rows(["b", "a"], ["c2", "c1"])).toMatchObject({ tags: ["a", "b"], collections: [{ id: "c1" }, { id: "c2" }] });
+    expect(sameRow({ ...rows(["a", "b"], ["c1", "c2"]), archivedAt: null }, rows(["b", "a"], ["c2", "c1"]))).toBe(true);
   });
 
   it("a page cut short by Shopify's throttle stops as partial and keeps the cursor", async () => {

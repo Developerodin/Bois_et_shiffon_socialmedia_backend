@@ -371,3 +371,26 @@ Built in Prisma (`prisma/schema.prisma`); section 5 is only a sketch.
   old bodies may hold an email as `name`. They are not rewritten: reads hide rights for callers who can't see names, and
   `scripts/redact-story-checks.ts` (temporary, per environment) rewrites only the passing "Asset rights" note in
   `QualityCheck.results`.
+
+## 11. Shop orders, order lines and product extras (2026-11-25)
+
+Migration `20261125150000_shop_order_lines`. No customer data anywhere: AskCart never sends any.
+
+- `ShopOrder` (one Shopify order's totals, upserted on `(brandId, shopifyId)`; an older read never overwrites a newer
+  one) gains the following columns. They are AskCart only; the pasted-token path leaves them at their defaults.
+  - `fulfillmentStatus String?` and `financialStatus String?` (Shopify's display enums).
+  - `discountCodes String[]`: codes only. They can be personal, so the chat shows only codes used on 2 or more orders.
+  - `lineItemsTruncated Boolean`: more than 100 lines, or AskCart paused mid-order. The sync re-reads the second kind
+    for a day.
+  - A field left out of a read keeps its stored value; a status sent as null clears it.
+- `ShopOrderLine`: one row per line item, keyed `(brandId, lineShopifyId)`, indexed `(brandId, orderShopifyId)`, linked
+  to its order by `orderShopifyId`.
+  - Columns: `productId`, `variantId` (null when deleted), `title` / `variantTitle` (null for lines without a product),
+    `sku`, `quantity` (as ordered), `currentQuantity` (net of refunds), `unitPrice`, `discountedTotal` (includes
+    refunded units), `netUnitPrice` (after every discount), `currency`.
+  - Net line sales = `currentQuantity × netUnitPrice`.
+  - Written only when the order's row is written. An order read without line items keeps its lines; lines gone from the
+    order are deleted.
+- `Product` gains `vendor String?`, `tags String[]` (sorted) and `collections Json?` (`[{ id, title, handle }]`, sorted
+  by id). They are AskCart products only; the other sources never touch them. The chat matches a line to its
+  catalogue row by `Product.externalId = ShopOrderLine.variantId` (source SHOPIFY).

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { IntegrationConnection } from "@prisma/client";
+import { Prisma, type IntegrationConnection } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
 import { accessToken, markReconnect } from "@/server/services/connections";
@@ -7,7 +7,7 @@ import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import { AskCartError, askCartReason, askCartShop, isAskCart } from "@/server/shopify/askcart";
 import { isShopifyMcp } from "@/server/shopify/catalog-mcp";
 import { askCartToken } from "@/server/shopify/askcart-token";
-import { fetchAskCartOrders, fetchOrders, type ShopOrderRow } from "./shopify-orders";
+import { fetchAskCartOrders, fetchOrders, type ShopOrderLineRow, type ShopOrderRow } from "./shopify-orders";
 import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from "./sources";
 
 /**
@@ -26,6 +26,14 @@ const PAGE = 100;
  * `unnest` of per-column arrays fails on cancelledAt/sourceName). Amounts go as exact decimal strings (string or
  * Prisma.Decimal in); timestamps as UTC instants, stored as the UTC wall time (Prisma's `timestamp(3)` convention).
  * An older read never overwrites a newer one (two overlapping runs), so a row always holds its latest update.
+ *
+ * AskCart's optional fields: a status, the discount codes or the truncated flag left out of a read keeps the stored
+ * value (merged from the stored row in the SELECT, since ON CONFLICT can't see what was sent); a status sent as null
+ * clears it (the `*_sent` flags tell null from absent). When an order of the page came with line items, the page runs
+ * as one transaction: the upsert returns the orders it actually wrote (inserted, or not older than stored) and only
+ * those orders' lines change, so a stale read never touches newer lines and an order read without line items keeps
+ * its lines. Lines that disappeared are deleted; the rest are upserted, and a line that didn't change isn't rewritten.
+ * The order row's lock serialises two runs writing the same order's lines.
  */
 export async function upsertOrders(scope: { workspaceId: string; brandId: string; connectionId: string }, rows: ShopOrderRow[]) {
   if (!rows.length) return 0;
@@ -34,24 +42,92 @@ export async function upsertOrders(scope: { workspaceId: string; brandId: string
     test: r.test, currency: r.currency, net_sales: String(r.netSales), discounts: String(r.discounts), shipping: String(r.shipping),
     taxes: String(r.taxes), taxes_included: r.taxesIncluded, total: String(r.total), refunded: String(r.refunded),
     source_name: r.sourceName, shopify_updated_at: r.shopifyUpdatedAt.toISOString(),
+    // undefined → left out of the JSON → NULL → the stored value is kept (a status says whether it was sent at all)
+    fulfillment_status: r.fulfillmentStatus, fulfillment_sent: r.fulfillmentStatus !== undefined,
+    financial_status: r.financialStatus, financial_sent: r.financialStatus !== undefined, discount_codes: r.discountCodes,
+    line_items_truncated: r.lines ? (r.lineItemsTruncated ?? false) : undefined,
   })));
-  return prisma.$executeRaw`
+  // `WHERE true` ends the SELECT before ON CONFLICT, so the join's ON and the upsert's ON CONFLICT can't be misread.
+  const upsert = Prisma.sql`
     INSERT INTO "ShopOrder" ("id", "workspaceId", "brandId", "connectionId", "shopifyId", "name", "processedAt", "cancelledAt", "test",
-      "currency", "netSales", "discounts", "shipping", "taxes", "taxesIncluded", "total", "refunded", "sourceName", "shopifyUpdatedAt", "updatedAt")
+      "currency", "netSales", "discounts", "shipping", "taxes", "taxesIncluded", "total", "refunded", "sourceName", "shopifyUpdatedAt",
+      "fulfillmentStatus", "financialStatus", "discountCodes", "lineItemsTruncated", "updatedAt")
     SELECT u.id, ${scope.workspaceId}, ${scope.brandId}, ${scope.connectionId}, u.shopify_id, u.name,
       u.processed_at AT TIME ZONE 'UTC', u.cancelled_at AT TIME ZONE 'UTC', u.test, u.currency, u.net_sales, u.discounts,
-      u.shipping, u.taxes, u.taxes_included, u.total, u.refunded, u.source_name, u.shopify_updated_at AT TIME ZONE 'UTC', now()
+      u.shipping, u.taxes, u.taxes_included, u.total, u.refunded, u.source_name, u.shopify_updated_at AT TIME ZONE 'UTC',
+      CASE WHEN u.fulfillment_sent THEN u.fulfillment_status ELSE s."fulfillmentStatus" END,
+      CASE WHEN u.financial_sent THEN u.financial_status ELSE s."financialStatus" END,
+      COALESCE(u.discount_codes, s."discountCodes", ARRAY[]::text[]), COALESCE(u.line_items_truncated, s."lineItemsTruncated", false), now()
     FROM jsonb_to_recordset(${page}::jsonb) AS u(id text, shopify_id text, name text, processed_at timestamptz, cancelled_at timestamptz,
       test boolean, currency text, net_sales numeric, discounts numeric, shipping numeric, taxes numeric, taxes_included boolean,
-      total numeric, refunded numeric, source_name text, shopify_updated_at timestamptz)
+      total numeric, refunded numeric, source_name text, shopify_updated_at timestamptz, fulfillment_status text, fulfillment_sent boolean,
+      financial_status text, financial_sent boolean, discount_codes text[], line_items_truncated boolean)
+    LEFT JOIN "ShopOrder" s ON s."brandId" = ${scope.brandId} AND s."shopifyId" = u.shopify_id
+    WHERE true
     ON CONFLICT ("brandId", "shopifyId") DO UPDATE SET
       "connectionId" = EXCLUDED."connectionId", "name" = EXCLUDED."name", "processedAt" = EXCLUDED."processedAt",
       "cancelledAt" = EXCLUDED."cancelledAt", "test" = EXCLUDED."test", "currency" = EXCLUDED."currency",
       "netSales" = EXCLUDED."netSales", "discounts" = EXCLUDED."discounts", "shipping" = EXCLUDED."shipping",
       "taxes" = EXCLUDED."taxes", "taxesIncluded" = EXCLUDED."taxesIncluded", "total" = EXCLUDED."total",
       "refunded" = EXCLUDED."refunded", "sourceName" = EXCLUDED."sourceName", "shopifyUpdatedAt" = EXCLUDED."shopifyUpdatedAt",
+      "fulfillmentStatus" = EXCLUDED."fulfillmentStatus", "financialStatus" = EXCLUDED."financialStatus",
+      "discountCodes" = EXCLUDED."discountCodes", "lineItemsTruncated" = EXCLUDED."lineItemsTruncated",
       "updatedAt" = now()
     WHERE "ShopOrder"."shopifyUpdatedAt" <= EXCLUDED."shopifyUpdatedAt"`;
+  const withLines = rows.filter((r) => r.lines);
+  // No line items on this page (the pasted-token path, or an AskCart that doesn't send them): one statement, as before.
+  if (!withLines.length) return prisma.$executeRaw(upsert);
+
+  // A page is 100 orders × up to 100 lines: lines are written LINE_CHUNK at a time, and the transaction gets the
+  // catalogue lock's limits (withCatalogLock) instead of Prisma's 5 s default.
+  return prisma.$transaction(
+    async (tx) => {
+      const won = new Set((await tx.$queryRaw<{ shopifyId: string }[]>`${upsert} RETURNING "shopifyId"`).map((r) => r.shopifyId));
+      const replace = withLines.filter((r) => won.has(r.shopifyId));
+      if (!replace.length) return won.size;
+      const lines = replace.flatMap((r) => r.lines!.map((l) => ({ ...l, orderShopifyId: r.shopifyId })));
+      // Line ids are unique across a store, so "not among the lines just sent" is "disappeared from its order".
+      await tx.$executeRaw`
+        DELETE FROM "ShopOrderLine" WHERE "brandId" = ${scope.brandId} AND "orderShopifyId" = ANY(${replace.map((r) => r.shopifyId)}::text[])
+          AND NOT ("lineShopifyId" = ANY(${lines.map((l) => l.lineShopifyId)}::text[]))`;
+      for (let i = 0; i < lines.length; i += LINE_CHUNK) await upsertLines(tx, scope, lines.slice(i, i + LINE_CHUNK));
+      return won.size;
+    },
+    { timeout: 60_000, maxWait: 10_000 },
+  );
+}
+
+const LINE_CHUNK = 2000;
+
+/**
+ * Upserts lines on (brandId, lineShopifyId); a line whose values didn't change isn't rewritten. ON CONFLICT also covers
+ * a line id that moved to another order (Shopify doesn't; without it the whole page would fail).
+ */
+function upsertLines(tx: Prisma.TransactionClient, scope: { workspaceId: string; brandId: string }, lines: (ShopOrderLineRow & { orderShopifyId: string })[]) {
+  const json = JSON.stringify(lines.map((l) => ({
+    id: randomUUID(), order_id: l.orderShopifyId, line_id: l.lineShopifyId, product_id: l.productId, variant_id: l.variantId, title: l.title,
+    variant_title: l.variantTitle, sku: l.sku, quantity: l.quantity, current_quantity: l.currentQuantity, unit_price: l.unitPrice,
+    discounted_total: l.discountedTotal, net_unit_price: l.netUnitPrice, currency: l.currency,
+  })));
+  return tx.$executeRaw`
+    INSERT INTO "ShopOrderLine" ("id", "workspaceId", "brandId", "orderShopifyId", "lineShopifyId", "productId", "variantId", "title",
+      "variantTitle", "sku", "quantity", "currentQuantity", "unitPrice", "discountedTotal", "netUnitPrice", "currency")
+    SELECT l.id, ${scope.workspaceId}, ${scope.brandId}, l.order_id, l.line_id, l.product_id, l.variant_id, l.title, l.variant_title,
+      l.sku, l.quantity, l.current_quantity, l.unit_price, l.discounted_total, l.net_unit_price, l.currency
+    FROM jsonb_to_recordset(${json}::jsonb) AS l(id text, order_id text, line_id text, product_id text, variant_id text, title text,
+      variant_title text, sku text, quantity int, current_quantity int, unit_price numeric, discounted_total numeric,
+      net_unit_price numeric, currency text)
+    ON CONFLICT ("brandId", "lineShopifyId") DO UPDATE SET
+      "orderShopifyId" = EXCLUDED."orderShopifyId", "productId" = EXCLUDED."productId", "variantId" = EXCLUDED."variantId",
+      "title" = EXCLUDED."title", "variantTitle" = EXCLUDED."variantTitle", "sku" = EXCLUDED."sku", "quantity" = EXCLUDED."quantity",
+      "currentQuantity" = EXCLUDED."currentQuantity", "unitPrice" = EXCLUDED."unitPrice",
+      "discountedTotal" = EXCLUDED."discountedTotal", "netUnitPrice" = EXCLUDED."netUnitPrice", "currency" = EXCLUDED."currency"
+    WHERE ("ShopOrderLine"."orderShopifyId", "ShopOrderLine"."productId", "ShopOrderLine"."variantId", "ShopOrderLine"."title",
+           "ShopOrderLine"."variantTitle", "ShopOrderLine"."sku", "ShopOrderLine"."quantity", "ShopOrderLine"."currentQuantity",
+           "ShopOrderLine"."unitPrice", "ShopOrderLine"."discountedTotal", "ShopOrderLine"."netUnitPrice", "ShopOrderLine"."currency")
+      IS DISTINCT FROM (EXCLUDED."orderShopifyId", EXCLUDED."productId", EXCLUDED."variantId", EXCLUDED."title", EXCLUDED."variantTitle",
+           EXCLUDED."sku", EXCLUDED."quantity", EXCLUDED."currentQuantity", EXCLUDED."unitPrice", EXCLUDED."discountedTotal",
+           EXCLUDED."netUnitPrice", EXCLUDED."currency")`;
 }
 
 export async function syncShopifyOrders(
@@ -81,7 +157,33 @@ export async function syncShopifyOrders(
   // One statement per page of rows; the client returns them oldest update first, so a write that throws leaves the
   // saved cursor where it was and the next run re-reads (upserts are idempotent).
   for (let i = 0; i < read.orders.length; i += PAGE) await upsertOrders(scope, read.orders.slice(i, i + PAGE));
-  return { count: read.orders.length, reason: stopReason(stop), cursor: read.cursorEnd.toISOString() };
+  // An order AskCart sent with incomplete lines is read again: the cursor stays at it (the next run re-reads from an
+  // hour before it).
+  const held = isAskCart(conn) ? await refetchFrom(scope, now) : null;
+  const cursor = held && held < read.cursorEnd ? held : read.cursorEnd;
+  return { count: read.orders.length, reason: stopReason(stop), cursor: cursor.toISOString() };
+}
+
+/** How long an order with incomplete lines holds the cursor back: one that never completes can't pin it for good. */
+export const REFETCH_HOURS = 24;
+
+/**
+ * The earliest update time of the brand's orders whose stored lines are incomplete (lineItemsTruncated: AskCart paused
+ * mid-order to protect the store's API budget, or some lines were unreadable) and worth reading again: updated in the
+ * last REFETCH_HOURS, with fewer than 100 lines stored (100 means the order really has more than AskCart sends, which
+ * no re-read fixes). Null when there are none.
+ * ponytail: scans the brand's truncated orders of the last day through the (brandId, processedAt) rows; a partial index
+ * on lineItemsTruncated would help if a store produced thousands of them a day.
+ */
+async function refetchFrom(scope: { workspaceId: string; brandId: string }, now: Date): Promise<Date | null> {
+  const since = new Date(now.getTime() - REFETCH_HOURS * 3_600_000).toISOString();
+  const [row] = await prisma.$queryRaw<{ at: string | null }[]>`
+    SELECT to_char(min(o."shopifyUpdatedAt"), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
+    FROM "ShopOrder" o
+    WHERE o."workspaceId" = ${scope.workspaceId} AND o."brandId" = ${scope.brandId} AND o."lineItemsTruncated"
+      AND o."shopifyUpdatedAt" >= (${since}::timestamptz AT TIME ZONE 'UTC')
+      AND (SELECT count(*) FROM "ShopOrderLine" l WHERE l."brandId" = o."brandId" AND l."orderShopifyId" = o."shopifyId") < 100`;
+  return row?.at ? new Date(row.at) : null;
 }
 
 registerSync("SHOPIFY_ORDERS", (ctx) => syncShopifyOrders(ctx));

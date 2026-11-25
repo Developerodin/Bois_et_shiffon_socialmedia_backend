@@ -103,6 +103,10 @@ export type ShopifyVariant = {
     description: string;
     status: string;
     featuredMedia: { preview?: { image?: { url: string } | null } | null } | null;
+    /** AskCart only (askCartVariants), and only when sent; untrusted, cleaned by shopifyRows. */
+    vendor?: unknown;
+    tags?: unknown;
+    collections?: unknown;
   };
 };
 
