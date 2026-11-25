@@ -1778,7 +1778,8 @@ model ShopOrderLine {
   /// gid://shopify/Product/… / ProductVariant/…; null when deleted from the store
   productId       String?
   variantId       String?
-  title           String
+  /// null when productId is null (custom staff-typed lines and deleted products: AskCart withholds the text)
+  title           String?
   variantTitle    String?
   sku             String?
   quantity        Int
@@ -1787,6 +1788,8 @@ model ShopOrderLine {
   unitPrice       Decimal  @db.Decimal(14, 2)
   /// discountedTotalSet: the line's total after discounts
   discountedTotal Decimal  @db.Decimal(14, 2)
+  /// discountedUnitPriceAfterAllDiscountsSet: includes order-level discount allocations; net line sales ≈ currentQuantity × this. Null when not sent.
+  netUnitPrice    Decimal? @db.Decimal(14, 2)
   currency        String
   createdAt       DateTime @default(now())
 
