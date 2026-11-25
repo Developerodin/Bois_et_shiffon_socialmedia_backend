@@ -1,3 +1,6 @@
+-- Fail fast instead of queueing every Product read behind a long catalogue-sync lock; re-run if it times out.
+SET lock_timeout = '5s';
+
 -- AlterTable
 ALTER TABLE "Product" ADD COLUMN     "collections" JSONB,
 ADD COLUMN     "tags" TEXT[] DEFAULT ARRAY[]::TEXT[],
@@ -33,9 +36,6 @@ CREATE TABLE "ShopOrderLine" (
 
 -- CreateIndex
 CREATE INDEX "ShopOrderLine_brandId_orderShopifyId_idx" ON "ShopOrderLine"("brandId", "orderShopifyId");
-
--- CreateIndex
-CREATE INDEX "ShopOrderLine_brandId_productId_idx" ON "ShopOrderLine"("brandId", "productId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ShopOrderLine_brandId_lineShopifyId_key" ON "ShopOrderLine"("brandId", "lineShopifyId");

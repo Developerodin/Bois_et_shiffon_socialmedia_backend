@@ -1794,7 +1794,6 @@ model ShopOrderLine {
 
   @@unique([brandId, lineShopifyId])
   @@index([brandId, orderShopifyId])
-  @@index([brandId, productId])
 }
 
 enum SearchDimension {
