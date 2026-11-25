@@ -7,7 +7,7 @@ import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import { AskCartError, askCartReason, askCartShop, isAskCart } from "@/server/shopify/askcart";
 import { isShopifyMcp } from "@/server/shopify/catalog-mcp";
 import { askCartToken } from "@/server/shopify/askcart-token";
-import { fetchAskCartOrders, fetchOrders, type ShopOrderLineRow, type ShopOrderRow } from "./shopify-orders";
+import { ASKCART_LINES_PER_ORDER, fetchAskCartOrders, fetchOrders, type ShopOrderLineRow, type ShopOrderRow } from "./shopify-orders";
 import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from "./sources";
 
 /**
@@ -15,6 +15,8 @@ import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from ".
  * none yet = the last 60 days, all `read_orders` reaches) and upserts one ShopOrder row per order. Upserts are safe
  * to repeat, so a run that stopped short (capped, rate limited) still writes what it read and moves the cursor; the
  * next run carries on from there. A missing read_orders is a "permission" stop and never marks the connection.
+ * AskCart only: the cursor is held at an order AskCart sent with incomplete lines (refetchFrom), so the next run reads
+ * it again, for at most REFETCH_HOURS.
  */
 
 export const FIRST_RUN_DAYS = 60;
@@ -29,11 +31,16 @@ const PAGE = 100;
  *
  * AskCart's optional fields: a status, the discount codes or the truncated flag left out of a read keeps the stored
  * value (merged from the stored row in the SELECT, since ON CONFLICT can't see what was sent); a status sent as null
- * clears it (the `*_sent` flags tell null from absent). When an order of the page came with line items, the page runs
- * as one transaction: the upsert returns the orders it actually wrote (inserted, or not older than stored) and only
- * those orders' lines change, so a stale read never touches newer lines and an order read without line items keeps
- * its lines. Lines that disappeared are deleted; the rest are upserted, and a line that didn't change isn't rewritten.
- * The order row's lock serialises two runs writing the same order's lines.
+ * clears it (the `*_sent` flags tell null from absent). Accepted gap: that merge reads the stored row when the
+ * statement starts, so two runs of one source writing the same order at once (a manual run during the daily one), one
+ * sending a status and one not (only while AskCart is mid-deploy), could keep the older status until the next read.
+ *
+ * When an order of the page came with line items, the page runs as one transaction: the upsert returns the orders it
+ * actually wrote (inserted, or not older than stored) and only those orders' lines change, so a stale read never
+ * touches newer lines and an order read without line items keeps its lines. Lines that disappeared are deleted, but
+ * only for an order sent whole: one AskCart flagged incomplete (lineItemsTruncated) or with lines we couldn't read
+ * keeps its other stored lines. The rest are upserted (a line id seen twice in the page keeps its last), and a line
+ * that didn't change isn't rewritten. The order row's lock serialises two runs writing the same order's lines.
  */
 export async function upsertOrders(scope: { workspaceId: string; brandId: string; connectionId: string }, rows: ShopOrderRow[]) {
   if (!rows.length) return 0;
@@ -78,18 +85,23 @@ export async function upsertOrders(scope: { workspaceId: string; brandId: string
   // No line items on this page (the pasted-token path, or an AskCart that doesn't send them): one statement, as before.
   if (!withLines.length) return prisma.$executeRaw(upsert);
 
-  // A page is 100 orders × up to 100 lines: lines are written LINE_CHUNK at a time, and the transaction gets the
-  // catalogue lock's limits (withCatalogLock) instead of Prisma's 5 s default.
+  // A page is 100 orders × up to 100 lines: lines are written LINE_CHUNK at a time. The transaction may take up to
+  // 60 s (Prisma's default is 5 s) and waits up to 10 s for a connection.
   return prisma.$transaction(
     async (tx) => {
       const won = new Set((await tx.$queryRaw<{ shopifyId: string }[]>`${upsert} RETURNING "shopifyId"`).map((r) => r.shopifyId));
       const replace = withLines.filter((r) => won.has(r.shopifyId));
       if (!replace.length) return won.size;
-      const lines = replace.flatMap((r) => r.lines!.map((l) => ({ ...l, orderShopifyId: r.shopifyId })));
+      // One row per line id across the page (the last wins): a repeat would fail the whole upsert.
+      const lines = [...new Map(replace.flatMap((r) => r.lines!.map((l) => [l.lineShopifyId, { ...l, orderShopifyId: r.shopifyId }] as const))).values()];
+      const whole = replace.filter((r) => r.lineItemsTruncated !== true && !r.linesSkipped).map((r) => r.shopifyId);
       // Line ids are unique across a store, so "not among the lines just sent" is "disappeared from its order".
-      await tx.$executeRaw`
-        DELETE FROM "ShopOrderLine" WHERE "brandId" = ${scope.brandId} AND "orderShopifyId" = ANY(${replace.map((r) => r.shopifyId)}::text[])
-          AND NOT ("lineShopifyId" = ANY(${lines.map((l) => l.lineShopifyId)}::text[]))`;
+      // NOT IN over a subquery is a hashed lookup; `<> ALL(array)` would compare every pair.
+      if (whole.length) {
+        await tx.$executeRaw`
+          DELETE FROM "ShopOrderLine" WHERE "brandId" = ${scope.brandId} AND "orderShopifyId" = ANY(${whole}::text[])
+            AND "lineShopifyId" NOT IN (SELECT unnest(${lines.map((l) => l.lineShopifyId)}::text[]))`;
+      }
       for (let i = 0; i < lines.length; i += LINE_CHUNK) await upsertLines(tx, scope, lines.slice(i, i + LINE_CHUNK));
       return won.size;
     },
@@ -155,34 +167,50 @@ export async function syncShopifyOrders(
   }
   const scope = { workspaceId: ctx.source.workspaceId, brandId: ctx.source.brandId, connectionId: conn.id };
   // One statement per page of rows; the client returns them oldest update first, so a write that throws leaves the
-  // saved cursor where it was and the next run re-reads (upserts are idempotent).
-  for (let i = 0; i < read.orders.length; i += PAGE) await upsertOrders(scope, read.orders.slice(i, i + PAGE));
+  // saved cursor where it was and the next run re-reads (upserts are idempotent). The job's deadline passing between
+  // pages stops the run as capped, with the cursor at the last page written.
+  let written = 0;
+  let cursorEnd = read.cursorEnd;
+  let reason = stopReason(stop);
+  for (; written < read.orders.length; written += PAGE) {
+    if (written > 0 && ctx.signal.aborted) {
+      cursorEnd = read.orders.slice(0, written).reduce((max, o) => (o.shopifyUpdatedAt > max ? o.shopifyUpdatedAt : max), since);
+      reason = stopReason("capped");
+      break;
+    }
+    await upsertOrders(scope, read.orders.slice(written, written + PAGE));
+  }
   // An order AskCart sent with incomplete lines is read again: the cursor stays at it (the next run re-reads from an
   // hour before it).
   const held = isAskCart(conn) ? await refetchFrom(scope, now) : null;
-  const cursor = held && held < read.cursorEnd ? held : read.cursorEnd;
-  return { count: read.orders.length, reason: stopReason(stop), cursor: cursor.toISOString() };
+  const cursor = held && held < cursorEnd ? held : cursorEnd;
+  return { count: Math.min(written, read.orders.length), reason, cursor: cursor.toISOString() };
 }
 
-/** How long an order with incomplete lines holds the cursor back: one that never completes can't pin it for good. */
+/**
+ * How long an order with incomplete lines holds the cursor back, counted from the order's shopifyUpdatedAt: one that
+ * never completes can't pin it for good.
+ */
 export const REFETCH_HOURS = 24;
 
 /**
- * The earliest update time of the brand's orders whose stored lines are incomplete (lineItemsTruncated: AskCart paused
- * mid-order to protect the store's API budget, or some lines were unreadable) and worth reading again: updated in the
- * last REFETCH_HOURS, with fewer than 100 lines stored (100 means the order really has more than AskCart sends, which
- * no re-read fixes). Null when there are none.
- * ponytail: scans the brand's truncated orders of the last day through the (brandId, processedAt) rows; a partial index
- * on lineItemsTruncated would help if a store produced thousands of them a day.
+ * The earliest update time of this connection's orders whose stored lines are incomplete (AskCart's
+ * lineItemsTruncated: it paused mid-order to protect the store's API budget) and worth reading again: updated in the
+ * last REFETCH_HOURS, with fewer than ASKCART_LINES_PER_ORDER lines stored (that many means the order really has more
+ * than AskCart sends, which no re-read fixes). Null when there are none.
+ * ponytail: no index serves this (the (brandId, processedAt) one doesn't help with shopifyUpdatedAt), so it reads the
+ * brand's order rows. Past ~100k orders a brand, add a partial index on ("brandId", "shopifyUpdatedAt") WHERE
+ * "lineItemsTruncated" in raw SQL in a migration (Prisma can't express a partial index, so mark it in the schema
+ * comment to keep `migrate diff` from flagging drift).
  */
-async function refetchFrom(scope: { workspaceId: string; brandId: string }, now: Date): Promise<Date | null> {
+async function refetchFrom(scope: { workspaceId: string; brandId: string; connectionId: string }, now: Date): Promise<Date | null> {
   const since = new Date(now.getTime() - REFETCH_HOURS * 3_600_000).toISOString();
   const [row] = await prisma.$queryRaw<{ at: string | null }[]>`
     SELECT to_char(min(o."shopifyUpdatedAt"), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
     FROM "ShopOrder" o
-    WHERE o."workspaceId" = ${scope.workspaceId} AND o."brandId" = ${scope.brandId} AND o."lineItemsTruncated"
-      AND o."shopifyUpdatedAt" >= (${since}::timestamptz AT TIME ZONE 'UTC')
-      AND (SELECT count(*) FROM "ShopOrderLine" l WHERE l."brandId" = o."brandId" AND l."orderShopifyId" = o."shopifyId") < 100`;
+    WHERE o."workspaceId" = ${scope.workspaceId} AND o."brandId" = ${scope.brandId} AND o."connectionId" = ${scope.connectionId}
+      AND o."lineItemsTruncated" AND o."shopifyUpdatedAt" >= (${since}::timestamptz AT TIME ZONE 'UTC')
+      AND (SELECT count(*) FROM "ShopOrderLine" l WHERE l."brandId" = o."brandId" AND l."orderShopifyId" = o."shopifyId") < ${ASKCART_LINES_PER_ORDER}`;
   return row?.at ? new Date(row.at) : null;
 }
 

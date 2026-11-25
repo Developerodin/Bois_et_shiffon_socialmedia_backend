@@ -207,7 +207,8 @@ describe("mapAskCartOrder: AskCart's optional line items and statuses", () => {
     expect(mapAskCartOrder({ ...ORDER, lineItems: [LINE], lineItemsTruncated: true } as never)!.lineItemsTruncated).toBe(true);
   });
 
-  it("skips a malformed line item (and marks the order truncated) instead of failing the order; a repeated id keeps its first", () => {
+  it("skips a malformed line item (counted, not flagged truncated: a re-read can't fix it) instead of failing the order; a repeated id keeps its first", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     const row = mapAskCartOrder({ ...ORDER, lineItems: [
       LINE,
       { ...LINE, id: "gid://shopify/LineItem/5", discountedTotalSet: m("12,50") },
@@ -222,7 +223,28 @@ describe("mapAskCartOrder: AskCart's optional line items and statuses", () => {
     ] } as never)!;
     expect(row).not.toBeNull();
     expect(row.lines!.map((l) => l.title)).toEqual(["Oak table"]);
-    expect(row.lineItemsTruncated).toBe(true);
+    expect(row.lineItemsTruncated).toBe(false);
+    expect(row.linesSkipped).toBe(7);
+    expect(console.warn).toHaveBeenCalledOnce();
+  });
+
+  it("takes up to 4 decimals (KWD, an approximate net price), rounded half-up to 2", () => {
+    const row = mapAskCartOrder({ ...ORDER, lineItems: [{
+      ...LINE, originalUnitPriceSet: m("12.345", "KWD"), discountedTotalSet: m("24.6949", "KWD"), discountedUnitPriceAfterAllDiscountsSet: m("99999999999.9999", "KWD"),
+    }] } as never)!;
+    expect(row.lines![0]).toMatchObject({ unitPrice: "12.35", discountedTotal: "24.69", netUnitPrice: "100000000000.00", currency: "KWD" });
+    expect(row.linesSkipped).toBeUndefined();
+  });
+
+  it("refuses a quantity past the int column and a currency that isn't a code", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const row = mapAskCartOrder({
+      ...ORDER, currentSubtotalPriceSet: m("100.00", "eur<script>"),
+      lineItems: [{ ...LINE, quantity: 2 ** 31 }, { ...LINE, id: "gid://shopify/LineItem/2", discountedTotalSet: m("1.00", "EURO") }],
+    } as never)!;
+    expect(row.currency).toBe("");
+    expect(row.linesSkipped).toBe(1);
+    expect(row.lines!.map((l) => l.currency)).toEqual([""]);
   });
 
   it("a non-array lineItems is treated as not sent", () => {

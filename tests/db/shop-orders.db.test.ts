@@ -22,7 +22,7 @@ import { prisma } from "@/server/db/prisma";
 import { SYSTEM_ROLES } from "@/server/auth/permissions.catalog";
 import { DATA_SYNC_JOB } from "@/server/data/sources";
 import { upsertOrders } from "@/server/data/shopify-orders-sync";
-import type { ShopOrderRow } from "@/server/data/shopify-orders";
+import type { ShopOrderLineRow, ShopOrderRow } from "@/server/data/shopify-orders";
 import { PUT } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/data-sources/shopify-orders/route";
 import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/sales/summary/route";
 
@@ -82,6 +82,51 @@ describe("upsertOrders", () => {
     await upsertOrders(scopeA(), [row("1", "2026-11-20T10:00:00Z", { netSales: "1.00" })]); // a stale re-read
     const one = await prisma.shopOrder.findFirstOrThrow({ where: { shopifyId: "gid://shopify/Order/1" } });
     expect([one.netSales.toFixed(2), one.refunded.toFixed(2)]).toEqual(["40.00", "50.00"]);
+  });
+});
+
+describe("upsertOrders: AskCart line items", () => {
+  const line = (id: string, extra: Partial<ShopOrderLineRow> = {}): ShopOrderLineRow => ({
+    lineShopifyId: `gid://shopify/LineItem/${id}`, productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/1",
+    title: "Oak", variantTitle: null, sku: null, quantity: 1, currentQuantity: 1, unitPrice: "10.00", discountedTotal: "10.00",
+    netUnitPrice: "9.00", currency: "EUR", ...extra,
+  });
+  const at = (iso: string) => ({ shopifyUpdatedAt: new Date(iso) });
+  const ids = async () => (await prisma.shopOrderLine.findMany({ orderBy: { lineShopifyId: "asc" } })).map((l) => l.lineShopifyId.slice(-1));
+  beforeEach(() => prisma.shopOrderLine.deleteMany({}));
+
+  it("a stale read never touches lines; one without line items keeps them; [] clears them; a line gone is deleted", async () => {
+    const o = row("1", "2026-11-20T10:00:00Z");
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-21T00:00:00Z"), lines: [line("a"), line("b")], lineItemsTruncated: false }]);
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-20T12:00:00Z"), lines: [line("z")], lineItemsTruncated: false }]);
+    expect(await ids()).toEqual(["a", "b"]);
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-22T00:00:00Z") }]);
+    expect(await ids()).toEqual(["a", "b"]);
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-23T00:00:00Z"), lines: [line("a", { currentQuantity: 0 })], lineItemsTruncated: false }]);
+    expect(await prisma.shopOrderLine.findMany({ select: { lineShopifyId: true, currentQuantity: true } })).toEqual([{ lineShopifyId: "gid://shopify/LineItem/a", currentQuantity: 0 }]);
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-24T00:00:00Z"), lines: [], lineItemsTruncated: false }]);
+    expect(await ids()).toEqual([]);
+  });
+
+  it("a read AskCart paused mid-order adds its lines but deletes none (nor does one with lines we skipped)", async () => {
+    const o = row("1", "2026-11-20T10:00:00Z");
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-21T00:00:00Z"), lines: [line("a"), line("b"), line("c")], lineItemsTruncated: false }]);
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-22T00:00:00Z"), lines: [line("a", { currentQuantity: 0 }), line("d")], lineItemsTruncated: true }]);
+    expect(await ids()).toEqual(["a", "b", "c", "d"]);
+    expect((await prisma.shopOrderLine.findFirstOrThrow({ where: { lineShopifyId: "gid://shopify/LineItem/a" } })).currentQuantity).toBe(0);
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-23T00:00:00Z"), lines: [line("a")], lineItemsTruncated: false, linesSkipped: 1 }]);
+    expect(await ids()).toEqual(["a", "b", "c", "d"]);
+    expect((await prisma.shopOrder.findFirstOrThrow({ where: { shopifyId: o.shopifyId } })).lineItemsTruncated).toBe(false);
+  });
+
+  it("a status not sent keeps the stored one; one sent as null clears it", async () => {
+    const o = row("1", "2026-11-20T10:00:00Z");
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-21T00:00:00Z"), financialStatus: "PAID", fulfillmentStatus: "FULFILLED", discountCodes: ["XMAS"] }]);
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-22T00:00:00Z") }]);
+    const kept = await prisma.shopOrder.findFirstOrThrow({ select: { financialStatus: true, fulfillmentStatus: true, discountCodes: true } });
+    expect(kept).toEqual({ financialStatus: "PAID", fulfillmentStatus: "FULFILLED", discountCodes: ["XMAS"] });
+    await upsertOrders(scopeA(), [{ ...o, ...at("2026-11-23T00:00:00Z"), financialStatus: null }]);
+    expect(await prisma.shopOrder.findFirstOrThrow({ select: { financialStatus: true, fulfillmentStatus: true } })).toEqual({ financialStatus: null, fulfillmentStatus: "FULFILLED" });
   });
 });
 

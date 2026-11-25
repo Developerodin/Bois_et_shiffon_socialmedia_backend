@@ -147,6 +147,21 @@ describe("upsertOrders: AskCart line items", () => {
     expect(m.executeRaw.mock.calls.slice(1).map((c) => pageOf(c as unknown[]).length)).toEqual([2000, 2000, 1000]);
   });
 
+  it("an order AskCart sent incomplete, or with lines we skipped, keeps its other stored lines (no delete); its sent lines are still written", async () => {
+    m.queryRaw.mockResolvedValueOnce([{ shopifyId: "gid://shopify/Order/1" }, { shopifyId: "gid://shopify/Order/2" }]);
+    await upsertOrders(scope, [{ ...order(1), lines: [line("a")], lineItemsTruncated: true }, { ...order(2), lines: [line("b")], linesSkipped: 1 }]);
+    expect(m.executeRaw).toHaveBeenCalledTimes(1);
+    expect(sqlOf(m.executeRaw.mock.calls[0] as unknown[]).sql).toContain('INSERT INTO "ShopOrderLine"');
+    expect(pageOf(m.executeRaw.mock.calls[0] as unknown[]).map((l: { line_id: string }) => l.line_id)).toEqual(["gid://shopify/LineItem/a", "gid://shopify/LineItem/b"]);
+  });
+
+  it("a line id twice in a page is written once (the last read), so the page can't fail", async () => {
+    m.queryRaw.mockResolvedValueOnce([{ shopifyId: "gid://shopify/Order/1" }, { shopifyId: "gid://shopify/Order/2" }]);
+    await upsertOrders(scope, [{ ...order(1), lines: [line("a")] }, { ...order(2), lines: [{ ...line("a"), quantity: 5 }] }]);
+    const ins = m.executeRaw.mock.calls.at(-1) as unknown[];
+    expect(pageOf(ins)).toEqual([expect.objectContaining({ line_id: "gid://shopify/LineItem/a", order_id: "gid://shopify/Order/2", quantity: 5 })]);
+  });
+
   it("writes no lines when the upsert wrote none of the orders that carried them", async () => {
     m.queryRaw.mockResolvedValueOnce([]);
     await upsertOrders(scope, [{ ...order(1), lines: [line("a")] }]);
@@ -169,6 +184,22 @@ describe("syncShopifyOrders: orders AskCart sent with incomplete lines", () => {
     expect(await syncShopifyOrders(askCart, now)).toMatchObject({ cursor: cursorEnd.toISOString() });
     const since = new Date(now.getTime() - REFETCH_HOURS * 3_600_000).toISOString();
     expect(m.queryRaw.mock.calls[0]).toContain(since);
+  });
+
+  it("looks only at this connection's orders", async () => {
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [], cursorEnd });
+    await syncShopifyOrders(askCart, now);
+    expect(m.queryRaw.mock.calls[0]).toContain("c2");
+  });
+
+  it("the job's deadline between write pages stops as partial, the cursor at the last page written", async () => {
+    const ac = new AbortController();
+    const orders = Array.from({ length: 150 }, (_, i) => ({ ...order(i), shopifyUpdatedAt: new Date(Date.parse("2026-11-20T00:00:00Z") + i * 60_000) }));
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders, cursorEnd });
+    m.executeRaw.mockImplementationOnce(async () => (ac.abort(), 0));
+    const out = await syncShopifyOrders({ ...askCart, signal: ac.signal }, now);
+    expect(out).toMatchObject({ count: 100, reason: "partial", cursor: orders[99].shopifyUpdatedAt.toISOString() });
+    expect(m.executeRaw).toHaveBeenCalledTimes(1);
   });
 
   it("the pasted-token path doesn't look", async () => {

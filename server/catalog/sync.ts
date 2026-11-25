@@ -295,6 +295,8 @@ async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, wal
     const read = await askCartCatalog(await askCartToken(conn), walk?.cursor ?? null, MAX_ROWS, signal);
     const rows = shopifyRows(read.variants, read.currency);
     // A variant missing from a product sent incomplete isn't gone: a walk that met one archives nothing.
+    // ponytail: a store that is busy on every walk never archives a deleted product; upgrade path: keep the product
+    // ids of truncated products on the walk and skip archiving only their variants.
     const truncated = read.truncated > 0 || walk?.truncated === true;
     if (read.complete) return truncated ? { rows, complete: false, note: VARIANTS_PARTIAL } : { rows, complete: true, seenSince: walk && new Date(walk.startedAt) };
     return {
@@ -607,8 +609,9 @@ export async function runCatalogSync(payload: unknown) {
     // same lock, so it never writes SITE rows (or archives these) after the brand moved.
     await withCatalogLock(scope, 120_000, async (tx) => {
       const { seen } = await saveRows(tx, scope, source, fetched, { seenSince: fetched.seenSince });
-      // A walk over several runs counts what it has so far, not just this run's part.
-      const count = fetched.walk || fetched.seenSince || fetched.emptyRuns ? await tx.product.count({ where: { ...scope, source, archivedAt: null } }) : seen;
+      // A walk over several runs counts what it has so far, not just this run's part: also when this run ended one
+      // (the last run of a walk that met a truncated product carries neither walk nor seenSince).
+      const count = walk || fetched.walk || fetched.seenSince || fetched.emptyRuns ? await tx.product.count({ where: { ...scope, source, archivedAt: null } }) : seen;
       // A complete save archived any SITE rows: forget what the site reader read, so a switch back reads every page again.
       if (fetched.complete) await tx.catalogPage.updateMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { readAt: null, etag: null, modifiedAt: null } });
       await record(scope, { at, source, count, ...(fetched.walk && { walk: fetched.walk }), ...(fetched.emptyRuns && { emptyRuns: fetched.emptyRuns }) }, fetched.note ?? null, tx);

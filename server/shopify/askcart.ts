@@ -212,7 +212,8 @@ export async function askCartRequest<T>(
       // A list page cut short (200 with rateLimited) says how long to wait in Retry-After: handed to the caller.
       const after = Number(res.headers.get("retry-after"));
       if ((body as { rateLimited?: unknown }).rateLimited === true && res.headers.has("retry-after") && Number.isFinite(after) && after >= 0) {
-        (body as { retryAfter?: number }).retryAfter = after;
+        // At least 1 s: a "0" would have a run ask again at once, in a loop, while the store's budget refills.
+        (body as { retryAfter?: number }).retryAfter = Math.max(1, after);
       }
       return body as T;
     }

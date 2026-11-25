@@ -192,6 +192,16 @@ describe("fetchAskCartOrders", () => {
     expect(urlOf(f.mock.calls[2]).searchParams.get("cursor")).toBe("c1");
   });
 
+  it("a Retry-After of 0 still waits a second", async () => {
+    vi.mocked(sleep).mockClear();
+    stubFetch(
+      { body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1", rateLimited: true }), headers: { "retry-after": "0" } },
+      { body: page([]) },
+    );
+    await fetchAskCartOrders(SECRET, SINCE);
+    expect(vi.mocked(sleep).mock.calls.map((c) => c[0])).toEqual([1_000]);
+  });
+
   it("a Retry-After over 30 s stops as rate_limited with the orders read so far", async () => {
     stubFetch({ body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1", rateLimited: true }), headers: { "retry-after": "31" } });
     const { orders, cursorEnd, stoppedReason } = await fetchAskCartOrders(SECRET, SINCE);

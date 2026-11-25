@@ -80,10 +80,12 @@ export type ShopOrderRow = {
   financialStatus?: string | null;
   discountCodes?: string[];
   /**
-   * Set with `lines`: more than 100 line items, AskCart paused mid-order to protect the store's API budget (the sync
-   * re-reads those), or some lines were unreadable.
+   * Set with `lines`, AskCart's own flag: more than ASKCART_LINES_PER_ORDER line items, or AskCart paused mid-order to
+   * protect the store's API budget (the sync re-reads those within REFETCH_HOURS).
    */
   lineItemsTruncated?: boolean;
+  /** Not stored: line items we couldn't read and skipped. The order's other stored lines are then not pruned. */
+  linesSkipped?: number;
   /** The order's line items; undefined = AskCart didn't send them, so the lines already stored are kept. */
   lines?: ShopOrderLineRow[];
 };
@@ -145,7 +147,7 @@ export function mapOrder(o: OrderNode): ShopOrderRow {
     processedAt: new Date(o.processedAt),
     cancelledAt: o.cancelledAt ? new Date(o.cancelledAt) : null,
     test: o.test,
-    currency: o.currentSubtotalPriceSet.shopMoney.currencyCode ?? "",
+    currency: currencyCode(o.currentSubtotalPriceSet.shopMoney.currencyCode) ?? "",
     netSales,
     discounts,
     gross: add(netSales, discounts),
@@ -214,12 +216,20 @@ export async function fetchOrders(
 
 const shopMoney = (m: AskCartMoney | null | undefined): Money | null => (m && typeof m.amount === "string" ? { shopMoney: m } : null);
 
-// At most 12 integer digits and 2 decimals: fits numeric(14,2) as is, so no value can round up past it and fail the page.
-const DECIMAL = /^-?\d{1,12}(\.\d{1,2})?$/;
+/**
+ * Up to 4 decimals (3-decimal currencies such as KWD, and AskCart's approximate net unit price), rounded half-up to the
+ * column's 2 by add(); at most 11 integer digits, so even rounding up stays within numeric(14,2) and can't fail a page.
+ */
+const DECIMAL = /^-?\d{1,11}(\.\d{1,4})?$/;
 /** A money amount as an exact fixed-2 string, or null when it isn't a plain decimal (that line is skipped). */
 const decimal = (m: AskCartMoney | null | undefined) => (m && typeof m.amount === "string" && DECIMAL.test(m.amount) ? add(m.amount) : null);
-const count = (v: unknown) => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : null);
-/** AskCart sends at most 100 lines an order; more than this is a broken payload, not an order to store whole. */
+/** A quantity: a whole number from 0 to below 2^31 (the int column), else null. */
+const count = (v: unknown) => (Number.isInteger(v) && (v as number) >= 0 && (v as number) < 2 ** 31 ? (v as number) : null);
+/** An ISO 4217 code, or null: shop text never lands in a currency column. */
+const currencyCode = (v: unknown) => (typeof v === "string" && /^[A-Z]{3}$/.test(v) ? v : null);
+/** The most line items AskCart sends an order (lineItemsTruncated says when it has more). */
+export const ASKCART_LINES_PER_ORDER = 100;
+/** Over 2.5 × ASKCART_LINES_PER_ORDER is a broken payload: the rest are dropped and counted as skipped. */
 const MAX_LINES = 250;
 
 /**
@@ -247,14 +257,15 @@ function mapLine(l: AskCartLineItem, orderCurrency: string): ShopOrderLineRow | 
     unitPrice,
     discountedTotal,
     netUnitPrice,
-    currency: str(l.discountedTotalSet?.currencyCode, 3) ?? orderCurrency,
+    currency: currencyCode(l.discountedTotalSet?.currencyCode) ?? orderCurrency,
   };
 }
 
 /**
  * AskCart's additive order fields (statuses, discount codes, line items), each left out when not sent so the upsert
- * keeps what is stored (a status sent as null is kept as null: it clears). A malformed line item is skipped (and the
- * order marked truncated) rather than failing the order; a line id seen twice keeps its first.
+ * keeps what is stored (a status sent as null is kept as null: it clears). lineItemsTruncated is AskCart's own flag
+ * only (more lines than it sends, or it paused mid-order). A malformed line item is skipped rather than failing the
+ * order: logged, counted in `linesSkipped`, never re-read; a line id seen twice keeps its first.
  */
 function askCartExtras(o: AskCartOrder, currency: string): Partial<ShopOrderRow> {
   const extras: Partial<ShopOrderRow> = {};
@@ -269,8 +280,11 @@ function askCartExtras(o: AskCartOrder, currency: string): Partial<ShopOrderRow>
       if (!row) skipped++;
       else if (!lines.has(row.lineShopifyId)) lines.set(row.lineShopifyId, row);
     }
+    skipped += Math.max(0, o.lineItems.length - MAX_LINES);
+    if (skipped) console.warn("[askcart-orders] line items skipped as unreadable", skipped);
     extras.lines = [...lines.values()];
-    extras.lineItemsTruncated = o.lineItemsTruncated === true || skipped > 0 || o.lineItems.length > MAX_LINES;
+    extras.lineItemsTruncated = o.lineItemsTruncated === true;
+    if (skipped) extras.linesSkipped = skipped;
   }
   return extras;
 }
