@@ -213,38 +213,39 @@ model Brand {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  workspace     Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  profile       BrandProfile?
-  members       BrandMember[]
-  agentRuns     AgentRun[]
-  agentEvents   AgentEvent[]
-  agentConfigs  BrandAgentConfig[]
-  contextDocs   BrandContextDoc[]
-  connections   IntegrationConnection[]
-  auditReports  AuditReport[]
-  chatThreads   ChatThread[]
-  opportunities Opportunity[]
-  contentItems  ContentItem[]
-  learningNotes LearningNote[]
-  competitors   Competitor[]
-  invitations   Invitation[]
-  photoShoots   PhotoShoot[]
-  reelAssets    ReelAsset[]
-  products      Product[]
-  catalogPages  CatalogPage[]
-  campaigns     Campaign[]
-  tasks         Task[]
-  workProjects  WorkProject[]
-  taskComments  TaskComment[]
-  notifications Notification[]
-  dataSources   DataSource[]
-  postMetrics   PostMetric[]
-  shopOrders    ShopOrder[]
-  searchDays    SearchDay[]
-  adDays        AdDay[]
-  shopifyWrites ShopifyWrite[]
-  blogArticles  BlogArticle[]
-  quotes        Quote[]
+  workspace      Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  profile        BrandProfile?
+  members        BrandMember[]
+  agentRuns      AgentRun[]
+  agentEvents    AgentEvent[]
+  agentConfigs   BrandAgentConfig[]
+  contextDocs    BrandContextDoc[]
+  connections    IntegrationConnection[]
+  auditReports   AuditReport[]
+  chatThreads    ChatThread[]
+  opportunities  Opportunity[]
+  contentItems   ContentItem[]
+  learningNotes  LearningNote[]
+  competitors    Competitor[]
+  invitations    Invitation[]
+  photoShoots    PhotoShoot[]
+  reelAssets     ReelAsset[]
+  products       Product[]
+  catalogPages   CatalogPage[]
+  campaigns      Campaign[]
+  tasks          Task[]
+  workProjects   WorkProject[]
+  taskComments   TaskComment[]
+  notifications  Notification[]
+  dataSources    DataSource[]
+  postMetrics    PostMetric[]
+  shopOrders     ShopOrder[]
+  shopOrderLines ShopOrderLine[]
+  searchDays     SearchDay[]
+  adDays         AdDay[]
+  shopifyWrites  ShopifyWrite[]
+  blogArticles   BlogArticle[]
+  quotes         Quote[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1122,6 +1123,11 @@ model Product {
   stockQuantity  Int? // Shopify Admin only
   stockCheckedAt DateTime? // when the source last told us about stock: "stock freshness"
   imageUrl       String?
+  /// AskCart products only (null / empty from the other sources)
+  vendor         String?
+  tags           String[]      @default([])
+  /// AskCart products only: [{ id, title, handle }]
+  collections    Json?
   archivedAt     DateTime?
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
@@ -1717,39 +1723,78 @@ model PostMetric {
 /// No customer data: the client's field list is an allow-list. Summed per brand-local day on read.
 /// ponytail: no rollup table; past ~100k orders in a range, add a per-day rollup written by the sync.
 model ShopOrder {
-  id               String    @id @default(cuid())
-  workspaceId      String
-  brandId          String
-  connectionId     String
+  id                 String    @id @default(cuid())
+  workspaceId        String
+  brandId            String
+  connectionId       String
   /// gid://shopify/Order/…
-  shopifyId        String
+  shopifyId          String
   /// "#1001"
-  name             String
-  processedAt      DateTime
-  cancelledAt      DateTime?
-  test             Boolean
+  name               String
+  processedAt        DateTime
+  cancelledAt        DateTime?
+  test               Boolean
   /// shopMoney currency
-  currency         String
+  currency           String
   /// currentSubtotalPriceSet (after discounts, refunds, edits); gross = netSales + discounts
-  netSales         Decimal   @db.Decimal(14, 2)
-  discounts        Decimal   @db.Decimal(14, 2)
-  shipping         Decimal   @db.Decimal(14, 2)
+  netSales           Decimal   @db.Decimal(14, 2)
+  discounts          Decimal   @db.Decimal(14, 2)
+  shipping           Decimal   @db.Decimal(14, 2)
   /// sum of currentTaxLines, not totalTaxSet
-  taxes            Decimal   @db.Decimal(14, 2)
-  taxesIncluded    Boolean
+  taxes              Decimal   @db.Decimal(14, 2)
+  taxesIncluded      Boolean
   /// currentTotalPriceSet
-  total            Decimal   @db.Decimal(14, 2)
+  total              Decimal   @db.Decimal(14, 2)
   /// display only; already in netSales and total
-  refunded         Decimal   @db.Decimal(14, 2)
-  sourceName       String?
-  shopifyUpdatedAt DateTime
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  refunded           Decimal   @db.Decimal(14, 2)
+  sourceName         String?
+  /// displayFulfillmentStatus / displayFinancialStatus (Shopify enum strings); AskCart only, null when not sent
+  fulfillmentStatus  String?
+  financialStatus    String?
+  /// AskCart only; codes, never who used them
+  discountCodes      String[]  @default([])
+  /// the order has more line items than ShopOrderLine holds (AskCart sends the first 100), or some were unreadable
+  lineItemsTruncated Boolean   @default(false)
+  shopifyUpdatedAt   DateTime
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 
   @@unique([brandId, shopifyId])
   @@index([brandId, processedAt])
+}
+
+/// One line item of a ShopOrder (AskCart only; the pasted-token path stores none). Replaced as a set whenever its
+/// order's row is written with line items; an order read without them keeps the lines stored. No customer data.
+model ShopOrderLine {
+  id              String   @id @default(cuid())
+  workspaceId     String
+  brandId         String
+  /// the order's gid://shopify/Order/… (ShopOrder.shopifyId)
+  orderShopifyId  String
+  /// gid://shopify/LineItem/…
+  lineShopifyId   String
+  /// gid://shopify/Product/… / ProductVariant/…; null when deleted from the store
+  productId       String?
+  variantId       String?
+  title           String
+  variantTitle    String?
+  sku             String?
+  quantity        Int
+  /// after refunds and edits; null when not sent
+  currentQuantity Int?
+  unitPrice       Decimal  @db.Decimal(14, 2)
+  /// discountedTotalSet: the line's total after discounts
+  discountedTotal Decimal  @db.Decimal(14, 2)
+  currency        String
+  createdAt       DateTime @default(now())
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([brandId, lineShopifyId])
+  @@index([brandId, orderShopifyId])
+  @@index([brandId, productId])
 }
 
 enum SearchDimension {
