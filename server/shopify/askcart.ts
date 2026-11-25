@@ -78,6 +78,8 @@ export type AskCartPage<T> = {
   nextCursor: string | null;
   complete: boolean;
   rateLimited?: boolean;
+  /** Ours, not AskCart's body: the Retry-After header (seconds) of a page cut short (rateLimited), when it sent one. */
+  retryAfter?: number;
   /** Orders only: an incremental read leaves out orders created before visibleSince until read_all_orders is approved. */
   warning?: { code: string; visibleSince: string };
 };
@@ -107,7 +109,8 @@ export type AskCartOrder = {
 };
 export type AskCartLineItem = {
   id: string;
-  title: string;
+  /** null (with variantTitle) when productId is: custom lines and deleted products. */
+  title: string | null;
   variantTitle: string | null;
   sku: string | null;
   quantity: number;
@@ -116,7 +119,10 @@ export type AskCartLineItem = {
   productId: string | null;
   variantId: string | null;
   originalUnitPriceSet: AskCartMoney | null;
+  /** Includes refunded units. */
   discountedTotalSet: AskCartMoney | null;
+  /** Unit price after line and order-level discounts (AskCart 3e05bfc on). */
+  discountedUnitPriceAfterAllDiscountsSet?: AskCartMoney | null;
 };
 export type AskCartProduct = {
   id: string;
@@ -131,6 +137,8 @@ export type AskCartProduct = {
   vendor?: string | null;
   tags?: string[] | null;
   collections?: { id: string; title: string; handle: string }[] | null;
+  /** Shopify was busy and not every variant could be read: the ones missing aren't gone. */
+  variantsTruncated?: boolean | null;
   variants: {
     id: string;
     sku: string | null;
@@ -200,7 +208,14 @@ export async function askCartRequest<T>(
     } catch {
       // not JSON: a proxy's error page; handled by status below
     }
-    if (res.ok && body && typeof body === "object") return body as T;
+    if (res.ok && body && typeof body === "object") {
+      // A list page cut short (200 with rateLimited) says how long to wait in Retry-After: handed to the caller.
+      const after = Number(res.headers.get("retry-after"));
+      if ((body as { rateLimited?: unknown }).rateLimited === true && res.headers.has("retry-after") && Number.isFinite(after) && after >= 0) {
+        (body as { retryAfter?: number }).retryAfter = after;
+      }
+      return body as T;
+    }
     const { error, visibleSince } = (body ?? {}) as { error?: unknown; visibleSince?: unknown };
     // AskCart's codes are short identifiers; anything else (an HTML page) is dropped rather than echoed.
     const code = typeof error === "string" && /^[a-z_]{1,60}$/.test(error) ? error : null;
@@ -263,23 +278,31 @@ const MAX_PAGES = 50;
  * The store's active variants from `cursor` on (null = the start), shaped like shopifyVariants' answer. `complete` only
  * when AskCart said so: a page cut short by Shopify's throttle (rateLimited), the page cap or `maxVariants` (checked
  * between pages) stops the walk and returns the cursor to resume from next run. Currency is the prices' (the shop's).
- * ponytail: one page can hold up to 100 products' variants past `maxVariants`.
+ * `truncated`: how many products came with variantsTruncated (some variants unread, not removed), logged here; the
+ * sync archives nothing on a walk that saw one.
+ * ponytail: one page (up to 50 products) can hold their variants past `maxVariants`; 50 pages are 2,500 products a run.
  */
 export async function askCartCatalog(bearer: string, cursor: string | null, maxVariants: number, signal?: AbortSignal) {
   const variants: ShopifyVariant[] = [];
   let currency: string | null = null;
+  let truncated = 0;
+  const out = (complete: boolean, next: string | null) => {
+    if (truncated) console.warn("[askcart] products sent without all their variants (store busy)", truncated);
+    return { variants, currency, complete, cursor: next, truncated };
+  };
   for (let page = 0; page < MAX_PAGES && variants.length < maxVariants; page++) {
     const res: AskCartPage<AskCartProduct> = await askCartRequest("products", { bearer, params: cursor ? { cursor } : {}, signal });
     for (const p of res.items ?? []) {
       variants.push(...askCartVariants(p).filter((v) => v.product.status === "ACTIVE"));
       currency ??= p.variants.find((v) => v.price)?.price?.currencyCode ?? null;
+      if (p.variantsTruncated === true) truncated++;
     }
-    if (res.complete && !res.rateLimited) return { variants, currency, complete: true, cursor: null };
+    if (res.complete && !res.rateLimited) return out(true, null);
     // rateLimited with no cursor: nothing on this page was read, so the same cursor is asked again next run
-    if (res.rateLimited || !res.nextCursor) return { variants, currency, complete: false, cursor: res.nextCursor ?? cursor };
+    if (res.rateLimited || !res.nextCursor) return out(false, res.nextCursor ?? cursor);
     cursor = res.nextCursor;
   }
-  return { variants, currency, complete: false, cursor };
+  return out(false, cursor);
 }
 
 /** What AskCart's token endpoint answers: a long-lived opaque token, or an access token with a refresh token. */

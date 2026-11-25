@@ -55,9 +55,10 @@ type Fetched = { rows: SyncedRow[]; complete: boolean; note?: Note; walk?: Walk;
 /**
  * An AskCart walk that spans runs: the cursor to resume from, when the walk began, and the connection it reads (a
  * walk of another connection, e.g. another store after a reconnect, is ignored). Kept in catalogSync, server only
- * (the products route strips it). Its final, complete run archives the rows no run of the walk saw (saveRows' seenSince).
+ * (the products route strips it). Its final, complete run archives the rows no run of the walk saw (saveRows' seenSince),
+ * unless a run of it met a product AskCart sent without all its variants (`truncated`): then it archives nothing.
  */
-export type Walk = { cursor: string; startedAt: string; connectionId: string };
+export type Walk = { cursor: string; startedAt: string; connectionId: string; truncated?: true };
 /** The saved walk, only when it belongs to this connection. */
 const walkOf = (last: CatalogSync | null, connectionId: string) => {
   const walk = last?.source === "SHOPIFY" ? (last as CatalogSync & { walk?: Walk }).walk : undefined;
@@ -78,6 +79,8 @@ const NOT_A_FEED: Note = { error: "Your website doesn't publish a product feed w
 // 401/403 on the feed: the site turns automated readers away (bot protection), so we can't tell whether it has a feed.
 const BLOCKED: Note = { error: "Your website blocks our product reader, so we can't read its products. Connect Shopify or add products by hand.", reason: "blocked" };
 const PARTIAL: Note = { error: "Only part of the catalogue could be read, so no products were archived.", reason: "partial" };
+// AskCart sent a product without all its variants (Shopify was busy): the missing variants may still be on sale.
+const VARIANTS_PARTIAL: Note = { error: "Some products came without all their variants (your store was busy), so no products were archived.", reason: "partial" };
 const FAILED: Note = { error: "The last sync couldn't read the products. Press Sync now to try again.", reason: "failed" };
 const REFUSED: Note = { error: SHOPIFY_REFUSED, reason: "shopify-refused" };
 const EMPTY_ONCE: Note = { error: "Your store listed no products. We'll check again before removing any.", reason: "partial" };
@@ -189,7 +192,8 @@ function shopExtras(p: ShopifyVariant["product"]): ShopExtras {
   const list = (v: unknown) => (Array.isArray(v) ? v.slice(0, 100) : []);
   return {
     ...(p.vendor !== undefined && { vendor: str(p.vendor, 200) }),
-    ...(p.tags !== undefined && { tags: [...new Set(list(p.tags).flatMap((t) => str(t, 100) ?? []))].slice(0, 50) }),
+    // Sorted (tags by text, collections by id), so AskCart's ordering never counts as a change (sameRow).
+    ...(p.tags !== undefined && { tags: [...new Set(list(p.tags).flatMap((t) => str(t, 100) ?? []))].sort().slice(0, 50) }),
     ...(p.collections !== undefined && {
       collections: list(p.collections)
         .flatMap((c) => {
@@ -197,6 +201,7 @@ function shopExtras(p: ShopifyVariant["product"]): ShopExtras {
           const title = str(c?.title, 200);
           return id && title ? [{ id, title, handle: str(c?.handle, 200) }] : [];
         })
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
         .slice(0, 50),
     }),
   };
@@ -289,8 +294,15 @@ async function shopifyFeed(conn: IntegrationConnection, signal: AbortSignal, wal
     // A walk carries on from the last run's cursor, so a store past one run's MAX_ROWS completes over several runs.
     const read = await askCartCatalog(await askCartToken(conn), walk?.cursor ?? null, MAX_ROWS, signal);
     const rows = shopifyRows(read.variants, read.currency);
-    if (read.complete) return { rows, complete: true, seenSince: walk && new Date(walk.startedAt) };
-    return { rows, complete: false, note: PARTIAL, walk: read.cursor ? { cursor: read.cursor, startedAt: walk?.startedAt ?? at, connectionId: conn.id } : undefined };
+    // A variant missing from a product sent incomplete isn't gone: a walk that met one archives nothing.
+    const truncated = read.truncated > 0 || walk?.truncated === true;
+    if (read.complete) return truncated ? { rows, complete: false, note: VARIANTS_PARTIAL } : { rows, complete: true, seenSince: walk && new Date(walk.startedAt) };
+    return {
+      rows,
+      complete: false,
+      note: PARTIAL,
+      walk: read.cursor ? { cursor: read.cursor, startedAt: walk?.startedAt ?? at, connectionId: conn.id, ...(truncated && { truncated: true as const }) } : undefined,
+    };
   }
   if (isShopifyMcp(conn)) {
     // Storefront Catalog MCP: public, no token; the account id is the store's host. Products only.

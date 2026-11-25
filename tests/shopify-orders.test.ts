@@ -152,7 +152,7 @@ describe("mapAskCartOrder: AskCart's optional line items and statuses", () => {
   const LINE = {
     id: "gid://shopify/LineItem/1", title: "Oak table", variantTitle: "Large", sku: "OAK-L", quantity: 2, currentQuantity: 2,
     productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/11",
-    originalUnitPriceSet: m("50.0"), discountedTotalSet: m("90.0"),
+    originalUnitPriceSet: m("50.0"), discountedTotalSet: m("90.0"), discountedUnitPriceAfterAllDiscountsSet: m("40.5"),
   };
 
   it("an order without the new fields leaves them undefined, so the stored lines and statuses are kept", () => {
@@ -161,12 +161,30 @@ describe("mapAskCartOrder: AskCart's optional line items and statuses", () => {
   });
 
   it("maps line items, statuses and codes; amounts as exact fixed-2 strings", () => {
-    const row = mapAskCartOrder({ ...ORDER, displayFulfillmentStatus: "FULFILLED", displayFinancialStatus: "PAID", discountCodes: ["XMAS", 7, ""], lineItems: [LINE], lineItemsTruncated: false } as never)!;
+    const row = mapAskCartOrder({ ...ORDER, displayFulfillmentStatus: "FULFILLED", displayFinancialStatus: "PAID", discountCodes: ["XMAS", 7, "", "XMAS"], lineItems: [LINE], lineItemsTruncated: false } as never)!;
     expect(row).toMatchObject({ fulfillmentStatus: "FULFILLED", financialStatus: "PAID", discountCodes: ["XMAS"], lineItemsTruncated: false });
     expect(row.lines).toEqual([{
       lineShopifyId: "gid://shopify/LineItem/1", productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/11",
-      title: "Oak table", variantTitle: "Large", sku: "OAK-L", quantity: 2, currentQuantity: 2, unitPrice: "50.00", discountedTotal: "90.00", currency: "EUR",
+      title: "Oak table", variantTitle: "Large", sku: "OAK-L", quantity: 2, currentQuantity: 2, unitPrice: "50.00", discountedTotal: "90.00",
+      netUnitPrice: "40.50", currency: "EUR",
     }]);
+  });
+
+  it("a status sent as null is kept as null (it clears); one not sent stays undefined (kept)", () => {
+    const row = mapAskCartOrder({ ...ORDER, displayFinancialStatus: null } as never)!;
+    expect(row.financialStatus).toBeNull();
+    expect(row).not.toHaveProperty("fulfillmentStatus");
+  });
+
+  it("keeps a line without a product: no title (AskCart withholds it), amounts and quantities still there", () => {
+    const row = mapAskCartOrder({ ...ORDER, lineItems: [{ ...LINE, title: null, variantTitle: null, productId: null, variantId: null }] } as never)!;
+    expect(row.lines).toMatchObject([{ title: null, variantTitle: null, productId: null, quantity: 2, netUnitPrice: "40.50" }]);
+    expect(row.lineItemsTruncated).toBe(false);
+  });
+
+  it("an AskCart that doesn't send the net unit price yet leaves it null", () => {
+    const { discountedUnitPriceAfterAllDiscountsSet: _, ...old } = LINE;
+    expect(mapAskCartOrder({ ...ORDER, lineItems: [old] } as never)!.lines![0].netUnitPrice).toBeNull();
   });
 
   it("an empty lineItems list replaces the stored lines with none", () => {
@@ -196,6 +214,9 @@ describe("mapAskCartOrder: AskCart's optional line items and statuses", () => {
       { ...LINE, id: "gid://shopify/LineItem/6", quantity: -1 },
       { ...LINE, id: undefined },
       { ...LINE, id: "gid://shopify/LineItem/7", originalUnitPriceSet: null },
+      // more than 2 decimals (could round past numeric(14,2)), and an unreadable net price
+      { ...LINE, id: "gid://shopify/LineItem/8", discountedTotalSet: m("999999999999.999") },
+      { ...LINE, id: "gid://shopify/LineItem/9", discountedUnitPriceAfterAllDiscountsSet: m("abc") },
       null,
       { ...LINE, title: "Duplicate" },
     ] } as never)!;
