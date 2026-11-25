@@ -127,6 +127,10 @@ export type AskCartProduct = {
   description: string;
   status: string;
   featuredImageUrl: string | null;
+  // Additive fields (partner API §9): optional because an AskCart that predates them doesn't send them.
+  vendor?: string | null;
+  tags?: string[] | null;
+  collections?: { id: string; title: string; handle: string }[] | null;
   variants: {
     id: string;
     sku: string | null;
@@ -246,6 +250,10 @@ export const askCartVariants = (p: AskCartProduct): ShopifyVariant[] =>
       description: p.description,
       status: p.status,
       featuredMedia: p.featuredImageUrl ? { preview: { image: { url: p.featuredImageUrl } } } : null,
+      // Only what AskCart sent: a key left out keeps the stored value (shopifyRows, saveRows).
+      ...(p.vendor !== undefined && { vendor: p.vendor }),
+      ...(p.tags !== undefined && { tags: p.tags }),
+      ...(p.collections !== undefined && { collections: p.collections }),
     },
   }));
 

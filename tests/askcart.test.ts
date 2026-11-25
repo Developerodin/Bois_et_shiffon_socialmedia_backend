@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/server/db/prisma", () => ({ prisma: {} }));
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn() }));
 
-import { shopifyRows } from "@/server/catalog/sync";
+import { sameRow, shopifyRows } from "@/server/catalog/sync";
 import { fetchAskCartOrders } from "@/server/data/shopify-orders";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import {
-  ASKCART_KEY_REFUSED, ASKCART_REFUSED, AskCartError, askCartCatalog, askCartConfig, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
+  ASKCART_KEY_REFUSED, ASKCART_REFUSED, AskCartError, askCartCatalog, askCartConfig, askCartVariants, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
   askCartShop, askCartTokenRequest, isAskCart,
 } from "@/server/shopify/askcart";
 
@@ -235,6 +235,34 @@ describe("askCartCatalog", () => {
         inStock: false, stockQuantity: null, imageUrl: "https://cdn.shopify.com/a.jpg",
       },
     ]);
+  });
+
+  it("carries AskCart's vendor, tags and collections onto every variant's row, cleaned; absent keys stay out", async () => {
+    const extras = {
+      vendor: " Atelier ", tags: ["linen", "", 3, "linen", "summer"],
+      collections: [{ id: "gid://shopify/Collection/1", title: "Shirts", handle: "shirts" }, { id: "gid://shopify/Collection/2" }, null, { id: "c3", title: "Sale" }],
+    };
+    stubFetch({ body: page([{ ...PRODUCT, ...extras }]) });
+    const { variants, currency } = await askCartCatalog(SECRET, null, 5000);
+    for (const row of shopifyRows(variants, currency)) {
+      expect(row).toMatchObject({
+        vendor: "Atelier", tags: ["linen", "summer"],
+        collections: [{ id: "gid://shopify/Collection/1", title: "Shirts", handle: "shirts" }, { id: "c3", title: "Sale", handle: null }],
+      });
+    }
+    stubFetch({ body: page([{ ...PRODUCT, vendor: null, tags: null, collections: "x" }]) });
+    const again = await askCartCatalog(SECRET, null, 5000);
+    expect(shopifyRows(again.variants, again.currency)[0]).toMatchObject({ vendor: null, tags: [], collections: [] });
+  });
+
+  it("sameRow compares tags and collections by value (jsonb reorders object keys)", () => {
+    const [row] = shopifyRows(askCartVariants({ ...PRODUCT, tags: ["a"], collections: [{ id: "c1", title: "T", handle: "t" }] } as never), "INR");
+    const stored = { ...row, archivedAt: null, collections: [{ handle: "t", id: "c1", title: "T" }], price: "499.0", compareAtPrice: "599" };
+    expect(sameRow(stored, row)).toBe(true);
+    expect(sameRow({ ...stored, tags: ["a", "b"] }, row)).toBe(false);
+    // a row without the extras (another source, or an AskCart that doesn't send them) doesn't compare them
+    const plain = shopifyRows(askCartVariants(PRODUCT as never), "INR")[0];
+    expect(sameRow({ ...stored, vendor: "X", tags: ["z"] }, plain)).toBe(true);
   });
 
   it("a page cut short by Shopify's throttle stops as partial and keeps the cursor", async () => {
