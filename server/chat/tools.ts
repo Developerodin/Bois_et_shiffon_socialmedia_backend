@@ -2,7 +2,10 @@ import { ContentChannel, type Prisma } from "@prisma/client";
 import { tool } from "ai";
 import { z } from "zod";
 import { ProductPageQuery, productPageWhere, STOCK_UNKNOWN } from "@/server/catalog/products";
-import { OPEN_STATUSES, STATUS_GROUPS, stockLabel, type CatalogSync } from "@/shared";
+import { OPEN_STATUSES, parseRange, STATUS_GROUPS, stockLabel, type CatalogSync, type DateRange } from "@/shared";
+import { BREAKDOWNS, days, hasOrderLines, MAX_ANALYSIS_ROWS, PRODUCT_GROUPS, productSales, salesBreakdown, stockRisk, topProducts } from "@/server/data/sales-analysis";
+import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
+import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
@@ -27,10 +30,19 @@ const cleanTitle = (t: string) =>
 // A post whose time passed this recently may still be publishing: not overdue yet.
 const OVERDUE_GRACE_MS = 15 * 60_000;
 
-const RUNNABLE = AGENTS.filter((a) => a.key !== "systems-check" && !a.internal).map((a) => a.key) as [string, ...string[]];
+// Saved threads are validated against these schemas: they may only widen (new optional fields, higher caps), never narrow.
+const SalesRange = z.object({
+  from: z.string().max(10).optional().describe("YYYY-MM-DD, brand-local, inclusive; with to"),
+  to: z.string().max(10).optional().describe("YYYY-MM-DD, inclusive; leave both out for the last 30 days"),
+});
+const BAD_RANGE = { error: `from and to must both be YYYY-MM-DD days, from not after to, at most ${MAX_SALES_DAYS} days.` };
+const NEEDS_LINES =
+  "Per-product sales need order line items, which only come through the AskCart connection once AskCart sends them; none are stored for this brand yet. salesSummary and salesBreakdown still work from order totals.";
+
+const RUNNABLE =AGENTS.filter((a) => a.key !== "systems-check" && !a.internal).map((a) => a.key) as [string, ...string[]];
 
 /**
- * What the CMO chat may do. Read-only access to this brand's documents, reports, products, posts and agents, and
+ * What the CMO chat may do. Read-only access to this brand's documents, reports, products, shop sales, posts and agents, and
  * offering an agent run (the person starts it with a button; same permission check as the Run button). Deliberately no tool that
  * publishes, posts, replies, spends or approves: drafts only, people decide (design §4.4).
  */
@@ -39,6 +51,13 @@ export function chatTools(scope: ChatScope) {
   let perms: Promise<Set<string>> | undefined;
   const can = async (p: string) => (await (perms ??= effectivePermissions(scope.workspaceId, scope.userId, scope.brandId))).has(p);
   const denied = (what: string) => ({ error: `Your role can't see ${what}.` });
+  // The sales tools' period: both days given (validated like the Sales tab's), or the last 30 brand-local days.
+  const rangeOf = async ({ from, to }: { from?: string; to?: string }): Promise<DateRange | null> => {
+    if (from || to) return parseRange(from, to, MAX_SALES_DAYS);
+    const zone = await brandTimeZone(scope);
+    const today = zoneToday(isTimeZone(zone) ? zone : DEFAULT_TIME_ZONE);
+    return { from: addDays(today, -29), to: today };
+  };
   return {
     listDocuments: tool({
       description: "List the brand's five strategy documents with their status (draft or confirmed by the team).",
@@ -245,6 +264,140 @@ export function chatTools(scope: ChatScope) {
           })),
           byStatus,
           more: rows.length > limit,
+        };
+      },
+    }),
+
+    // Sales: read-only, from our own ShopOrder / ShopOrderLine rows; crm.read, like the Sales tab.
+    salesSummary: tool({
+      description:
+        "Shop sales totals for a period (brand-local days, default the last 30 days): orders, gross, discounts, net sales, total, refunded per currency, with the same-length previous period to compare; daily rows when the period is 31 days or less. Start any sales question or report here.",
+      inputSchema: SalesRange,
+      execute: async (input) => {
+        if (!(await can("crm.read"))) return denied("sales");
+        const range = await rangeOf(input);
+        if (!range) return BAD_RANGE;
+        const { currencies } = await salesSummary(scope, range);
+        if (!currencies.length) return { ...range, note: "No orders in this period (test and cancelled orders are left out), or the shop's orders aren't synced." };
+        const withDays = days(range) <= 31;
+        return {
+          ...range,
+          currencies: currencies.map((c) => ({
+            currency: c.currency,
+            totals: c.totals,
+            previous: c.previous,
+            ...(withDays && {
+              days: { columns: ["day", "orders", "netSales", "total"], rows: c.days.map((d) => [d.day, d.orders, d.netSales, d.total]) },
+            }),
+          })),
+        };
+      },
+    }),
+
+    salesBreakdown: tool({
+      description:
+        "Shop sales split by one dimension for a period: day, week, month or weekday (trends, best days), channel (sales channel), fulfillmentStatus, financialStatus (paid, refunded…), discountCode (which codes drive orders; an order with two codes counts in both), collection or vendor (from line items and the catalogue). Per currency: orders, gross, discounts, net sales, total, refunded, average order value (collection/vendor: orders, units, revenue). At most 60 rows; use week or month for long periods.",
+      inputSchema: SalesRange.extend({
+        by: z.enum(BREAKDOWNS),
+        limit: z.number().int().min(1).max(MAX_ANALYSIS_ROWS).default(MAX_ANALYSIS_ROWS),
+      }),
+      execute: async ({ by, limit, ...input }) => {
+        if (!(await can("crm.read"))) return denied("sales");
+        const range = await rangeOf(input);
+        if (!range) return BAD_RANGE;
+        const result = await salesBreakdown(scope, range, by, limit);
+        if (result.basis === "lines" && !result.rows.length && !(await hasOrderLines(scope))) return { ...range, by, note: NEEDS_LINES };
+        const { basis, ...table } = result;
+        return {
+          ...range,
+          by,
+          ...table,
+          ...(basis === "lines" && { note: "From line items: revenue is after discounts, before refunds; units are after refunds." }),
+          ...(by === "fulfillmentStatus" || by === "financialStatus" || by === "discountCode" ? { caveat: "Only orders read through AskCart carry statuses and codes; older ones show (not sent) / (none)." } : {}),
+        };
+      },
+    }),
+
+    topProducts: tool({
+      description:
+        "Best-selling products in a period, by revenue or units, per currency (group: product, or collection / vendor). From order line items (AskCart). Use for 'what sells', top sellers and ranking products.",
+      inputSchema: SalesRange.extend({
+        by: z.enum(["revenue", "units"]).default("revenue"),
+        group: z.enum(PRODUCT_GROUPS).default("product"),
+        limit: z.number().int().min(1).max(25).default(10),
+      }),
+      execute: async ({ by, group, limit, ...input }) => {
+        if (!(await can("crm.read"))) return denied("sales");
+        const range = await rangeOf(input);
+        if (!range) return BAD_RANGE;
+        const rows = await topProducts(scope, range, by, group, limit);
+        if (!rows.length) return { ...range, by, group, note: (await hasOrderLines(scope)) ? "No products sold in this period." : NEEDS_LINES };
+        return {
+          ...range,
+          by,
+          group,
+          columns: [group, "currency", "units", "revenue", "orders"],
+          rows: rows.map((r) => [cleanTitle(r.name), r.currency, r.units, r.revenue.toFixed(2), r.orders]),
+          note: "Revenue is line totals after discounts, before refunds; units are after refunds.",
+        };
+      },
+    }),
+
+    productSales: tool({
+      description:
+        "How one product (or every product, without q) is selling: its variants matching the title/SKU text with units, revenue, current price and stock, plus weekly units and revenue over the period. Use for 'how is X selling'.",
+      inputSchema: SalesRange.extend({ q: z.string().max(100).default("") }),
+      execute: async ({ q, ...input }) => {
+        if (!(await can("crm.read"))) return denied("sales");
+        const range = await rangeOf(input);
+        if (!range) return BAD_RANGE;
+        const { variants, weeks } = await productSales(scope, range, q.trim());
+        if (!variants.length) {
+          if (!(await hasOrderLines(scope))) return { ...range, q, note: NEEDS_LINES };
+          return { ...range, q, note: "Nothing matching sold in this period. findProducts shows whether it is in the catalogue." };
+        }
+        return {
+          ...range,
+          q,
+          variants: {
+            columns: ["product", "variant", "sku", "currency", "units", "revenue", "orders", "price", "stock"],
+            rows: variants.map((v) => [
+              cleanTitle(v.title), v.variant_title && cleanTitle(v.variant_title), v.sku, v.currency, v.units, v.revenue.toFixed(2), v.orders,
+              v.price?.toFixed(2) ?? null, v.in_catalogue ? stockLabel({ inStock: v.in_stock, stockQuantity: v.stock_quantity }) : "not in catalogue",
+            ]),
+          },
+          weeks: { columns: ["weekStarting", "currency", "units", "revenue"], rows: weeks.map((w) => [w.week, w.currency, w.units, w.revenue.toFixed(2)]) },
+        };
+      },
+    }),
+
+    stockRisk: tool({
+      description:
+        "Stock against sales: the period's best sellers (by units) with current stock and estimated days of cover (stock ÷ average daily units), lowest cover first, flagging sold-out best sellers; plus slow movers (in stock, few sales for the stock held). Use for restock and clearance advice.",
+      inputSchema: SalesRange.extend({ limit: z.number().int().min(1).max(40).default(20) }),
+      execute: async ({ limit, ...input }) => {
+        if (!(await can("crm.read"))) return denied("sales");
+        const range = await rangeOf(input);
+        if (!range) return BAD_RANGE;
+        const { sellers, slow } = await stockRisk(scope, range, limit);
+        if (!sellers.length) return { ...range, note: (await hasOrderLines(scope)) ? "No products sold in this period." : NEEDS_LINES };
+        const n = days(range);
+        const rows = sellers.map((s) => {
+          const perDay = s.units / n;
+          const soldOut = s.in_catalogue && ((s.stock_quantity !== null && s.stock_quantity <= 0) || (s.stock_quantity === null && s.in_stock === false));
+          const cover = soldOut ? 0 : s.stock_quantity !== null && perDay > 0 ? Math.round(s.stock_quantity / perDay) : null;
+          const flag = !s.in_catalogue ? "not in catalogue" : soldOut ? "sold out" : cover !== null && cover < 14 ? "low cover" : null;
+          return { row: [cleanTitle(s.title), s.sku, s.units, Math.round(perDay * 100) / 100, s.in_catalogue ? s.stock_quantity : null, cover, flag], cover };
+        });
+        rows.sort((a, b) => (a.cover ?? Infinity) - (b.cover ?? Infinity));
+        return {
+          ...range,
+          bestSellers: { columns: ["variant", "sku", "units", "unitsPerDay", "stock", "daysOfCover", "flag"], rows: rows.map((r) => r.row) },
+          slowMovers: {
+            columns: ["variant", "sku", "stock", "unitsSold", "daysOfCover"],
+            rows: slow.map((s) => [cleanTitle(s.title), s.sku, s.stock_quantity, s.units, s.units ? Math.round(s.stock_quantity / (s.units / n)) : null]),
+          },
+          note: "Stock is the catalogue's last sync; daysOfCover null = stock not tracked, or no sales (slow movers).",
         };
       },
     }),

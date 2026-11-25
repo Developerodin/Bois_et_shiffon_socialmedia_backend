@@ -14,8 +14,11 @@ export function historyWindow<M>(messages: M[]): M[] {
   return over > 0 ? messages.slice(Math.ceil(over / WINDOW_STEP) * WINDOW_STEP) : messages;
 }
 
-/** The tools whose output is the brand's own catalogue: text in it comes from scraped sites and shop feeds. */
-export const PRODUCT_TOOLS = new Set(["catalogueSummary", "findProducts"]);
+/**
+ * The tools whose output is the brand's own catalogue or shop data: text in it (titles, discount codes, channels,
+ * collections) comes from scraped sites and shop feeds, and sales figures must not travel into a web search.
+ */
+export const PRODUCT_TOOLS = new Set(["catalogueSummary", "findProducts", "salesSummary", "salesBreakdown", "topProducts", "productSales", "stockRisk"]);
 
 /** Has product data entered the conversation the model sees (a product tool's step in a saved message)? */
 export const readsProducts = (history: UIMessage[]) =>
