@@ -1,19 +1,38 @@
 import { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const db = vi.hoisted(() => ({ $queryRaw: vi.fn(), shopOrderLine: { findFirst: vi.fn() } }));
+// The tools over a stubbed data layer: what they let through, refuse, clean and say. The SQL itself is checked against
+// a real Postgres (see the branch's handover notes), not by matching its text here.
 const perms = vi.hoisted(() => ({ set: new Set(["crm.read"]) }));
-const data = vi.hoisted(() => ({ salesSummary: vi.fn(), brandTimeZone: vi.fn(async () => "Europe/Paris") }));
+const data = vi.hoisted(() => ({
+  salesSummary: vi.fn(),
+  brandTimeZone: vi.fn(async () => "Europe/Paris"),
+  salesBreakdown: vi.fn(),
+  topProducts: vi.fn(),
+  productSales: vi.fn(),
+  stockRisk: vi.fn(),
+  hasOrderLines: vi.fn(async () => true),
+  truncatedOrders: vi.fn(async () => 0),
+}));
 
-vi.mock("@/server/db/prisma", () => ({ prisma: db }));
+vi.mock("@/server/db/prisma", () => ({ prisma: {} }));
 vi.mock("@/server/auth/permissions", () => ({ effectivePermissions: vi.fn(async () => perms.set) }));
 vi.mock("@/server/services/audit-reports", () => ({ latestAuditReports: vi.fn() }));
 vi.mock("@/server/services/context-docs", () => ({ CONTEXT_DOC_KINDS: [{ kind: "brand-voice" }], listContextDocs: vi.fn() }));
 vi.mock("@/server/data/sales-read", () => ({ MAX_SALES_DAYS: 366, salesSummary: data.salesSummary }));
 vi.mock("@/server/data/sources", async (orig) => ({ ...(await orig<object>()), brandTimeZone: data.brandTimeZone }));
+vi.mock("@/server/data/sales-analysis", async (orig) => ({
+  ...(await orig<object>()),
+  salesBreakdown: data.salesBreakdown,
+  topProducts: data.topProducts,
+  productSales: data.productSales,
+  stockRisk: data.stockRisk,
+  hasOrderLines: data.hasOrderLines,
+  truncatedOrders: data.truncatedOrders,
+}));
 
 import { chatTools } from "@/server/chat/tools";
-import { PRODUCT_TOOLS } from "@/server/chat/turn";
+import { SALES_TOOLS, SHOP_DATA_TOOLS } from "@/server/chat/turn";
 import { chatSystemPrompt } from "@/server/chat/prompt";
 
 const scope = { workspaceId: "w1", brandId: "b1", userId: "u1" };
@@ -24,24 +43,29 @@ const run = (t: AnyTool, input: object) =>
 const parse = (t: AnyTool, input: object) => (t.inputSchema as { safeParse: (v: unknown) => { success: boolean } }).safeParse(input).success;
 const SALES = ["salesSummary", "salesBreakdown", "topProducts", "productSales", "stockRisk"] as const;
 const range = { from: "2026-11-01", to: "2026-11-30" };
-/** A raw call's SQL text and bound values (tagged template: strings, ...values). */
-const sqlOf = (call: unknown[]) => Prisma.sql(call[0] as unknown as TemplateStringsArray, ...call.slice(1));
+const inputFor = (name: string, r: object) => (name === "salesBreakdown" ? { ...r, by: "week" } : r);
+const d = (v: string) => new Prisma.Decimal(v);
+const BIDI = "‮";
 
 beforeEach(() => {
   vi.clearAllMocks();
   perms.set = new Set(["crm.read"]);
-  db.$queryRaw.mockResolvedValue([]);
-  db.shopOrderLine.findFirst.mockResolvedValue({ id: "l1" });
+  data.hasOrderLines.mockResolvedValue(true);
+  data.truncatedOrders.mockResolvedValue(0);
+  data.salesBreakdown.mockResolvedValue({ basis: "orders", columns: [], rows: [], moreGroups: 0 });
+  data.topProducts.mockResolvedValue({ rows: [], moreGroups: 0 });
+  data.productSales.mockResolvedValue({ variants: [], weeks: [] });
+  data.stockRisk.mockResolvedValue({ sellers: [], slow: [] });
 });
 afterEach(() => vi.useRealTimers());
+
+const reads = () => [data.salesSummary, data.salesBreakdown, data.topProducts, data.productSales, data.stockRisk].some((f) => f.mock.calls.length);
 
 describe("sales tools: access and input", () => {
   it.each(SALES)("%s needs crm.read (the Sales tab's permission) and reads nothing without it", async (name) => {
     perms.set = new Set(["brand.read", "analytics.read"]);
-    const out = await run(chatTools(scope)[name], name === "salesBreakdown" ? { ...range, by: "week" } : range);
-    expect(out).toEqual({ error: "Your role can't see sales." });
-    expect(db.$queryRaw).not.toHaveBeenCalled();
-    expect(data.salesSummary).not.toHaveBeenCalled();
+    expect(await run(chatTools(scope)[name], inputFor(name, range))).toEqual({ error: "Your role can't see sales." });
+    expect(reads()).toBe(false);
   });
 
   it.each([
@@ -51,12 +75,8 @@ describe("sales tools: access and input", () => {
     [{ from: "2026-02-30", to: "2026-03-01" }],
     [{ from: "2026-11-1'", to: "2026-11-02" }],
   ])("refuses a bad period %j before reading", async (input) => {
-    for (const name of SALES) {
-      const out = await run(chatTools(scope)[name], name === "salesBreakdown" ? { ...input, by: "week" } : input);
-      expect(out.error).toMatch(/YYYY-MM-DD/);
-    }
-    expect(db.$queryRaw).not.toHaveBeenCalled();
-    expect(data.salesSummary).not.toHaveBeenCalled();
+    for (const name of SALES) expect((await run(chatTools(scope)[name], inputFor(name, input))).error).toMatch(/YYYY-MM-DD/);
+    expect(reads()).toBe(false);
   });
 
   it("defaults to the last 30 days in the brand's time zone", async () => {
@@ -71,18 +91,20 @@ describe("sales tools: access and input", () => {
   it("schemas cap sizes and only take known groupings", () => {
     const t = chatTools(scope);
     expect(parse(t.topProducts, { limit: 26 })).toBe(false);
-    expect(parse(t.topProducts, { limit: 25, by: "units", group: "vendor" })).toBe(true);
+    expect(parse(t.topProducts, { limit: 25, rankBy: "units", group: "vendor" })).toBe(true);
     expect(parse(t.topProducts, { group: "customer" })).toBe(false);
+    expect(parse(t.topProducts, { rankBy: "margin" })).toBe(false);
     expect(parse(t.salesBreakdown, { by: "customer" })).toBe(false);
     expect(parse(t.salesBreakdown, { by: "discountCode", limit: 61 })).toBe(false);
     expect(parse(t.stockRisk, { limit: 41 })).toBe(false);
     expect(parse(t.productSales, { q: "x".repeat(101) })).toBe(false);
   });
 
-  it("sales output is kept away from web search, and the prompt names the tools", () => {
-    for (const name of ["salesBreakdown", "topProducts", "productSales", "stockRisk"]) expect(PRODUCT_TOOLS.has(name)).toBe(true);
+  it("every sales tool counts as shop data, and the prompt names them all", () => {
+    for (const name of SALES) expect(SALES_TOOLS.has(name) && SHOP_DATA_TOOLS.has(name)).toBe(true);
     const prompt = chatSystemPrompt({ name: "Oak & Co", website: null });
     for (const name of SALES) expect(prompt).toContain(name);
+    expect(prompt).toContain("rankBy");
   });
 });
 
@@ -99,13 +121,18 @@ describe("salesSummary", () => {
   });
 });
 
-describe("topProducts / productSales / stockRisk without line items", () => {
+describe("per-product tools without line items", () => {
   it.each(["topProducts", "productSales", "stockRisk"] as const)("%s says per-product sales need AskCart's line items, not an error", async (name) => {
-    db.shopOrderLine.findFirst.mockResolvedValue(null);
+    data.hasOrderLines.mockResolvedValue(false);
     const out = await run(chatTools(scope)[name], range);
     expect(out.error).toBeUndefined();
     expect(out.note).toMatch(/line items/);
-    expect(db.shopOrderLine.findFirst.mock.calls[0][0].where).toEqual({ workspaceId: "w1", brandId: "b1" });
+  });
+
+  it("a line-based breakdown says so too", async () => {
+    data.hasOrderLines.mockResolvedValue(false);
+    data.salesBreakdown.mockResolvedValue({ basis: "lines", columns: [], rows: [], moreGroups: 0 });
+    expect((await run(chatTools(scope).salesBreakdown, { ...range, by: "vendor" })).note).toMatch(/line items/);
   });
 
   it("with line items stored but none in the period, says nothing sold", async () => {
@@ -113,60 +140,74 @@ describe("topProducts / productSales / stockRisk without line items", () => {
   });
 });
 
-describe("topProducts", () => {
-  it("returns columns + rows, and the grouping falls back from product id to SKU to title", async () => {
-    db.$queryRaw.mockResolvedValue([{ name: "Oak‮ table", currency: "EUR", units: 3, revenue: new Prisma.Decimal("90.5"), orders: 2 }]);
-    const out = await run(chatTools(scope).topProducts, { ...range, by: "units", group: "product", limit: 5 });
-    expect(out).toMatchObject({ columns: ["product", "currency", "units", "revenue", "orders"], rows: [["Oak  table", "EUR", 3, "90.50", 2]] });
-    const sql = sqlOf(db.$queryRaw.mock.calls[0]);
-    expect(sql.sql).toContain(`COALESCE(l."productId", 'sku:' || l.sku, 'title:' || l.title)`);
-    expect(sql.sql).toContain("units DESC, revenue DESC");
-    expect(sql.sql).toContain(`NOT o."test" AND o."cancelledAt" IS NULL`);
-    // scope and cap are bound values, not SQL text
-    expect(sql.values).toEqual(expect.arrayContaining(["w1", "b1", 5]));
+describe("salesBreakdown", () => {
+  it("passes the grouping through, cleans shop text and says how many groups are hidden", async () => {
+    data.salesBreakdown.mockResolvedValue({ basis: "orders", columns: ["channel", "currency", "orders"], rows: [[`web${BIDI}shop`, "EUR", 4]], moreGroups: 3 });
+    const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "channel", limit: 1 });
+    expect(data.salesBreakdown).toHaveBeenCalledWith(scope, range, "channel", 1);
+    expect(out.rows).toEqual([["web shop", "EUR", 4]]);
+    expect(out.notes).toEqual([expect.stringMatching(/^3 more groups/)]);
+  });
+
+  it("weeks: says the first and last can be partial, and time groups keep the most recent", async () => {
+    data.salesBreakdown.mockResolvedValue({ basis: "orders", columns: [], rows: [["2026-11-02", "EUR", 1]], moreGroups: 1 });
+    const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "week" });
+    expect(out.notes).toEqual([expect.stringContaining("most recent"), expect.stringContaining("partial")]);
+  });
+
+  it("line-based groups say revenue is net and count incomplete orders", async () => {
+    data.truncatedOrders.mockResolvedValue(2);
+    data.salesBreakdown.mockResolvedValue({ basis: "lines", columns: [], rows: [["Tables", "EUR", 1, 2, "90.00"]], moreGroups: 0 });
+    const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "collection" });
+    expect(out.notes).toEqual([expect.stringContaining("net of refunds"), expect.stringMatching(/^2 orders .* incomplete/)]);
   });
 });
 
-describe("salesBreakdown", () => {
-  it("maps each grouping to fixed SQL and adds average order value", async () => {
-    const d = (v: string) => new Prisma.Decimal(v);
-    db.$queryRaw.mockResolvedValue([{ key: "XMAS", currency: "EUR", n_groups: 3, orders: 4, gross: d("110"), discounts: d("10"), net_sales: d("100"), total: d("105"), refunded: d("0") }]);
-    const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "discountCode", limit: 1 });
-    expect(out).toMatchObject({
-      by: "discountCode",
-      columns: ["discountCode", "currency", "orders", "gross", "discounts", "netSales", "total", "refunded", "avgOrderValue"],
-      rows: [["XMAS", "EUR", 4, "110.00", "10.00", "100.00", "105.00", "0.00", "25.00"]],
-      moreGroups: 2,
-    });
-    expect(sqlOf(db.$queryRaw.mock.calls[0]).sql).toContain(`unnest(o."discountCodes")`);
+describe("topProducts", () => {
+  it("ranks by the input's rankBy and returns cleaned columns + rows", async () => {
+    data.topProducts.mockResolvedValue({ rows: [[`Oak${BIDI}table`, "EUR", 3, "90.50", 2]], moreGroups: 0 });
+    const out = await run(chatTools(scope).topProducts, { ...range, rankBy: "units", limit: 5 });
+    expect(data.topProducts).toHaveBeenCalledWith(scope, range, "units", "product", 5);
+    expect(out).toMatchObject({ rankBy: "units", group: "product", columns: ["product", "currency", "units", "revenue", "orders"], rows: [["Oak table", "EUR", 3, "90.50", 2]] });
   });
 });
 
 describe("productSales", () => {
-  it("sends the search text as an escaped bound value", async () => {
-    await run(chatTools(scope).productSales, { ...range, q: "100%_oak" });
-    const sql = sqlOf(db.$queryRaw.mock.calls[0]);
-    expect(sql.sql).not.toContain("100%");
-    expect(sql.values).toContain("%100\\%\\_oak%");
+  it("shows price and stock from the live catalogue, and 'not in catalogue' otherwise; SKUs cleaned", async () => {
+    data.productSales.mockResolvedValue({
+      variants: [
+        { title: "Oak table — Large", sku: `OAK${BIDI}L`, currency: "EUR", units: 3, revenue: d("120"), orders: 2, price: d("50"), in_stock: true, stock_quantity: 4, in_catalogue: true },
+        { title: "Other / custom items", sku: null, currency: "EUR", units: 1, revenue: d("5"), orders: 1, price: null, in_stock: null, stock_quantity: null, in_catalogue: false },
+      ],
+      weeks: [{ week: "2026-11-02", currency: "EUR", units: 4, revenue: d("125") }],
+    });
+    const out = await run(chatTools(scope).productSales, { ...range, q: " oak " });
+    expect(data.productSales).toHaveBeenCalledWith(scope, range, "oak");
+    expect((out.variants as { rows: unknown[][] }).rows).toEqual([
+      ["Oak table — Large", "OAK L", "EUR", 3, "120.00", 2, "50.00", "4 in stock"],
+      ["Other / custom items", null, "EUR", 1, "5.00", 1, null, "not in catalogue"],
+    ]);
+    expect(out.weeks).toEqual({ columns: ["weekStarting", "currency", "units", "revenue"], rows: [["2026-11-02", "EUR", 4, "125.00"]] });
   });
 });
 
 describe("stockRisk", () => {
   it("works out days of cover, flags sold-out best sellers and sorts lowest cover first", async () => {
-    db.$queryRaw
-      .mockResolvedValueOnce([
+    data.stockRisk.mockResolvedValue({
+      sellers: [
         { title: "Plenty", sku: "A", units: 30, stock_quantity: 300, in_stock: true, in_catalogue: true },
         { title: "Gone", sku: "B", units: 20, stock_quantity: 0, in_stock: false, in_catalogue: true },
         { title: "Low", sku: "C", units: 60, stock_quantity: 10, in_stock: true, in_catalogue: true },
-        { title: "Deleted", sku: null, units: 5, stock_quantity: null, in_stock: null, in_catalogue: false },
-      ])
-      .mockResolvedValueOnce([{ title: "Lamp", sku: null, stock_quantity: 200, units: 0 }]);
+        { title: "Other / custom items", sku: null, units: 5, stock_quantity: null, in_stock: null, in_catalogue: false },
+      ],
+      slow: [{ title: "Lamp", sku: null, stock_quantity: 200, units: 0 }],
+    });
     const out = await run(chatTools(scope).stockRisk, range); // 30 days
     expect((out.bestSellers as { rows: unknown[][] }).rows).toEqual([
       ["Gone", "B", 20, 0.67, 0, 0, "sold out"],
       ["Low", "C", 60, 2, 10, 5, "low cover"],
       ["Plenty", "A", 30, 1, 300, 300, null],
-      ["Deleted", null, 5, 0.17, null, null, "not in catalogue"],
+      ["Other / custom items", null, 5, 0.17, null, null, "not in catalogue"],
     ]);
     expect((out.slowMovers as { rows: unknown[][] }).rows).toEqual([["Lamp", null, 200, 0, null]]);
   });

@@ -1,7 +1,7 @@
 import type { UIMessage } from "ai";
 import { describe, expect, it } from "vitest";
 import { productPageWhere } from "@/server/catalog/products";
-import { askedToSearch, historyWindow, MODEL_HISTORY, readsProducts } from "@/server/chat/turn";
+import { activeTools, askedToSearch, historyWindow, MAX_SALES_CALLS, MODEL_HISTORY, readsShopData } from "@/server/chat/turn";
 
 const msg = (text: string, role: "user" | "assistant" = "user"): UIMessage => ({ id: text, role, parts: [{ type: "text", text }] });
 
@@ -29,8 +29,29 @@ describe("web search guard", () => {
   it("sees product data only in a product tool's step", () => {
     const read = { id: "a", role: "assistant", parts: [{ type: "tool-findProducts", toolCallId: "1", state: "output-available", input: {}, output: {} }] } as unknown as UIMessage;
     const docs = { id: "b", role: "assistant", parts: [{ type: "tool-readDocument", toolCallId: "2", state: "output-available", input: {}, output: {} }] } as unknown as UIMessage;
-    expect(readsProducts([msg("hi"), read])).toBe(true);
-    expect(readsProducts([msg("hi"), docs])).toBe(false);
+    expect(readsShopData([msg("hi"), read])).toBe(true);
+    expect(readsShopData([msg("hi"), docs])).toBe(false);
+  });
+
+  const step = (tool: string) => ({ id: tool, role: "assistant", parts: [{ type: `tool-${tool}`, toolCallId: "1", state: "output-available", input: {}, output: {} }] }) as unknown as UIMessage;
+  const ALL = ["webSearch", "findProducts", "salesSummary", "topProducts", "readDocument"];
+
+  it("catalogue data switches web search off, unless the person asked for a search", () => {
+    expect(activeTools(ALL, { history: [msg("hi")], calls: [], searchAsked: false })).toBeUndefined();
+    expect(activeTools(ALL, { history: [step("findProducts")], calls: [], searchAsked: false })).not.toContain("webSearch");
+    expect(activeTools(ALL, { history: [msg("hi")], calls: ["findProducts"], searchAsked: false })).not.toContain("webSearch");
+    expect(activeTools(ALL, { history: [step("findProducts")], calls: [], searchAsked: true })).toBeUndefined();
+  });
+
+  it("sales figures switch web search off even when the person asked for a search", () => {
+    expect(activeTools(ALL, { history: [step("salesSummary")], calls: [], searchAsked: true })).not.toContain("webSearch");
+    expect(activeTools(ALL, { history: [msg("hi")], calls: ["topProducts"], searchAsked: true })).not.toContain("webSearch");
+  });
+
+  it(`switches the sales tools off after ${MAX_SALES_CALLS} sales calls in a turn`, () => {
+    const calls = Array.from({ length: MAX_SALES_CALLS - 1 }, () => "salesSummary");
+    expect(activeTools(ALL, { history: [], calls, searchAsked: false })).toEqual(["findProducts", "salesSummary", "topProducts", "readDocument"]);
+    expect(activeTools(ALL, { history: [], calls: [...calls, "topProducts"], searchAsked: false })).toEqual(["findProducts", "readDocument"]);
   });
 
   it("counts only the person's own words asking for a search, in English or French", () => {

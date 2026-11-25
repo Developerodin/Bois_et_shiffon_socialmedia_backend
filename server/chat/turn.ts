@@ -14,15 +14,35 @@ export function historyWindow<M>(messages: M[]): M[] {
   return over > 0 ? messages.slice(Math.ceil(over / WINDOW_STEP) * WINDOW_STEP) : messages;
 }
 
+/** The sales tools (server/chat/tools.ts): the shop's own sales figures. */
+export const SALES_TOOLS = new Set(["salesSummary", "salesBreakdown", "topProducts", "productSales", "stockRisk"]);
 /**
- * The tools whose output is the brand's own catalogue or shop data: text in it (titles, discount codes, channels,
- * collections) comes from scraped sites and shop feeds, and sales figures must not travel into a web search.
+ * The tools whose output is the brand's catalogue or shop data: text in it (titles, discount codes, channels,
+ * collections) comes from scraped sites and shop feeds, and none of it may travel out in a web search.
  */
-export const PRODUCT_TOOLS = new Set(["catalogueSummary", "findProducts", "salesSummary", "salesBreakdown", "topProducts", "productSales", "stockRisk"]);
+export const SHOP_DATA_TOOLS = new Set(["catalogueSummary", "findProducts", ...SALES_TOOLS]);
+/** Sales tool calls a turn may make (a full report takes four or five): past it they're switched off for the turn. */
+export const MAX_SALES_CALLS = 8;
 
-/** Has product data entered the conversation the model sees (a product tool's step in a saved message)? */
-export const readsProducts = (history: UIMessage[]) =>
-  history.some((m) => m.parts.some((p) => p.type.startsWith("tool-") && PRODUCT_TOOLS.has(p.type.slice(5))));
+/** Has one of `tools` run in the conversation the model sees (its step in a saved message)? */
+export const readsShopData = (history: UIMessage[], tools: ReadonlySet<string> = SHOP_DATA_TOOLS) =>
+  history.some((m) => m.parts.some((p) => p.type.startsWith("tool-") && tools.has(p.type.slice(5))));
+
+/**
+ * The tools a step of the turn may use (undefined: all of them). Text planted in a product title could steer a web
+ * search that carries shop data out, so once shop data is in what the model sees (history, or this turn's calls), web
+ * search is off for the rest of the turn; the person's own request for a search turns it back on for catalogue data,
+ * never once sales figures are in (they're the more sensitive). After MAX_SALES_CALLS sales calls in a turn the sales
+ * tools are off too, so a looping model can't run up queries.
+ */
+export function activeTools(all: string[], turn: { history: UIMessage[]; calls: string[]; searchAsked: boolean }): string[] | undefined {
+  const sales = readsShopData(turn.history, SALES_TOOLS) || turn.calls.some((c) => SALES_TOOLS.has(c));
+  const shop = sales || readsShopData(turn.history) || turn.calls.some((c) => SHOP_DATA_TOOLS.has(c));
+  const noSearch = sales || (shop && !turn.searchAsked);
+  const noSales = turn.calls.filter((c) => SALES_TOOLS.has(c)).length >= MAX_SALES_CALLS;
+  const active = all.filter((n) => !(noSearch && n === "webSearch") && !(noSales && SALES_TOOLS.has(n)));
+  return active.length === all.length ? undefined : active;
+}
 
 /**
  * Did the person's own message ask for a web search (English or French)? Only their text counts: words planted in a

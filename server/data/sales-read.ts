@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import type { DateRange, SalesCurrency, SalesSummaryDto, SalesTotals } from "@/shared";
 import { prisma } from "@/server/db/prisma";
 import { addDays, previousRange } from "./sources";
@@ -28,32 +28,47 @@ const totals = (r: Row): SalesTotals => ({
   refunded: r.refunded.toFixed(2),
 });
 
+type Scope = { workspaceId: string; brandId: string };
+
+/**
+ * The one definition of a range in the brand's days, shared by the Sales tab and the chat's sales tools
+ * (sales-analysis.ts): CTEs `bp` (the brand's zone: BrandProfile.timeZone, else UTC) and `b` (lo, hi: the range's
+ * brand-local midnights as instants, hi exclusive), so the (brandId, processedAt) index bounds the scan.
+ * ponytail: the planner can't estimate rows from bounds computed in SQL; if plans go wrong on big stores, compute
+ * lo/hi in JS (the zone is known) and pass them as literals.
+ */
+export const brandBounds = (scope: Scope, range: DateRange) => Prisma.sql`
+  bp AS (
+    SELECT COALESCE((SELECT "timeZone" FROM "BrandProfile" WHERE "brandId" = ${scope.brandId} AND "workspaceId" = ${scope.workspaceId}), 'UTC') AS tz
+  ), b AS (
+    SELECT ((${range.from}::date)::timestamp AT TIME ZONE bp.tz) AT TIME ZONE 'UTC' AS lo,
+           ((${addDays(range.to, 1)}::date)::timestamp AT TIME ZONE bp.tz) AT TIME ZONE 'UTC' AS hi
+    FROM bp
+  )`;
+
+/**
+ * The orders that count, with `local` (the brand-local time): this brand's, in brandBounds' range, not test, not
+ * cancelled. Needs brandBounds in the WITH.
+ */
+export const countedOrders = (scope: Scope) => Prisma.sql`
+  SELECT o.*, ((o."processedAt" AT TIME ZONE 'UTC') AT TIME ZONE bp.tz) AS local
+  FROM "ShopOrder" o CROSS JOIN b CROSS JOIN bp
+  WHERE o."workspaceId" = ${scope.workspaceId} AND o."brandId" = ${scope.brandId}
+    AND NOT o."test" AND o."cancelledAt" IS NULL AND o."processedAt" >= b.lo AND o."processedAt" < b.hi`;
+
 /**
  * Sales tab numbers from ShopOrder, per currency (never added across currencies): totals for from..to, the same-length
- * previous period, and the days with orders. Days are the brand's (BrandProfile.timeZone, else UTC): the range is cut
- * at brand-local midnights turned into instants, so the (brandId, processedAt) index bounds the scan, and each order is
- * bucketed on its brand-local date. Test and cancelled orders are left out. One query (GROUPING SETS for the totals).
+ * previous period, and the days with orders. Reads the previous period and the range in one pass of countedOrders and
+ * buckets each order on its brand-local date. One query (GROUPING SETS for the totals).
  * ponytail: sums raw rows; past ~100k orders in a range add a per-day rollup written by the sync.
  */
-export async function salesSummary(scope: { workspaceId: string; brandId: string }, range: DateRange): Promise<SalesSummaryDto> {
-  const prevFrom = previousRange(range).from;
-  const nextDay = addDays(range.to, 1);
+export async function salesSummary(scope: Scope, range: DateRange): Promise<SalesSummaryDto> {
+  const both = { from: previousRange(range).from, to: range.to };
   const rows = await prisma.$queryRaw<Row[]>`
-    WITH bp AS (
-      SELECT (SELECT "timeZone" FROM "BrandProfile" WHERE "brandId" = ${scope.brandId} AND "workspaceId" = ${scope.workspaceId}) AS "timeZone"
-    ), b AS (
-      SELECT ((${prevFrom}::date)::timestamp AT TIME ZONE COALESCE(bp."timeZone",'UTC')) AT TIME ZONE 'UTC' AS lo,
-             ((${range.from}::date)::timestamp AT TIME ZONE COALESCE(bp."timeZone",'UTC')) AT TIME ZONE 'UTC' AS mid,
-             ((${nextDay}::date)::timestamp AT TIME ZONE COALESCE(bp."timeZone",'UTC')) AT TIME ZONE 'UTC' AS hi
-      FROM bp
-    ), o AS (
-      SELECT CASE WHEN o."processedAt" >= b.mid THEN 'cur' ELSE 'prev' END AS period, o."currency",
-             ((o."processedAt" AT TIME ZONE 'UTC') AT TIME ZONE COALESCE(bp."timeZone",'UTC'))::date AS day,
+    WITH ${brandBounds(scope, both)}, o AS (
+      SELECT CASE WHEN o.local::date >= ${range.from}::date THEN 'cur' ELSE 'prev' END AS period, o."currency", o.local::date AS day,
              o."netSales", o."discounts", o."total", o."refunded"
-      FROM "ShopOrder" o CROSS JOIN b CROSS JOIN bp
-      WHERE o."workspaceId" = ${scope.workspaceId} AND o."brandId" = ${scope.brandId}
-        AND NOT o."test" AND o."cancelledAt" IS NULL
-        AND o."processedAt" >= b.lo AND o."processedAt" < b.hi
+      FROM (${countedOrders(scope)}) o
     )
     SELECT period, "currency" AS currency, day, GROUPING(day)::int AS is_total, count(*)::int AS orders,
            sum("netSales" + "discounts") AS gross, sum("discounts") AS discounts, sum("netSales") AS net_sales,

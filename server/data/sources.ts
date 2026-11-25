@@ -110,13 +110,16 @@ export function advanceSyncedThrough(current: string | null, window: DayWindow, 
 }
 /** `?from&to` of a read route: real days, from ≤ to, at most `maxDays` long; else null (answer with badRange). */
 export const parseDayRange = (params: URLSearchParams, maxDays: number) => parseRange(params.get("from"), params.get("to"), maxDays);
+/** What a refused range is told (the routes' badRange and the chat's sales tools). */
+export const badRangeDetail = (maxDays: number) => `from and to must be YYYY-MM-DD days, from not after to, at most ${maxDays} days.`;
 /** The one answer to a range parseDayRange refused (or another bad query, with its own detail). */
-export const badRange = (maxDays: number, detail = `from and to must be YYYY-MM-DD days, from not after to, at most ${maxDays} days.`) =>
+export const badRange = (maxDays: number, detail = badRangeDetail(maxDays)) =>
   problemResponse({ type: "https://api.brandpilot/errors/invalid-range", title: "Invalid range", status: 422, detail });
+/** How many days `range` covers, both ends counted. */
+export const rangeDays = (range: DateRange) => (Date.parse(range.to) - Date.parse(range.from)) / 86_400_000 + 1;
 /** The same number of days right before `range`. */
 export function previousRange(range: DateRange): DateRange {
-  const days = (Date.parse(range.to) - Date.parse(range.from)) / 86_400_000 + 1;
-  return { from: addDays(range.from, -days), to: addDays(range.from, -1) };
+  return { from: addDays(range.from, -rangeDays(range)), to: addDays(range.from, -1) };
 }
 const dayOf = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
 

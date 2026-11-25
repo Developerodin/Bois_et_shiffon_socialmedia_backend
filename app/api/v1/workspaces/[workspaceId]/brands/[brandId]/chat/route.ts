@@ -19,7 +19,7 @@ import { isOutOfCreditsText, logRun, OUT_OF_CREDITS } from "@/server/ai/provider
 import { hitRateLimit, limitKey } from "@/server/auth/rate-limit";
 import { ChatBody, chatSystemPrompt, CHAT_PROMPT_VERSION, withPage, withPageNotes } from "@/server/chat/prompt";
 import { chatTools } from "@/server/chat/tools";
-import { askedToSearch, historyWindow, PRODUCT_TOOLS, readsProducts } from "@/server/chat/turn";
+import { activeTools, askedToSearch, historyWindow } from "@/server/chat/turn";
 import { prisma } from "@/server/db/prisma";
 
 // Streaming replies with a few tool steps can take a while.
@@ -93,21 +93,18 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     const system = chatSystemPrompt({ name: brand.displayName, website: brand.profile?.websiteUrl ?? null });
     const history = historyWindow(messages);
     const modelMessages = await convertToModelMessages(withPageNotes(history));
-    // Text planted in a product title could try to steer a web search that carries catalogue data out. So once product
-    // data is in what the model sees (earlier messages, or a step of this turn), web search is off for the rest of the
-    // turn, unless the person's own message asks for one.
+    // Web search off once shop data is in, sales tools off past their per-turn cap: server/chat/turn.ts activeTools.
     const searchAsked = askedToSearch(messages.at(-1));
-    const productsInHistory = readsProducts(history);
-    const withoutSearch = (Object.keys(tools) as (keyof typeof tools)[]).filter((n) => n !== "webSearch");
+    const toolNames = Object.keys(tools) as (keyof typeof tools)[];
     const result = streamText({
       model: openai(model),
       system,
       messages: modelMessages,
       tools,
-      prepareStep: ({ steps }) =>
-        !searchAsked && (productsInHistory || steps.some((s) => s.toolCalls.some((c) => PRODUCT_TOOLS.has(c.toolName))))
-          ? { activeTools: withoutSearch }
-          : undefined,
+      prepareStep: ({ steps }) => {
+        const active = activeTools(toolNames, { history, calls: steps.flatMap((s) => s.toolCalls.map((c) => c.toolName)), searchAsked });
+        return active ? { activeTools: active as (keyof typeof tools)[] } : undefined;
+      },
       stopWhen: isStepCount(6),
       onFinish: async ({ text, totalUsage, steps }) => {
         const findings = grade({
