@@ -3,7 +3,7 @@ import { appUrl } from "@/server/auth/tokens";
 import { shopDomain } from "@/server/catalog/shopify";
 import { enqueueCatalogSync } from "@/server/catalog/sync";
 import { claimConnectState, ConnectionError, createConnectState, saveConnections } from "@/server/services/connections";
-import { AskCartError, askCartConfig, askCartTokenRequest, ASKCART_SCOPE } from "@/server/shopify/askcart";
+import { AskCartError, askCartConfig, askCartRevoke, askCartTokenRequest, ASKCART_SCOPE } from "@/server/shopify/askcart";
 import { tokenFields } from "@/server/shopify/askcart-token";
 
 /**
@@ -59,6 +59,8 @@ export async function completeAskCartConnect(input: { state: string; code: strin
   const domain = shopDomain(String(tok.shop?.domain ?? ""));
   if (!domain || (st.shop && st.shop !== domain) || (input.shop && shopDomain(input.shop) !== domain)) {
     console.error("[askcart] token answer named another or no shop", st.brandId);
+    // Not stored, so revoke it (AskCart's spec requires this); best effort, the person sees the error either way.
+    await askCartRevoke(tok.access_token).catch((e) => console.warn("[askcart] revoke after shop mismatch failed", e instanceof Error ? e.message : e));
     throw new ConnectionError("AskCart answered for a different store. Try again.");
   }
   const scopes = Array.isArray(tok.scopes) ? tok.scopes.filter((s): s is string => typeof s === "string").slice(0, 50) : [];

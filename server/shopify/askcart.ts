@@ -180,7 +180,8 @@ export async function askCartRequest<T>(
     const { error, visibleSince } = (body ?? {}) as { error?: unknown; visibleSince?: unknown };
     // AskCart's codes are short identifiers; anything else (an HTML page) is dropped rather than echoed.
     const code = typeof error === "string" && /^[a-z_]{1,60}$/.test(error) ? error : null;
-    const storeGone = res.status === 503 && (code === "store_not_connected" || code === "store_reconnect_needed");
+    // 403 insufficient_scope: the token lacks a scope it needs and never gains one; only a new connect fixes it.
+    const storeGone = (res.status === 503 && (code === "store_not_connected" || code === "store_reconnect_needed")) || (res.status === 403 && code === "insufficient_scope");
     if (opts.bearer !== undefined && (res.status === 401 || storeGone)) throw new ReconnectNeeded(`AskCart ${res.status}${code ? ` ${code}` : ""}`);
     const err = new AskCartError(res.ok ? 502 : res.status, res.ok ? "bad_body" : code, typeof visibleSince === "string" ? visibleSince : null);
     const wait = Number(res.headers.get("retry-after") ?? 2);
@@ -270,7 +271,8 @@ export type AskCartToken = {
 export async function askCartTokenRequest(grant: { grant_type: "authorization_code"; code: string; redirect_uri: string; code_verifier: string } | { grant_type: "refresh_token"; refresh_token: string }) {
   const cfg = askCartConfig();
   if (cfg?.mode !== "per-brand") throw new AskCartError(0, "not_configured");
-  const tok = await askCartRequest<AskCartToken>("token", { method: "POST", body: { ...grant, client_id: cfg.clientId, client_secret: cfg.clientSecret } });
+  // Never retry a code exchange: AskCart treats a reused code as theft and revokes the token the first call issued.
+  const tok = await askCartRequest<AskCartToken>("token", { method: "POST", body: { ...grant, client_id: cfg.clientId, client_secret: cfg.clientSecret }, retry: grant.grant_type !== "authorization_code" });
   if (typeof tok?.access_token !== "string" || !tok.access_token) throw new AskCartError(502, "bad_body");
   return tok;
 }
