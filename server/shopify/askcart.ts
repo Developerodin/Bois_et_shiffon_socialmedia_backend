@@ -97,6 +97,26 @@ export type AskCartOrder = {
   currentTotalPriceSet: AskCartMoney;
   totalRefundedSet: AskCartMoney | null;
   currentTaxLines: { title: string; rate: number | null; priceSet: AskCartMoney }[];
+  // Additive fields (partner API §9): optional because an AskCart that predates them doesn't send them.
+  displayFulfillmentStatus?: string | null;
+  displayFinancialStatus?: string | null;
+  discountCodes?: string[] | null;
+  /** The first 100; absent = not sent (the stored lines stay). */
+  lineItems?: AskCartLineItem[] | null;
+  lineItemsTruncated?: boolean | null;
+};
+export type AskCartLineItem = {
+  id: string;
+  title: string;
+  variantTitle: string | null;
+  sku: string | null;
+  quantity: number;
+  currentQuantity?: number | null;
+  /** null when the product or variant was deleted from the store */
+  productId: string | null;
+  variantId: string | null;
+  originalUnitPriceSet: AskCartMoney | null;
+  discountedTotalSet: AskCartMoney | null;
 };
 export type AskCartProduct = {
   id: string;

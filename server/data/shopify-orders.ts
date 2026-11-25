@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { shopifyQuery } from "@/server/catalog/shopify";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
-import { AskCartError, askCartOrders, type AskCartMoney, type AskCartOrder, type AskCartPage } from "@/server/shopify/askcart";
+import { AskCartError, askCartOrders, type AskCartLineItem, type AskCartMoney, type AskCartOrder, type AskCartPage } from "@/server/shopify/askcart";
 import type { SyncStop } from "@/server/data/sync-stop";
 
 /**
@@ -73,6 +73,32 @@ export type ShopOrderRow = {
   refunded: string;
   sourceName: string | null;
   shopifyUpdatedAt: Date;
+  // AskCart only (the pasted-token query asks for none of these). Absent = not sent: the stored value stays.
+  fulfillmentStatus?: string | null;
+  financialStatus?: string | null;
+  discountCodes?: string[];
+  /** Set with `lines`: more line items exist than were stored, or some were unreadable. */
+  lineItemsTruncated?: boolean;
+  /** The order's line items; undefined = AskCart didn't send them, so the lines already stored are kept. */
+  lines?: ShopOrderLineRow[];
+};
+
+/** One line item as ShopOrderLine stores it: product and variant ids, title, SKU, quantities, amounts. No customer data. */
+export type ShopOrderLineRow = {
+  lineShopifyId: string;
+  /** null when the product or variant was deleted from the store */
+  productId: string | null;
+  variantId: string | null;
+  title: string;
+  variantTitle: string | null;
+  sku: string | null;
+  quantity: number;
+  /** After refunds and edits; null when AskCart didn't send it. */
+  currentQuantity: number | null;
+  unitPrice: string;
+  /** discountedTotalSet: the line's total after discounts. */
+  discountedTotal: string;
+  currency: string;
 };
 
 export type FetchOrdersResult = {
@@ -171,6 +197,59 @@ export async function fetchOrders(
 
 const shopMoney = (m: AskCartMoney | null | undefined): Money | null => (m && typeof m.amount === "string" ? { shopMoney: m } : null);
 
+const DECIMAL = /^-?\d{1,12}(\.\d+)?$/;
+/** A money amount as an exact fixed-2 string, or null when it isn't a plain decimal (that line is skipped). */
+const decimal = (m: AskCartMoney | null | undefined) => (m && typeof m.amount === "string" && DECIMAL.test(m.amount) ? add(m.amount) : null);
+const text = (v: unknown, max: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null);
+const count = (v: unknown) => (Number.isInteger(v) && (v as number) >= 0 ? (v as number) : null);
+
+/** A line item as a row, or null when it lacks an id, title, quantity or a readable amount. */
+function mapLine(l: AskCartLineItem, orderCurrency: string): ShopOrderLineRow | null {
+  const lineShopifyId = text(l?.id, 200);
+  const title = text(l?.title, 300);
+  const quantity = count(l?.quantity);
+  const unitPrice = decimal(l?.originalUnitPriceSet);
+  const discountedTotal = decimal(l?.discountedTotalSet);
+  if (!lineShopifyId || !title || quantity === null || unitPrice === null || discountedTotal === null) return null;
+  return {
+    lineShopifyId,
+    productId: text(l.productId, 200),
+    variantId: text(l.variantId, 200),
+    title,
+    variantTitle: text(l.variantTitle, 200),
+    sku: text(l.sku, 100),
+    quantity,
+    currentQuantity: count(l.currentQuantity),
+    unitPrice,
+    discountedTotal,
+    currency: text(l.discountedTotalSet?.currencyCode, 3) ?? orderCurrency,
+  };
+}
+
+/**
+ * AskCart's additive order fields (statuses, discount codes, line items), each left out when not sent so the upsert
+ * keeps what is stored. A malformed line item is skipped (and the order marked truncated) rather than failing the
+ * order; a line id seen twice keeps its first.
+ */
+function askCartExtras(o: AskCartOrder, currency: string): Partial<ShopOrderRow> {
+  const extras: Partial<ShopOrderRow> = {};
+  if (o.displayFulfillmentStatus !== undefined) extras.fulfillmentStatus = text(o.displayFulfillmentStatus, 64);
+  if (o.displayFinancialStatus !== undefined) extras.financialStatus = text(o.displayFinancialStatus, 64);
+  if (Array.isArray(o.discountCodes)) extras.discountCodes = o.discountCodes.flatMap((c) => text(c, 100) ?? []).slice(0, 20);
+  if (Array.isArray(o.lineItems)) {
+    const lines = new Map<string, ShopOrderLineRow>();
+    let skipped = 0;
+    for (const l of o.lineItems.slice(0, 250)) {
+      const row = mapLine(l, currency);
+      if (!row) skipped++;
+      else if (!lines.has(row.lineShopifyId)) lines.set(row.lineShopifyId, row);
+    }
+    extras.lines = [...lines.values()];
+    extras.lineItemsTruncated = o.lineItemsTruncated === true || skipped > 0 || o.lineItems.length > 250;
+  }
+  return extras;
+}
+
 /**
  * An AskCart order (the same fields, money without the shopMoney wrapper) as a ShopOrder row, through mapOrder; null
  * when it lacks what a row needs (id, dates, subtotal, total), so the caller stops cleanly instead of crashing.
@@ -179,7 +258,7 @@ export function mapAskCartOrder(o: AskCartOrder): ShopOrderRow | null {
   const subtotal = shopMoney(o?.currentSubtotalPriceSet);
   const total = shopMoney(o?.currentTotalPriceSet);
   if (!subtotal || !total || !o.id || !o.processedAt || !o.updatedAt) return null;
-  return mapOrder({
+  const row = mapOrder({
     ...o,
     currentSubtotalPriceSet: subtotal,
     currentTotalDiscountsSet: shopMoney(o.currentTotalDiscountsSet),
@@ -191,6 +270,7 @@ export function mapAskCartOrder(o: AskCartOrder): ShopOrderRow | null {
       return priceSet ? [{ priceSet }] : [];
     }),
   });
+  return { ...row, ...askCartExtras(o, row.currency) };
 }
 
 /**

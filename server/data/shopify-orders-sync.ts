@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { IntegrationConnection } from "@prisma/client";
+import { Prisma, type IntegrationConnection } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
 import { accessToken, markReconnect } from "@/server/services/connections";
@@ -26,6 +26,13 @@ const PAGE = 100;
  * `unnest` of per-column arrays fails on cancelledAt/sourceName). Amounts go as exact decimal strings (string or
  * Prisma.Decimal in); timestamps as UTC instants, stored as the UTC wall time (Prisma's `timestamp(3)` convention).
  * An older read never overwrites a newer one (two overlapping runs), so a row always holds its latest update.
+ *
+ * AskCart's optional fields: a status, the discount codes or the truncated flag left out of a read keeps the stored
+ * value (merged from the stored row in the SELECT, since ON CONFLICT can't see what was sent). Caveat: a status that
+ * really went back to null keeps its old value. When an order of the page came with line items, the page runs as one
+ * transaction: the upsert returns the orders it actually wrote (inserted, or not older than stored) and only those
+ * orders' lines are replaced (delete, then insert), so a stale read never replaces newer lines and an order read
+ * without line items keeps its lines. The order row's lock serialises two runs replacing the same order's lines.
  */
 export async function upsertOrders(scope: { workspaceId: string; brandId: string; connectionId: string }, rows: ShopOrderRow[]) {
   if (!rows.length) return 0;
@@ -34,24 +41,67 @@ export async function upsertOrders(scope: { workspaceId: string; brandId: string
     test: r.test, currency: r.currency, net_sales: String(r.netSales), discounts: String(r.discounts), shipping: String(r.shipping),
     taxes: String(r.taxes), taxes_included: r.taxesIncluded, total: String(r.total), refunded: String(r.refunded),
     source_name: r.sourceName, shopify_updated_at: r.shopifyUpdatedAt.toISOString(),
+    // undefined → left out of the JSON → NULL → the stored value is kept
+    fulfillment_status: r.fulfillmentStatus, financial_status: r.financialStatus, discount_codes: r.discountCodes,
+    line_items_truncated: r.lines ? (r.lineItemsTruncated ?? false) : undefined,
   })));
-  return prisma.$executeRaw`
+  const upsert = Prisma.sql`
     INSERT INTO "ShopOrder" ("id", "workspaceId", "brandId", "connectionId", "shopifyId", "name", "processedAt", "cancelledAt", "test",
-      "currency", "netSales", "discounts", "shipping", "taxes", "taxesIncluded", "total", "refunded", "sourceName", "shopifyUpdatedAt", "updatedAt")
+      "currency", "netSales", "discounts", "shipping", "taxes", "taxesIncluded", "total", "refunded", "sourceName", "shopifyUpdatedAt",
+      "fulfillmentStatus", "financialStatus", "discountCodes", "lineItemsTruncated", "updatedAt")
     SELECT u.id, ${scope.workspaceId}, ${scope.brandId}, ${scope.connectionId}, u.shopify_id, u.name,
       u.processed_at AT TIME ZONE 'UTC', u.cancelled_at AT TIME ZONE 'UTC', u.test, u.currency, u.net_sales, u.discounts,
-      u.shipping, u.taxes, u.taxes_included, u.total, u.refunded, u.source_name, u.shopify_updated_at AT TIME ZONE 'UTC', now()
+      u.shipping, u.taxes, u.taxes_included, u.total, u.refunded, u.source_name, u.shopify_updated_at AT TIME ZONE 'UTC',
+      COALESCE(u.fulfillment_status, s."fulfillmentStatus"), COALESCE(u.financial_status, s."financialStatus"),
+      COALESCE(u.discount_codes, s."discountCodes", ARRAY[]::text[]), COALESCE(u.line_items_truncated, s."lineItemsTruncated", false), now()
     FROM jsonb_to_recordset(${page}::jsonb) AS u(id text, shopify_id text, name text, processed_at timestamptz, cancelled_at timestamptz,
       test boolean, currency text, net_sales numeric, discounts numeric, shipping numeric, taxes numeric, taxes_included boolean,
-      total numeric, refunded numeric, source_name text, shopify_updated_at timestamptz)
+      total numeric, refunded numeric, source_name text, shopify_updated_at timestamptz, fulfillment_status text,
+      financial_status text, discount_codes text[], line_items_truncated boolean)
+    LEFT JOIN "ShopOrder" s ON s."brandId" = ${scope.brandId} AND s."shopifyId" = u.shopify_id
+    WHERE true
     ON CONFLICT ("brandId", "shopifyId") DO UPDATE SET
       "connectionId" = EXCLUDED."connectionId", "name" = EXCLUDED."name", "processedAt" = EXCLUDED."processedAt",
       "cancelledAt" = EXCLUDED."cancelledAt", "test" = EXCLUDED."test", "currency" = EXCLUDED."currency",
       "netSales" = EXCLUDED."netSales", "discounts" = EXCLUDED."discounts", "shipping" = EXCLUDED."shipping",
       "taxes" = EXCLUDED."taxes", "taxesIncluded" = EXCLUDED."taxesIncluded", "total" = EXCLUDED."total",
       "refunded" = EXCLUDED."refunded", "sourceName" = EXCLUDED."sourceName", "shopifyUpdatedAt" = EXCLUDED."shopifyUpdatedAt",
+      "fulfillmentStatus" = EXCLUDED."fulfillmentStatus", "financialStatus" = EXCLUDED."financialStatus",
+      "discountCodes" = EXCLUDED."discountCodes", "lineItemsTruncated" = EXCLUDED."lineItemsTruncated",
       "updatedAt" = now()
     WHERE "ShopOrder"."shopifyUpdatedAt" <= EXCLUDED."shopifyUpdatedAt"`;
+  const withLines = rows.filter((r) => r.lines);
+  // No line items on this page (the pasted-token path, or an AskCart that doesn't send them): one statement, as before.
+  if (!withLines.length) return prisma.$executeRaw(upsert);
+
+  const lines = JSON.stringify(withLines.flatMap((r) => r.lines!.map((l) => ({
+    id: randomUUID(), order_id: r.shopifyId, line_id: l.lineShopifyId, product_id: l.productId, variant_id: l.variantId, title: l.title,
+    variant_title: l.variantTitle, sku: l.sku, quantity: l.quantity, current_quantity: l.currentQuantity, unit_price: l.unitPrice,
+    discounted_total: l.discountedTotal, currency: l.currency,
+  }))));
+  const sent = new Set(withLines.map((r) => r.shopifyId));
+  return prisma.$transaction(async (tx) => {
+    const won = (await tx.$queryRaw<{ shopifyId: string }[]>`${upsert} RETURNING "shopifyId"`).map((r) => r.shopifyId);
+    const replace = won.filter((id) => sent.has(id));
+    if (replace.length) {
+      await tx.$executeRaw`DELETE FROM "ShopOrderLine" WHERE "brandId" = ${scope.brandId} AND "orderShopifyId" = ANY(${replace}::text[])`;
+      // ON CONFLICT covers a line id that moved to another order (Shopify doesn't; without it the whole page would fail).
+      await tx.$executeRaw`
+        INSERT INTO "ShopOrderLine" ("id", "workspaceId", "brandId", "orderShopifyId", "lineShopifyId", "productId", "variantId", "title",
+          "variantTitle", "sku", "quantity", "currentQuantity", "unitPrice", "discountedTotal", "currency")
+        SELECT l.id, ${scope.workspaceId}, ${scope.brandId}, l.order_id, l.line_id, l.product_id, l.variant_id, l.title, l.variant_title,
+          l.sku, l.quantity, l.current_quantity, l.unit_price, l.discounted_total, l.currency
+        FROM jsonb_to_recordset(${lines}::jsonb) AS l(id text, order_id text, line_id text, product_id text, variant_id text, title text,
+          variant_title text, sku text, quantity int, current_quantity int, unit_price numeric, discounted_total numeric, currency text)
+        WHERE l.order_id = ANY(${replace}::text[])
+        ON CONFLICT ("brandId", "lineShopifyId") DO UPDATE SET
+          "orderShopifyId" = EXCLUDED."orderShopifyId", "productId" = EXCLUDED."productId", "variantId" = EXCLUDED."variantId",
+          "title" = EXCLUDED."title", "variantTitle" = EXCLUDED."variantTitle", "sku" = EXCLUDED."sku", "quantity" = EXCLUDED."quantity",
+          "currentQuantity" = EXCLUDED."currentQuantity", "unitPrice" = EXCLUDED."unitPrice",
+          "discountedTotal" = EXCLUDED."discountedTotal", "currency" = EXCLUDED."currency"`;
+    }
+    return won.length;
+  });
 }
 
 export async function syncShopifyOrders(

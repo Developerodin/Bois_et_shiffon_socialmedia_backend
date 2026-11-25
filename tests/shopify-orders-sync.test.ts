@@ -4,16 +4,21 @@ const m = vi.hoisted(() => ({
   fetchOrders: vi.fn(),
   fetchAskCartOrders: vi.fn(),
   executeRaw: vi.fn(async () => 0),
+  queryRaw: vi.fn(async (): Promise<{ shopifyId: string }[]> => []),
   markReconnect: vi.fn(async () => undefined),
 }));
 vi.mock("@/server/data/shopify-orders", async (orig) => ({ ...(await orig<object>()), fetchOrders: m.fetchOrders, fetchAskCartOrders: m.fetchAskCartOrders }));
 vi.mock("@/server/shopify/askcart-token", () => ({ askCartToken: async () => "askcart_token" }));
-vi.mock("@/server/db/prisma", () => ({ prisma: { $executeRaw: m.executeRaw } }));
+vi.mock("@/server/db/prisma", () => {
+  const prisma = { $executeRaw: m.executeRaw, $queryRaw: m.queryRaw, $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)) };
+  return { prisma };
+});
 vi.mock("@/server/services/connections", async (orig) => ({ ...(await orig<object>()), accessToken: async () => "shpat_secret", markReconnect: m.markReconnect }));
 
-import type { IntegrationConnection } from "@prisma/client";
+import { Prisma, type IntegrationConnection } from "@prisma/client";
 import type { ShopOrderRow } from "@/server/data/shopify-orders";
-import { FIRST_RUN_DAYS, syncShopifyOrders } from "@/server/data/shopify-orders-sync";
+import { FIRST_RUN_DAYS, syncShopifyOrders, upsertOrders } from "@/server/data/shopify-orders-sync";
+import { prisma } from "@/server/db/prisma";
 import { parseRange } from "@/shared";
 import { ReconnectNeeded } from "@/server/services/connections";
 import { ASKCART_KEY_REFUSED } from "@/server/shopify/askcart";
@@ -77,6 +82,56 @@ describe("syncShopifyOrders", () => {
     m.fetchAskCartOrders.mockRejectedValueOnce(new ReconnectNeeded("AskCart 401 unauthorized"));
     await expect(syncShopifyOrders(askCart, now)).rejects.toBeInstanceOf(ReconnectNeeded);
     expect(m.markReconnect).toHaveBeenCalledWith("c2", ASKCART_KEY_REFUSED);
+  });
+});
+
+describe("upsertOrders: AskCart line items", () => {
+  const scope = { workspaceId: "w", brandId: "b", connectionId: "c1" };
+  const line = (id: string) => ({
+    lineShopifyId: `gid://shopify/LineItem/${id}`, productId: null, variantId: null, title: "Oak", variantTitle: null, sku: null,
+    quantity: 1, currentQuantity: 1, unitPrice: "10.00", discountedTotal: "10.00", currency: "EUR",
+  });
+  // A raw call as one Prisma.Sql: a tagged template's (strings, ...values), or a prebuilt Sql passed as is.
+  const sqlOf = (call: unknown[]) => (Array.isArray(call[0]) ? Prisma.sql(call[0] as unknown as TemplateStringsArray, ...call.slice(1)) : (call[0] as Prisma.Sql));
+  const pageOf = (call: unknown[]) => JSON.parse(sqlOf(call).values.find((v): v is string => typeof v === "string" && v.startsWith("[{"))!);
+
+  it("a page without line items is one statement, as before, with no line writes and the optional fields left out", async () => {
+    await upsertOrders(scope, [order(1), order(2)]);
+    expect(m.executeRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(m.queryRaw).not.toHaveBeenCalled();
+    const sql = JSON.stringify(m.executeRaw.mock.calls[0]);
+    expect(sql).not.toContain("ShopOrderLine");
+    // left out of the JSON → NULL → COALESCE keeps the stored value
+    for (const k of ["fulfillment_status", "discount_codes", "line_items_truncated"]) expect(pageOf(m.executeRaw.mock.calls[0])[0]).not.toHaveProperty(k);
+  });
+
+  it("replaces lines only for the orders the upsert actually wrote, in one transaction", async () => {
+    m.queryRaw.mockResolvedValueOnce([{ shopifyId: "gid://shopify/Order/1" }, { shopifyId: "gid://shopify/Order/3" }]);
+    const written = await upsertOrders(scope, [
+      { ...order(1), lines: [line("a"), line("b")], lineItemsTruncated: false, discountCodes: ["XMAS"] },
+      // older than stored: the upsert doesn't return it, so its lines stay as they are
+      { ...order(2), lines: [line("c")] },
+      // sent without line items: written, but its lines are kept
+      order(3),
+    ]);
+    expect(written).toBe(2);
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(sqlOf(m.queryRaw.mock.calls[0]).sql).toMatch(/RETURNING "shopifyId"$/);
+    expect(pageOf(m.queryRaw.mock.calls[0])[0]).toMatchObject({ discount_codes: ["XMAS"], line_items_truncated: false });
+    const [del, ins] = m.executeRaw.mock.calls as unknown as unknown[][];
+    expect(sqlOf(del).sql).toContain('DELETE FROM "ShopOrderLine"');
+    expect(sqlOf(ins).sql).toContain('INSERT INTO "ShopOrderLine"');
+    expect(pageOf(ins).map((l: { line_id: string }) => l.line_id)).toEqual(["gid://shopify/LineItem/a", "gid://shopify/LineItem/b", "gid://shopify/LineItem/c"]);
+    // Only order 1 is replaced: order 2 lost to a newer row, order 3 sent no lines.
+    expect(sqlOf(del).values).toContainEqual(["gid://shopify/Order/1"]);
+    expect(sqlOf(ins).values).toContainEqual(["gid://shopify/Order/1"]);
+  });
+
+  it("writes no lines when the upsert wrote none of the orders that carried them", async () => {
+    m.queryRaw.mockResolvedValueOnce([]);
+    await upsertOrders(scope, [{ ...order(1), lines: [line("a")] }]);
+    expect(m.executeRaw).not.toHaveBeenCalled();
   });
 });
 
