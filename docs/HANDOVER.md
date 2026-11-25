@@ -1655,3 +1655,55 @@ functional brief against the code (built, partial or missing). Use it to pick th
   - At most 100 lines per order come from AskCart.
   - Re-reading incomplete orders costs re-reading up to a day of orders per run while one is pending.
 - **SQL checks:** the SQL was run against PGlite (Postgres in WASM, every migration applied) from a scratch harness; it is not committed. `npm run test:db` needs a throwaway `TEST_DATABASE_URL` and wasn't run.
+
+## End of day 2026-11-25: Shopify live, review findings and chat tools for tomorrow
+
+**Live today**
+- Pushed: server `main` 1e88c88, web `main` 6fac0e3. EC2 env set (server `ASKCART_URL`/`ASKCART_SECRET`; web `WEB_FEATURES=tasks,data,sales,ads`, no `crm` so Quotes stays hidden).
+- AskCart EC2: `PARTNER_STORE_DOMAIN=687541-22.myshopify.com` (the store's permanent handle; `boisandchiffons.myshopify.com` is only an alias and gave 503 store_not_connected). `/shop`, `/products`, `/orders` all 200.
+- Orders sync turned on from Performance → Sales: first run stored 969 orders / 1205 lines in ~2 min (some older orders came in because they were updated in the last 60 days).
+- Meta Ads: `ads_read` added (Marketing API use case); both `…/integrations/meta_ads/callback` URIs in Facebook Login for Business → Settings. Not yet connected.
+- Google Business Profile: user to enable My Business Account Management + Business Information APIs, add the `…/integrations/google_business/callback` URIs, `business.manage` scope + test user, and file Google's API access request (quota starts at 0).
+
+**Local, not pushed**
+- Web `main` df13201: Custom date range on Performance (any days up to the latest complete day, max 90). Page state keeps the chosen range itself, not just its length.
+- This handover section (uncommitted).
+
+**Tomorrow 1: fix the four-lens review findings (verified by the reviewers, none fixed yet)**
+Correctness:
+1. HIGH `server/data/shopify-orders-sync.ts:270-272`: cursor held at the earliest truncated order even when the run stopped `capped`/`rate_limited`, so a busy store can pin the cursor for up to 24 h. Hold only when the run reached the end; else save `cursorEnd` and re-read truncated rows separately.
+2. MED `server/data/shopify-orders.ts:366`: `byId.set` keeps a re-read order in its first Map slot with a newer updatedAt; a deadline abort then sets `cursorEnd` too far and skips orders. `delete` before `set`, or sort by updatedAt before writing.
+3. MED web: Pulse/Surge/Hum sidebar links don't switch the tab when already on `/performance` or `/settings` (tab is `useState(initialTab)`; client state is kept on query-only navigation). Key by tab or sync from search params. The e2e test starts from /products so misses it.
+4. LOW-MED `server/shopify/askcart.ts:219-220`: `503 store_reconnect_needed` marks our connection for reconnect, but the contract says our token stays valid; treat as temporary. Give `403 insufficient_scope` its own reason (current text says "Open AskCart in Shopify admin").
+5. LOW `server/chat/tools.ts` productSales: `revenue.toFixed` throws on SQL NULL (lines with quantity 0 and no net price). COALESCE in SQL.
+Performance:
+6. Partial/rate-limited orders runs aren't re-queued until the daily sweep; queue one follow-up (keyed by cursor, capped chain) when the cursor moved.
+7. AskCart requests aren't paced to 60/min (orders and catalogue share the budget); keep ≥1.1 s between requests per token.
+8. Each chat sales tool runs `truncatedOrders` plus up to 2 queries in parallel; compute truncated once per turn, merge productSales' queries.
+Security (both low):
+9. Sales tool outputs stay readable in a saved chat after the user loses `crm.read`; blank sales tool parts on GET/history, or document as accepted.
+10. The "personal code" threshold counts orders, not customers (`sales-analysis.ts:202-206`); fix the comment or count distinct hashed customers.
+Maintainability:
+11. `salesBreakdown` by collection/vendor duplicates `topProducts` with `group`; keep one path.
+12. `BreakdownResult.basis` is unused; the tool recomputes `lineBased`.
+13. Two `useWide` hooks (1280 in assistant-state, 1024 in panel-layout); one `useMediaQuery` in lib with named wrappers.
+14. `useListSelection` relies on hand-repeated heading ids in quotes-board/blog-board; have the hook return them.
+15. `CRM_READ` in web `lib/nav.ts:26` holds `"crm.manage"`; rename `CRM_MANAGE`.
+16. `tests/chat-sales-tools.test.ts:4-5` points at handover notes; point it to `tests/db/sales-analysis.db.test.ts`.
+Docs now wrong: `schema.prisma:1756` (lineItemsTruncated "or some were unreadable"), `schema.prisma:1768` (lines "replaced as a set"), DATA_MODEL.md:380 (pasted-token defaults only on insert), :391 (net fallbacks: `quantity` when no currentQuantity, `discountedTotal ÷ quantity` when no netUnitPrice), :392-393 (lines deleted only when the order was sent whole), this file's AskCart order lines section title (merged as e832580) and its last line (the db SQL test is committed in 1e88c88).
+
+**Tomorrow 2: chat tools for the rest of the data (~30-45 min, read-only, gated like their Performance tabs)**
+The chat has sales and catalogue tools only. Add, reusing the existing read functions:
+- Meta Ads (`server/data/ads-read.ts`): spend, impressions, clicks, purchases, ROAS by day/campaign.
+- Post performance (`server/data/post-metrics-read.ts`): reach, views, likes, comments, shares, saves; best posts in a period.
+- Search Console (`server/data/search-read.ts`): clicks, impressions, position, top queries and pages.
+- Google Business Profile (`server/google/business.ts`, live reads, quota-capped): rating and recent reviews; works only once Google approves API access.
+
+**Other open items**
+- Optional: merge branch `design-doc-emptystate` (4d69e95 + 4c32c51).
+- Remove worktree `Desktop/server-fix2` (`cmd /c rmdir` its node_modules junction first, then `git worktree remove`); delete the empty locked folder `apps/server-lines` after a reboot.
+- One server unit test failed once and passed on rerun (not identified); look for a flaky timing test.
+- AskCart runs on a bare IP (13.232.66.119); an Elastic IP or a domain would stop a restart from breaking the link.
+- Orders older than 60 days need Shopify to approve `read_all_orders` for the Shop Assistant app.
+- Business Profile and the customer inbox (Instagram DMs, Messenger) are mobile-app screens only; there is no web page for them yet.
+- Naming: the sidebar main-menu item that opens the Performance *tasks* list is now "Performance tasks" (web 0dbb7f3, local); the data page `/performance` is still reached only via Surge/Pulse or "SEO & GEO reports" in More. Consider a main-menu link to it.
