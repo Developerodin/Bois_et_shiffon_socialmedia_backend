@@ -103,7 +103,7 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
       tools,
       prepareStep: ({ steps }) => {
         const active = activeTools(toolNames, { history, calls: steps.flatMap((s) => s.toolCalls.map((c) => c.toolName)), searchAsked });
-        return active ? { activeTools: active as (keyof typeof tools)[] } : undefined;
+        return active ? { activeTools: active } : undefined;
       },
       stopWhen: isStepCount(6),
       onFinish: async ({ text, totalUsage, steps }) => {

@@ -35,7 +35,7 @@ export const readsShopData = (history: UIMessage[], tools: ReadonlySet<string> =
  * never once sales figures are in (they're the more sensitive). After MAX_SALES_CALLS sales calls in a turn the sales
  * tools are off too, so a looping model can't run up queries.
  */
-export function activeTools(all: string[], turn: { history: UIMessage[]; calls: string[]; searchAsked: boolean }): string[] | undefined {
+export function activeTools<T extends string>(all: T[], turn: { history: UIMessage[]; calls: string[]; searchAsked: boolean }): T[] | undefined {
   const sales = readsShopData(turn.history, SALES_TOOLS) || turn.calls.some((c) => SALES_TOOLS.has(c));
   const shop = sales || readsShopData(turn.history) || turn.calls.some((c) => SHOP_DATA_TOOLS.has(c));
   const noSearch = sales || (shop && !turn.searchAsked);

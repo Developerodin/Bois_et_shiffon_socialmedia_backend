@@ -32,7 +32,7 @@ vi.mock("@/server/data/sales-analysis", async (orig) => ({
 }));
 
 import { chatTools } from "@/server/chat/tools";
-import { SALES_TOOLS, SHOP_DATA_TOOLS } from "@/server/chat/turn";
+import { MAX_SALES_CALLS, SALES_TOOLS, SHOP_DATA_TOOLS } from "@/server/chat/turn";
 import { chatSystemPrompt } from "@/server/chat/prompt";
 
 const scope = { workspaceId: "w1", brandId: "b1", userId: "u1" };
@@ -86,6 +86,16 @@ describe("sales tools: access and input", () => {
     const out = await run(chatTools(scope).salesSummary, {});
     expect(data.salesSummary).toHaveBeenCalledWith(scope, { from: "2026-11-02", to: "2026-12-01" });
     expect(out).toMatchObject({ from: "2026-11-02", to: "2026-12-01", note: expect.stringContaining("No orders") });
+  });
+
+  it(`allows ${MAX_SALES_CALLS} sales calls a message, even made in parallel in one step`, async () => {
+    data.salesSummary.mockResolvedValue({ currencies: [] });
+    const tools = chatTools(scope);
+    const outs = await Promise.all(Array.from({ length: MAX_SALES_CALLS + 2 }, (_, i) => run(i % 2 ? tools.salesSummary : tools.topProducts, range)));
+    expect(outs.filter((o) => o.error === "Sales tool limit reached for this message.")).toHaveLength(2);
+    expect(data.salesSummary.mock.calls.length + data.topProducts.mock.calls.length).toBe(MAX_SALES_CALLS);
+    // a new message gets a new allowance
+    expect((await run(chatTools(scope).salesSummary, range)).error).toBeUndefined();
   });
 
   it("schemas cap sizes and only take known groupings", () => {

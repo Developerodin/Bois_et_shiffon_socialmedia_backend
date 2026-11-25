@@ -8,6 +8,7 @@ import {
 } from "@/server/data/sales-analysis";
 import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
 import { addDays, badRangeDetail, brandTimeZone, rangeDays, zoneToday } from "@/server/data/sources";
+import { MAX_SALES_CALLS } from "@/server/chat/turn";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
@@ -42,6 +43,8 @@ const NEEDS_LINES =
   "Per-product sales need order line items, which only come through the AskCart connection once AskCart sends them; none are stored for this brand yet. salesSummary and salesBreakdown still work from order totals.";
 const LINE_NOTE =
   "From order line items: units and revenue are net of refunds, revenue after every discount (order-level share included). Lines without a product (custom lines, deleted products) are 'Other / custom items'.";
+const SALES_LIMIT = { error: "Sales tool limit reached for this message." };
+const WEEKS_NOTE = "Weeks start on Monday and are labelled by that day; the first and last weeks can be partial.";
 /** stockRisk flags a best seller with less stock than this many days of its average sales. */
 const LOW_COVER_DAYS = 14;
 /** A shop text cell (SKU and the like) cleaned like a title; null stays null. */
@@ -59,6 +62,14 @@ export function chatTools(scope: ChatScope) {
   let perms: Promise<Set<string>> | undefined;
   const can = async (p: string) => (await (perms ??= effectivePermissions(scope.workspaceId, scope.userId, scope.brandId))).has(p);
   const denied = (what: string) => ({ error: `Your role can't see ${what}.` });
+  // Sales tools: crm.read, and at most MAX_SALES_CALLS calls per message (one chatTools per message). Counted here as
+  // well as by the route's activeTools, which can't stop several calls made in parallel within one step.
+  let salesCalls = 0;
+  const salesGate = async () => {
+    if (!(await can("crm.read"))) return denied("sales");
+    if (++salesCalls > MAX_SALES_CALLS) return SALES_LIMIT;
+    return null;
+  };
   // The sales tools' period: both days given (validated like the Sales tab's), or the last 30 brand-local days.
   const rangeOf = async ({ from, to }: { from?: string; to?: string }): Promise<DateRange | null> => {
     if (from || to) return parseRange(from, to, MAX_SALES_DAYS);
@@ -288,7 +299,8 @@ export function chatTools(scope: ChatScope) {
         "Shop sales totals for a period (brand-local days, default the last 30 days): orders, gross, discounts, net sales, total, refunded per currency, with the same-length previous period to compare; daily rows when the period is 31 days or less. Start any sales question or report here.",
       inputSchema: SalesRange,
       execute: async (input) => {
-        if (!(await can("crm.read"))) return denied("sales");
+        const refused = await salesGate();
+        if (refused) return refused;
         const range = await rangeOf(input);
         if (!range) return BAD_RANGE;
         const { currencies } = await salesSummary(scope, range);
@@ -316,17 +328,21 @@ export function chatTools(scope: ChatScope) {
         limit: z.number().int().min(1).max(MAX_ANALYSIS_ROWS).default(MAX_ANALYSIS_ROWS),
       }),
       execute: async ({ by, limit, ...input }) => {
-        if (!(await can("crm.read"))) return denied("sales");
+        const refused = await salesGate();
+        if (refused) return refused;
         const range = await rangeOf(input);
         if (!range) return BAD_RANGE;
-        const { basis, columns, rows, moreGroups } = await salesBreakdown(scope, range, by, limit);
-        const lines = basis === "lines";
-        if (lines && !rows.length && !(await hasOrderLines(scope))) return { ...range, by, note: NEEDS_LINES };
+        const lineBased = by === "collection" || by === "vendor";
+        const [{ columns, rows, moreGroups }, truncated] = await Promise.all([
+          salesBreakdown(scope, range, by, limit),
+          lineBased ? truncatedNote(range) : Promise.resolve([]),
+        ]);
+        if (lineBased && !rows.length && !(await hasOrderLines(scope))) return { ...range, by, note: NEEDS_LINES };
         const notes = [
           ...(moreGroups ? [`${moreGroups} more groups not shown (each currency shows its top ones${TIME_BREAKDOWNS.includes(by) ? ", the most recent" : ""}).`] : []),
-          ...(by === "week" ? ["Weeks start on Monday and are labelled by that day; the first and last weeks can be partial."] : []),
+          ...(by === "week" ? [WEEKS_NOTE] : []),
           ...(by === "fulfillmentStatus" || by === "financialStatus" || by === "discountCode" ? ["Only orders read through AskCart carry statuses and codes; older ones show (not sent) / (none)."] : []),
-          ...(lines ? [LINE_NOTE, ...(await truncatedNote(range))] : []),
+          ...(lineBased ? [LINE_NOTE, ...truncated] : []),
         ];
         return { ...range, by, columns, rows: rows.map(([key, ...rest]) => [cleanTitle(String(key)), ...rest]), ...(notes.length && { notes }) };
       },
@@ -341,10 +357,11 @@ export function chatTools(scope: ChatScope) {
         limit: z.number().int().min(1).max(25).default(10),
       }),
       execute: async ({ rankBy, group, limit, ...input }) => {
-        if (!(await can("crm.read"))) return denied("sales");
+        const refused = await salesGate();
+        if (refused) return refused;
         const range = await rangeOf(input);
         if (!range) return BAD_RANGE;
-        const { rows, moreGroups } = await topProducts(scope, range, rankBy, group, limit);
+        const [{ rows, moreGroups }, truncated] = await Promise.all([topProducts(scope, range, rankBy, group, limit), truncatedNote(range)]);
         if (!rows.length) return { ...range, rankBy, group, note: (await hasOrderLines(scope)) ? "No products sold in this period." : NEEDS_LINES };
         return {
           ...range,
@@ -352,7 +369,7 @@ export function chatTools(scope: ChatScope) {
           group,
           columns: [group, "currency", "units", "revenue", "orders"],
           rows: rows.map(([name, ...rest]) => [cleanTitle(String(name)), ...rest]),
-          notes: [...(moreGroups ? [`${moreGroups} more not shown.`] : []), LINE_NOTE, ...(await truncatedNote(range))],
+          notes: [...(moreGroups ? [`${moreGroups} more not shown.`] : []), LINE_NOTE, ...truncated],
         };
       },
     }),
@@ -362,10 +379,11 @@ export function chatTools(scope: ChatScope) {
         "How one product (or every product, without q) is selling: its variants matching the title/SKU text with net units, net revenue, current price and stock, plus weekly units and revenue over the period. Use for 'how is X selling'.",
       inputSchema: SalesRange.extend({ q: z.string().max(100).default("") }),
       execute: async ({ q, ...input }) => {
-        if (!(await can("crm.read"))) return denied("sales");
+        const refused = await salesGate();
+        if (refused) return refused;
         const range = await rangeOf(input);
         if (!range) return BAD_RANGE;
-        const { variants, weeks } = await productSales(scope, range, q.trim());
+        const [{ variants, weeks }, truncated] = await Promise.all([productSales(scope, range, q.trim()), truncatedNote(range)]);
         if (!variants.length) {
           if (!(await hasOrderLines(scope))) return { ...range, q, note: NEEDS_LINES };
           return { ...range, q, note: "Nothing matching sold in this period. findProducts shows whether it is in the catalogue." };
@@ -381,7 +399,7 @@ export function chatTools(scope: ChatScope) {
             ]),
           },
           weeks: { columns: ["weekStarting", "currency", "units", "revenue"], rows: weeks.map((w) => [w.week, w.currency, w.units, w.revenue.toFixed(2)]) },
-          notes: [LINE_NOTE, "Weeks start on Monday; the first and last can be partial.", ...(await truncatedNote(range))],
+          notes: [LINE_NOTE, WEEKS_NOTE, ...truncated],
         };
       },
     }),
@@ -391,10 +409,11 @@ export function chatTools(scope: ChatScope) {
         "Stock against sales: the period's best sellers (by net units) with current stock and estimated days of cover (stock ÷ average daily units), lowest cover first, flagging sold-out best sellers; plus slow movers (in stock, few sales for the stock held). Use for restock and clearance advice.",
       inputSchema: SalesRange.extend({ limit: z.number().int().min(1).max(MAX_RISK_ROWS).default(20) }),
       execute: async ({ limit, ...input }) => {
-        if (!(await can("crm.read"))) return denied("sales");
+        const refused = await salesGate();
+        if (refused) return refused;
         const range = await rangeOf(input);
         if (!range) return BAD_RANGE;
-        const { sellers, slow } = await stockRisk(scope, range, limit);
+        const [{ sellers, slow }, truncated] = await Promise.all([stockRisk(scope, range, limit), truncatedNote(range)]);
         if (!sellers.length) return { ...range, note: (await hasOrderLines(scope)) ? "No products sold in this period." : NEEDS_LINES };
         const n = rangeDays(range);
         const rows = sellers.map((s) => {
@@ -414,7 +433,7 @@ export function chatTools(scope: ChatScope) {
           },
           notes: [
             `Stock is the catalogue's last sync; low cover = under ${LOW_COVER_DAYS} days; daysOfCover null = stock not tracked, or no sales (slow movers).`,
-            ...(await truncatedNote(range)),
+            ...truncated,
           ],
         };
       },

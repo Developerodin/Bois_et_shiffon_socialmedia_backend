@@ -37,7 +37,9 @@ const netSales = (a: string) =>
 /** A variant's key: its id; a deleted variant of a live product, the product; a line without a product, OTHER_ITEMS. */
 const VARIANT_KEY = Prisma.sql`COALESCE(l."variantId", 'product:' || l."productId", '(other)')`;
 const PRODUCT_KEY = Prisma.sql`COALESCE(l."productId", '(other)')`;
+/** Needs `l` from countedLines (its p_* columns). */
 const VENDOR_KEY = Prisma.sql`CASE WHEN l.p_id IS NULL THEN '(not in catalogue)' ELSE COALESCE(l.p_vendor, '(no vendor)') END`;
+/** Needs `l` from countedLines and `c` from COLLECTION_JOIN. */
 const COLLECTION_KEY = Prisma.sql`CASE WHEN l.p_id IS NULL THEN '(not in catalogue)' ELSE COALESCE(c.title, '(no collection)') END`;
 /** The line's product's collection titles, each once (two collections with one title count once). */
 const COLLECTION_JOIN = Prisma.sql`LEFT JOIN LATERAL (
