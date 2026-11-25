@@ -55,15 +55,15 @@ Loaded via `next/font` in `app/layout.tsx`.
 ## 4. Spacing & layout
 
 - Base unit: 4px (`space-1`); radius token `--radius: 1rem` (`rounded-2xl` for cards and controls)
-- Shell: sidebar `232px`, top bar `72px` (`h-18`), assistant panel on the right from `xl`
+- Shell: sidebar `232px` docked from `xl` (below that it opens in a sheet from the top bar's Menu button, which closes itself if the window grows past `xl`), top bar `72px` (`h-18`), assistant panel docked on the right from `xl` (see §10)
 - **Languages** (`components/languages/languages.tsx`): `LanguageSelects` (team working language + post language, used by Settings → Languages and the run dialog), `LanguageDialog` (asked once before a first run; mounted in the shell next to the paywall dialog), `TranslateToggle` (ghost "Translate" button; while shown, "Machine translation" + "Show original").
-- **Assistant panel** (`components/shell/assistant-panel.tsx`): a card (`rounded-2xl border bg-card shadow-sm`) set `12px` off the edges; docked it sits under the top bar, which spans the page and the panel, so its controls reach the right edge. Expanded: `w-[min(56rem,100vw)]` over the scrim, conversation in a `max-w-3xl` column; a `w-80` spacer keeps the docked column's place.
+- **Assistant panel** (`components/shell/assistant-panel.tsx`): a card (`rounded-2xl border bg-card shadow-sm`) set `12px` off the edges; docked it sits under the top bar, which spans the page and the panel, so its controls reach the right edge. Docked column: `xl:w-80 2xl:w-96` (`COLUMN_W`, applied only when docked and not expanded). Below `xl`, and on pages that don't dock it (`undocksAssistant`), it is a drawer opened from the top bar: full screen below `sm` (no inset, no card border or radius), `w-96` from `sm`. Expanded: `w-[min(56rem,100vw)]` over the scrim, conversation in a `max-w-3xl` column; a spacer with `COLUMN_W` keeps the docked column's place. As an overlay (drawer, phone sheet or expanded) Tab and Shift+Tab cycle inside it; Escape closes it and focus returns to the toggle. Its title truncates with a `title` tooltip rather than wrapping; header buttons are `size-9`, `pointer-coarse:size-11`.
 - Non-Overview pages: `p-4 sm:p-6` inside the main area (top bar `sm:px-6` to match), `gap-5` between page blocks, document cards `p-5 sm:p-6`
 - **`PageSection`** (`components/ui/page-section.tsx`) is the section card on those pages: `rounded-2xl border border-border bg-card shadow-sm`, `px-5` inset, `text-lg` title, optional description and actions; lists inside run edge to edge. A header-only section (no children) sits above an `EmptyState` or error shown outside the card, never a card in a card. The admin console alone uses its own flat (no card) `Section` (`components/admin/ui.tsx`).
 - **Overview panels** (`components/workspace/panel-layout.tsx`): each panel is a card (`rounded-2xl border bg-card shadow-sm`) on `--background`, `12px` (`gap-3` / `p-3`) between cards. The gap between columns is the resize handle; its line shows only on hover or focus. A column whose panels are all collapsed shrinks to `15rem`.
 - **Inside a panel:** one inset for everything, `px-5`. Sections are separated by spacing (`py-4`), not divider lines; list rows that need edge-to-edge hover use `-mx-2 px-2`.
 - Icon tiles: agent and task icons sit on `bg-accent` tiles (`size-8 rounded-lg` in rows, `size-12 rounded-xl` in the agent grid).
-- **Touch size:** controls reach 44 px on touch screens through `Button` itself (`size="sm"` gets `pointer-coarse:h-11`, `size="icon"` gets `pointer-coarse:size-11`); do not add per-site `pointer-coarse:` classes to a `Button`. Raw `<button>`/`<select>` elements add their own `pointer-coarse:` size. `rounded-xl` (12 px) is for boxes inside `rounded-2xl` cards.
+- **Touch size:** controls reach 44 px on touch screens through `Button` itself (`size="sm"` gets `pointer-coarse:h-11`, `size="icon"` gets `pointer-coarse:size-11`); do not add per-site `pointer-coarse:` classes to a `Button`. Raw `<button>`/`<select>` elements add their own `pointer-coarse:` size. Menu items (`DropdownMenuItem`, checkbox and radio items) get `pointer-coarse:min-h-11` in `components/ui/dropdown-menu.tsx`. Sidebar rows are shorter with a mouse (`h-10` nav, `h-11` agents) and keep `pointer-coarse:h-12` / `h-[52px]`. `rounded-xl` (12 px) is for boxes inside `rounded-2xl` cards.
 - **Disabled buttons:** a disabled button never shows its tooltip, so give the reason as visible text (a muted `text-xs` line) and link it with `aria-describedby`; never `title` alone.
 - Max content width for reading: `max-w-3xl` (brief editor); dashboards `max-w-7xl`
 
@@ -140,7 +140,7 @@ A `History` tool button "Recent" (label hidden below `sm`) beside Layout, in the
 | `PageSection` | Titled section card with `px-5` inset (`components/ui/page-section.tsx`) |
 | `StatusBadge` | Maps workflow enums to a tone and label (`components/ui/status-badge.tsx`; the one status-to-tone map is `lib/status.ts`, text on tints uses the `-ink` tokens) |
 | `JobProgress` | Step list and progress bar for a long job, with slow and failed notices (`components/ui/job-progress.tsx`; used by the photoshoot, which keeps it mounted after the job ends so the end is announced; the reel's Video step unmounts it at the end instead, and the page's live region announces the end) |
-| `CreditsChip` | Top-bar balance chip with a popover (`components/shell/credits-chip.tsx`); paid buttons show their price from the server, unlimited workspaces show none |
+| `CreditsChip` | Top-bar balance chip with a popover (`components/shell/credits-chip.tsx`); paid buttons show their price from the server, unlimited workspaces show none. Hidden below `xl` (`className`), where the top bar's More menu opens the same popover (`CREDITS_POPOVER_ID`, `tabIndex -1`) and focuses it, returning focus to More when it closes |
 | `PaywallDialog` | Opens on a recognisable 402 (`components/shell/paywall-dialog.tsx`, state in `lib/paywall.ts`) |
 | `LibraryPicker` | Photo chooser for features that start from the library: `onUse(photo: LibraryPhoto)`, `children` for feature-specific text (`components/library/library-picker.tsx`; used by the photoshoot's source and garment rows) |
 | `PhotoGrid` / `SourceSwitch` | Library photo grid with keyboard selection, and the switch between uploads and generated photos (`components/library/photo-grid.tsx`, `library-board.tsx`); `SourceSwitch` is a thin wrapper over `SegmentedRadios`. In pick mode the chosen tile has a primary border and a check badge; keyboard focus is a separate `ring-2 ring-ring` |
@@ -192,9 +192,17 @@ A `History` tool button "Recent" (label hidden below `sm`) beside Layout, in the
 
 | Breakpoint | Behavior |
 |------------|----------|
-| `< md` (below 768 px) | No sidebar; it opens in a sheet from the Menu button; stack filters |
-| `md+` | Sidebar visible |
-| `lg+` | Two-column studio (editor + preview) |
+| `< sm` (below 640 px) | Breadcrumb for screen readers only (pages have their own heading); top-bar tools are icons; the assistant is a full-screen sheet; connection rows stack (description, then action) |
+| `sm`–`xl` | Assistant drawer `w-96` from the top bar |
+| `< md` (below 768 px) | Stack filters; breadcrumb still screen-reader only |
+| `md+` | Page title in the breadcrumb |
+| `< lg` (below 1024 px) | Menu and assistant buttons are icon-only |
+| `lg+` | Two-column studio (editor + preview); Menu and assistant labels; the Overview's Layout menu |
+| `< xl` (below 1280 px) | No docked sidebar: it opens in a sheet from the Menu button; Credits and Logs sit in the top bar's More menu; the assistant is a drawer |
+| `xl+` | Sidebar docked; business name in the breadcrumb; Credits and Logs in the top bar; assistant docked at `w-80` on pages that dock it |
+| `2xl+` | Docked assistant `w-96` |
+
+Top-bar budget: at 390 px the Overview's row (Menu, Search, New, bell, Recent, More, assistant) is seven 44 px icons with 4 px gaps inside 358 px. Adding a top-bar tool means checking 390, 640, 1024 and 1280 again (`components/shell/top-bar.tsx`).
 
 ---
 
