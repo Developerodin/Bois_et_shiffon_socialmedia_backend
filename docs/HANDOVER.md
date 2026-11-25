@@ -1631,3 +1631,27 @@ functional brief against the code (built, partial or missing). Use it to pick th
 - Checks before merge: server tsc, 1830 unit tests, 317 DB tests (throwaway `sma-testdb`, port 55432); web tsc, 675 tests, eslint; mobile tsc. All clean.
 - `phase-3-crm` merged to main in server, web and mobile. Not pushed.
 - **Still open:** `npx prisma migrate deploy` on the dev DB (owner's OK): `20261125135000_oauth_state_pkce`, `20261125142000_quote_valid_from_send`, `20261125143000_brand_quote_currency`. Shopify MCP live check with our own profile (needs a public https `UCP_PROFILE_URL`). The web quote form still asks for a currency each time for brands without a Shopify catalogue; the server uses the saved one and refuses another, but the form doesn't show it yet. Leftover double blank line in `server/blog/shopify-articles.ts`.
+
+## AskCart order lines and the chat's sales tools (branch `askcart-order-lines`, 2026-11-25)
+- **What it adds:** order line items, order statuses and discount codes from AskCart, product vendor, tags and collections, and five read-only sales tools for the CMO chat.
+- **Migration:** `20261125150000_shop_order_lines`. It is already applied to the dev DB, which production shares. It adds `ShopOrderLine`, four `ShopOrder` columns, three `Product` columns, a `SET lock_timeout='5s'`, a nullable line `title` and `netUnitPrice`. Never edit it again; any later change needs a new migration.
+- **Depends on AskCart `3e05bfc` being deployed** (its final partner contract). Until then orders come without line items. Nothing breaks: the per-product tools say line items aren't available yet, and order totals work as before.
+- **Backfill once AskCart is redeployed:** `npm run reset:shopify-orders -- <brandId>` (`scripts/reset-shopify-orders.ts`). It clears the orders source's cursor, so the next run re-reads 60 days. It is safe to repeat and doesn't start a run (use the daily sync or Sync now).
+- **Sync behaviour:**
+  - AskCart pages are 25 orders. A page cut short with `rateLimited` waits its Retry-After (up to 30 s, inside the 3-minute cap) and resumes from the cursor.
+  - A run reads up to 200 pages (about 5,000 orders).
+  - An order whose lines came incomplete (`lineItemsTruncated`, fewer than 100 lines stored, updated in the last 24 h) holds the cursor so it is read again.
+  - A product sent with `variantsTruncated` stops that catalogue walk from archiving.
+- **Chat tools:** `salesSummary`, `salesBreakdown`, `topProducts` (`rankBy`, `group`), `productSales`, `stockRisk`.
+  - All need `crm.read`, like the Sales tab. Prompt version is 6.
+  - Revenue is net: current quantity × AskCart's net unit price.
+  - Discount codes used on fewer than 2 orders show as "(other codes)".
+  - Once sales data is in a conversation, web search stays off even when asked for. Sales tools switch off after 8 calls in a turn.
+  - The Sales tab and the tools share `brandBounds`/`countedOrders` in `server/data/sales-read.ts`.
+- **Ceilings:**
+  - Results are capped at 60 rows, split across currencies.
+  - Every call sums raw rows, so past about 100k orders in a range add per-day rollups.
+  - Range bounds are computed in SQL, so the planner can't estimate them; pass literal timestamps if plans go wrong.
+  - At most 100 lines per order come from AskCart.
+  - Re-reading incomplete orders costs re-reading up to a day of orders per run while one is pending.
+- **SQL checks:** the SQL was run against PGlite (Postgres in WASM, every migration applied) from a scratch harness; it is not committed. `npm run test:db` needs a throwaway `TEST_DATABASE_URL` and wasn't run.
