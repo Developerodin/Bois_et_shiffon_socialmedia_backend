@@ -1,4 +1,4 @@
-import { call, form, GRAPH, metaAdAccounts, ProviderError, providerConfig, type MetaAdAccount } from "@/server/integrations/providers";
+import { call, form, GRAPH, MAX_AD_ACCOUNTS, metaAdAccounts, ProviderError, providerConfig, tooManyAdAccounts, type MetaAdAccount } from "@/server/integrations/providers";
 
 /**
  * A pasted Meta System User token for Meta Ads (plan 2026-11-26-phase-2-followup, Task 4): checked against our app
@@ -73,5 +73,6 @@ export async function checkSystemToken(token: string): Promise<{ scopes: string[
     return upstream("ad accounts", e);
   }
   if (!accounts.length) throw new SystemTokenRefused(422, SYSTEM_TOKEN_MESSAGES.noAccounts);
+  if (accounts.length > MAX_AD_ACCOUNTS) throw new SystemTokenRefused(422, tooManyAdAccounts(accounts.length));
   return { scopes, accounts };
 }
