@@ -15,7 +15,9 @@ const m = vi.hoisted(() => ({
 vi.mock("@/server/seo/site-facts", async (orig) => ({ ...(await orig<object>()), collectSiteFacts: m.facts, runPageSpeed: m.pageSpeed }));
 vi.mock("@/server/db/prisma", () => ({
   prisma: {
-    siteAudit: { create: m.create, findMany: m.audits, findFirst: m.auditFirst },
+    // listCompetitors reads the audit to show per domain with one raw DISTINCT ON query (its pick is tested on Postgres).
+    $queryRaw: m.audits,
+    siteAudit: { create: m.create, findFirst: m.auditFirst },
     competitor: { findMany: m.competitors, findFirstOrThrow: m.competitor },
     agentRun: { findMany: m.runs, findFirst: m.runFirst },
     auditReport: { findFirst: vi.fn(async () => null) },
@@ -122,7 +124,8 @@ describe("competitors list: auditBlocked", () => {
   const at = (d: number) => new Date(Date.UTC(2026, 10, d));
   const competitor = (domain: string) => ({ id: domain, name: domain, domain, source: "manual", createdAt: at(1) });
   const failure = (domain: string, error: string, finishedAt: Date) => ({ input: { domain }, error, createdAt: finishedAt, finishedAt });
-  const audit = (domain: string, createdAt: Date, approach: object = {}) => ({ id: `a-${domain}`, domain, url: `https://${domain}`, scores: {}, findings: [], aiCrawlers: [], approach, socials: [], sources: [], pagesRead: 0, createdAt });
+  // A row as latestAudits returns it: the shown audit, its partial marker and the domain's newest audit time.
+  const audit = (domain: string, createdAt: Date, approach: { partial?: boolean } = {}) => ({ id: `a-${domain}`, domain, scores: {}, createdAt, partial: approach.partial === true, newestAt: createdAt });
   // Only Date is faked, so the mocked promises still resolve; "now" is the 8th, three days after the failures below.
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -160,23 +163,11 @@ describe("competitors list: auditBlocked", () => {
 
   it("marks a partial audit", async () => {
     m.competitors.mockResolvedValue([competitor("tikamoon.com"), competitor("full.com")]);
-    m.audits.mockResolvedValue([audit("tikamoon.com", at(10), { partial: true }), audit("full.com", at(10), { positioning: "x" })]);
+    m.audits.mockResolvedValue([audit("tikamoon.com", at(10), { partial: true }), audit("full.com", at(10))]);
     m.runs.mockResolvedValue([]);
     const { competitors } = await listCompetitors("w1", "b1");
     expect(competitors[0].audit).toMatchObject({ partial: true });
     expect(competitors[1].audit).toMatchObject({ partial: false });
-  });
-
-  it("prefers a fresh full audit over a newer partial one, and falls back to the partial one", async () => {
-    m.competitors.mockResolvedValue([competitor("a.com"), competitor("b.com")]);
-    // The newest per domain (distinct) vs every audit since AUDIT_FRESH_DAYS (createdAt filter): b.com's full one is stale.
-    const newest = [audit("a.com", at(7), { partial: true }), audit("b.com", at(7), { partial: true })];
-    const fresh = [newest[0], { ...audit("a.com", at(6), { positioning: "full" }), id: "a-full" }, newest[1]];
-    m.audits.mockImplementation(async (q: { where: { createdAt?: unknown } }) => (q.where.createdAt ? fresh : newest));
-    m.runs.mockResolvedValue([]);
-    const { competitors } = await listCompetitors("w1", "b1");
-    expect(competitors[0].audit).toMatchObject({ id: "a-full", partial: false });
-    expect(competitors[1].audit).toMatchObject({ id: "a-b.com", partial: true });
   });
 
   it("says the latest failure was a block even after the block lifted", async () => {

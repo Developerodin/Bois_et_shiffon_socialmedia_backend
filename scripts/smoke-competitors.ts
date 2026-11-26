@@ -54,11 +54,11 @@ async function main() {
 
     // 4. Another customer tracking the same domain sees it from the library, dated, without the requester
     await prisma.competitor.create({ data: { workspaceId: B.ws, brandId: B.brand, name: "Example", domain: "example.com", source: "manual" } });
-    const viewB = await listCompetitors(B.ws, B.brand);
+    const viewB = await listCompetitors(B.ws, B.brand, { withCredits: true });
     const shared = viewB.competitors[0].audit!;
     assert.equal(shared.id, audit.id);
     assert.ok(!("requestedByWorkspaceId" in shared) && !("agentRunId" in shared));
-    assert.equal(viewB.credits.balance, STARTER_CREDITS, "B paid nothing");
+    assert.equal(viewB.credits?.balance, STARTER_CREDITS, "B paid nothing");
     console.log(`4 another workspace sees the shared audit (checked ${shared.createdAt.slice(0, 10)}, stale=${shared.stale}), requester hidden, no charge ✓`);
 
     // 5. A run that finally fails refunds its charge, exactly once

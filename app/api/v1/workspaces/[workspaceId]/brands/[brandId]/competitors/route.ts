@@ -5,12 +5,12 @@ import { prisma } from "@/server/db/prisma";
 import { listCompetitors } from "@/server/services/competitor-audits";
 import { domainOf } from "@/shared";
 
-/** Competitors with the latest shared audit of each domain, plus this workspace's credits. */
+/** Competitors with the latest shared audit of each domain, plus this workspace's credits for someone who may run audits. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");
     if (scope instanceof Response) return scope;
-    return Response.json(await listCompetitors(scope.workspaceId, scope.brandId));
+    return Response.json(await listCompetitors(scope.workspaceId, scope.brandId, { withCredits: scope.perms.has("agents.run") }));
   } catch (error) {
     return fromAccessError(error);
   }
