@@ -2,7 +2,9 @@ import { ContentChannel, type Prisma } from "@prisma/client";
 import { tool } from "ai";
 import { z } from "zod";
 import { ProductPageQuery, productPageWhere, STOCK_UNKNOWN } from "@/server/catalog/products";
-import { OPEN_STATUSES, parseRange, STATUS_GROUPS, stockLabel, type CatalogSync, type DateRange } from "@/shared";
+import {
+  OPEN_STATUSES, parseRange, SEARCH_PAGE_SORTS, SEARCH_RANGE_MAX_DAYS, STATUS_GROUPS, stockLabel, type CatalogSync, type DateRange, type PostInsightDto,
+} from "@/shared";
 import {
   BREAKDOWNS, hasOrderLines, MAX_ANALYSIS_ROWS, MAX_RISK_ROWS, PRODUCT_GROUPS, productSales, salesBreakdown, stockRisk, TIME_BREAKDOWNS, topProducts, truncatedOrders,
 } from "@/server/data/sales-analysis";
@@ -10,6 +12,8 @@ import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
 import { addDays, badRangeDetail, brandTimeZone, liveSources, previousRange, rangeDays, zoneToday } from "@/server/data/sources";
 import { ADS_MAX_DAYS, adsCampaigns, adsDays, D, shopRevenueOverSpend, totalsOf, type AdsDayRow } from "@/server/data/ads-read";
 import { currentMonth, listBudgets, MonthSchema } from "@/server/data/budgets";
+import { POSTS_MAX_DAYS, postsWithMetrics } from "@/server/data/post-metrics-read";
+import { searchPages, searchSummary } from "@/server/data/search-read";
 import { CHAT_DATA_TOOLS, hiddenFor, MAX_DATA_CALLS, MAX_GROUP_CALLS, type ToolGroup } from "@/server/chat/turn";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
@@ -59,6 +63,34 @@ const RATIO_WHY: Record<string, string> = {
   no_rate: "An exchange rate is missing to convert the ad spend, so there is no ratio.",
   vat_missing: "Some orders' VAT couldn't be read, so revenue would read low; no ratio given.",
 };
+const POST_METRICS = ["reach", "views", "likes", "comments", "shares", "saves", "interactions"] as const;
+const POST_NOTES = [
+  "Numbers are each post's latest read; posts under 30 days old can still grow (final: false).",
+  "Story reach is the highest frame's reach.",
+  "Unread: the platform hasn't been read yet or the account lacks insights permission.",
+];
+/** postsWithMetrics' cap (MAX_POSTS there): a full page means the period had more. */
+const POSTS_READ_CAP = 500;
+const SEARCH_NOTES = [
+  "Days are Google's (Pacific time) and lag 2–3 days.",
+  "Only site totals and the top pages per day are stored; search queries (keywords) aren't synced, so they can't be answered here.",
+  "Page sums sit below the site total.",
+];
+const NO_SEARCH = { note: "Search Console isn't connected or hasn't finished its first sync." };
+
+/**
+ * Posts ranked by one metric, unread posts (and posts the platform gives no such number for) last; ties keep
+ * postsWithMetrics' order (most reach first).
+ */
+function rankPosts(posts: PostInsightDto[], by: (typeof POST_METRICS)[number]) {
+  const value = (p: PostInsightDto) => p.metrics?.[by] ?? null;
+  return [...posts].sort((a, b) => {
+    const x = value(a);
+    const y = value(b);
+    return x === null ? (y === null ? 0 : 1) : y === null ? -1 : y - x;
+  });
+}
+
 const PACING_NOTE: Record<string, string> = {
   no_data: "No Meta spend synced for this month yet.",
   no_rate: "No exchange rate yet to convert spend into the budget currency.",
@@ -627,6 +659,92 @@ export function chatTools(scope: ChatScope) {
           ...(why ? [RATIO_WHY[why]] : []),
         ];
         return { ...range, ratio, currency, why, staleRateFrom, notes };
+      },
+    }),
+
+    // Posts and Search Console: read-only, from our own PostMetric and SearchDay rows; analytics.read, like the
+    // Performance tabs. Titles and page URLs are typed by people, so they go through cleanTitle.
+    // ponytail: postsWithMetrics reads at most the top 500 posts by reach; a brand posting more than 500 in 90 days
+    // gets a note, and its totals cover those 500.
+    postPerformance: tool({
+      description:
+        "How the brand's Instagram, Facebook and Threads posts and Instagram stories did in a period (brand-local days, default the last 30): per-channel totals, then the top posts and the top stories ranked by one metric (reach, views, likes, comments, shares, saves or interactions).",
+      inputSchema: rangeInput("leave both out for the last 30 days").extend({
+        rankBy: z.enum(POST_METRICS).default("reach"),
+        channel: z.nativeEnum(ContentChannel).optional(),
+        limit: z.number().int().min(1).max(25).default(10),
+      }),
+      execute: async ({ rankBy, channel, limit, ...input }) => {
+        const refused = await gate("postPerformance");
+        if (refused) return refused;
+        const range = await rangeOf(input, POSTS_MAX_DAYS);
+        if (!("from" in range)) return range;
+        const read = await postsWithMetrics(scope, range, new Date(), { stories: true });
+        const all = channel ? read.filter((p) => p.channel === channel) : read;
+        // Totals from every row read, before any cap.
+        const totals = new Map<string, { posts: number; read: number } & Record<(typeof POST_METRICS)[number], number>>();
+        for (const p of all) {
+          const t = totals.get(p.channel) ?? { posts: 0, read: 0, reach: 0, views: 0, likes: 0, comments: 0, shares: 0, saves: 0, interactions: 0 };
+          t.posts++;
+          if (p.metrics) {
+            t.read++;
+            for (const m of POST_METRICS) t[m] += p.metrics[m] ?? 0;
+          }
+          totals.set(p.channel, t);
+        }
+        const posts = rankPosts(all.filter((p) => p.channel !== "INSTAGRAM_STORY"), rankBy);
+        const stories = rankPosts(all.filter((p) => p.channel === "INSTAGRAM_STORY"), rankBy);
+        const title = (p: PostInsightDto) => cleanTitle(p.title ?? "");
+        return {
+          ...range,
+          rankBy,
+          totals: [...totals].map(([ch, t]) => ({ channel: ch, ...t })),
+          top: {
+            columns: ["title", "channel", "published", "reach", "views", "likes", "comments", "shares", "saves"],
+            rows: posts.slice(0, limit).map((p) => [title(p), p.channel, p.publishedAt, p.metrics?.reach ?? null, p.metrics?.views ?? null, p.metrics?.likes ?? null, p.metrics?.comments ?? null, p.metrics?.shares ?? null, p.metrics?.saves ?? null]),
+          },
+          ...(posts.length > limit && { morePosts: posts.length - limit }),
+          stories: {
+            // A story's comments are its replies, and its reach is the highest frame's.
+            columns: ["title", "published", "reachHighestFrame", "views", "replies", "shares", "navigation"],
+            rows: stories.slice(0, limit).map((p) => [title(p), p.publishedAt, p.metrics?.reach ?? null, p.metrics?.views ?? null, p.metrics?.comments ?? null, p.metrics?.shares ?? null, p.metrics?.navigation ?? null]),
+          },
+          ...(stories.length > limit && { moreStories: stories.length - limit }),
+          notes: [...POST_NOTES, ...(read.length >= POSTS_READ_CAP ? ["Only the top 500 posts by reach in this period were read."] : [])],
+        };
+      },
+    }),
+
+    searchPerformance: tool({
+      description:
+        "Google Search Console results for the brand's site over a period (Google's days, default the last 28 synced days): clicks, impressions, CTR and average position with the previous period, daily rows when 31 days or less, and the top pages by clicks or impressions. Search keywords aren't available.",
+      inputSchema: rangeInput("leave both out for the last 28 synced days").extend({
+        pageSort: z.enum(SEARCH_PAGE_SORTS).default("clicks"),
+        pages: z.number().int().min(0).max(25).default(10),
+      }),
+      execute: async ({ pageSort, pages, ...input }) => {
+        const refused = await gate("searchPerformance");
+        if (refused) return refused;
+        const range = await rangeOf(input, SEARCH_RANGE_MAX_DAYS, async () => (await liveSources(scope, "SEARCH_CONSOLE")).syncedThrough ?? NO_SEARCH, 28);
+        if (!("from" in range)) return range;
+        // manage: false, so the site's URL never reaches the model (only integrations.manage sees it on screen).
+        const [summary, top] = await Promise.all([searchSummary(scope, range, { manage: false }), searchPages(scope, range, { sort: pageSort, offset: 0 })]);
+        if (!summary.hasSite) return { ...range, hasSite: false, ...NO_SEARCH };
+        return {
+          ...range,
+          hasSite: true,
+          totals: summary.totals,
+          previousRange: summary.previousRange,
+          previous: summary.previous,
+          ...(rangeDays(range) <= 31 && {
+            days: { columns: ["day", "clicks", "impressions", "ctr", "position"], rows: summary.days.map((d) => [d.day, d.clicks, d.impressions, d.ctr, d.position]) },
+          }),
+          topPages: {
+            columns: ["page", "clicks", "impressions", "ctr", "position"],
+            rows: top.pages.slice(0, pages).map((p) => [cleanTitle(p.page), p.clicks, p.impressions, p.ctr, p.position]),
+          },
+          notes: SEARCH_NOTES,
+        };
       },
     }),
 
