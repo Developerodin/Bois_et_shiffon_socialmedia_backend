@@ -119,6 +119,14 @@ export type AskCartOrder = {
   /** The first 100; absent = not sent (the stored lines stay). */
   lineItems?: AskCartLineItem[] | null;
   lineItemsTruncated?: boolean | null;
+  /** Up to 5; absent = not sent (the stored shippingTaxes stays). */
+  shippingLines?: AskCartShippingLine[] | null;
+};
+export type AskCartShippingLine = {
+  title?: string | null;
+  originalPriceSet: AskCartMoney | null;
+  discountedPriceSet: AskCartMoney | null;
+  taxLines: { title?: string | null; rate?: number | null; priceSet: AskCartMoney | null }[] | null;
 };
 export type AskCartLineItem = {
   id: string;

@@ -23,7 +23,7 @@ const scope = { workspaceId: "w", brandId: "b" };
 const WEEK = { from: "2026-11-16", to: "2026-11-22" };
 const NOW = new Date("2026-11-23T08:00:00Z");
 const ZERO = { clicks: 0, impressions: 0, ctr: null, position: null };
-const totals = (c: string, n: number) => ({ currency: c, totals: { orders: n, gross: "0.00", discounts: "0.00", netSales: `${n}0.00`, total: "0.00", refunded: "0.00" }, previous: {}, days: [] });
+const totals = (c: string, n: number) => ({ currency: c, totals: { orders: n, gross: "0.00", discounts: "0.00", netSales: `${n}0.00`, total: "0.00", refunded: "0.00" }, previous: {}, days: [], netExVat: `${n}0.00`, exVatFrom: null, exVatMissing: 0 });
 const MANAGER = new Set<string>(["brand.read", "analytics.read", "crm.read", "ads.read", "tasks.read"]);
 
 beforeEach(() => {
@@ -93,7 +93,19 @@ describe("brandSections", () => {
 
   it("two currencies stay apart", async () => {
     const sales = (await brandSections(scope, MANAGER, WEEK, "UTC", NOW)).find((s) => s.kind === "sales");
-    expect(sales).toMatchObject({ data: [{ currency: "EUR", orders: 3, netSales: "30.00" }, { currency: "USD", orders: 1, netSales: "10.00" }] });
+    expect(sales).toMatchObject({ data: [{ currency: "EUR", orders: 3, netExVat: "30.00" }, { currency: "USD", orders: 1, netExVat: "10.00" }] });
+  });
+
+  it("digest revenue is netExVat: never the VAT-included net, none when it isn't known", async () => {
+    vi.mocked(salesSummary).mockResolvedValueOnce({ currencies: [
+      { ...totals("EUR", 3), netExVat: "25.00", exVatFrom: "2026-11-18" },
+      { ...totals("USD", 1), netExVat: null, exVatFrom: "2026-11-23" },
+    ] } as never);
+    const sales = (await brandSections(scope, MANAGER, WEEK, "UTC", NOW)).find((s) => s.kind === "sales");
+    expect(sales).toEqual({ kind: "sales", key: "crm.read", data: [
+      { currency: "EUR", orders: 3, netExVat: "25.00", exVatFrom: "2026-11-18" },
+      { currency: "USD", orders: 1, netExVat: null, exVatFrom: "2026-11-23" },
+    ] });
   });
 
   it("a failing section drops only itself", async () => {

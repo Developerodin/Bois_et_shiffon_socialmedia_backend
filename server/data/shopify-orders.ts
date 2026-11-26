@@ -21,10 +21,28 @@ export const ORDER_FIELDS = `id name processedAt cancelledAt test updatedAt taxe
       currentShippingPriceSet { shopMoney { amount } }
       currentTotalPriceSet { shopMoney { amount } }
       totalRefundedSet { shopMoney { amount } }
-      currentTaxLines { priceSet { shopMoney { amount } } }`;
+      currentTaxLines { priceSet { shopMoney { amount } } }
+      shippingLines(first: 5) { nodes { discountedPriceSet { shopMoney { amount } } taxLines { priceSet { shopMoney { amount } } } } }`;
+
+/**
+ * Shopify's estimated cost of one order node in ORDER_FIELDS, by its documented rules (object 1, scalar 0, connection
+ * 2 + first × node): the order 1, five money bags 2 each, the tax lines ~3, shippingLines 2 + 5 × (line 1 + price 2 +
+ * tax lines 3) = 42. Not measured live: no brand reads orders through a pasted token (B&C reads through AskCart), so
+ * `extensions.cost.requestedQueryCost` couldn't be logged. Log it on the first token-path store and raise ORDERS_PAGE
+ * if the real cost is lower.
+ */
+export const ORDER_NODE_COST = 56;
+/** Shopify refuses a query over 1,000 points; 800 leaves room for a wrong estimate. */
+export const MAX_QUERY_COST = 800;
+/**
+ * Orders per page on the pasted-token path: as many as fit MAX_QUERY_COST (14 at the estimate above; was 100 before
+ * shippingLines, itself estimated ~1,400, over Shopify's limit). Task 6's created_at query uses the same constant.
+ * ponytail: with MAX_PAGES that is ~700 orders a run; a busier store catches up over the follow-up runs.
+ */
+export const ORDERS_PAGE = Math.floor((MAX_QUERY_COST - 2) / ORDER_NODE_COST);
 
 export const ORDERS_QUERY = `query Orders($after: String, $query: String!) {
-  orders(first: 100, after: $after, sortKey: UPDATED_AT, query: $query) {
+  orders(first: ${ORDERS_PAGE}, after: $after, sortKey: UPDATED_AT, query: $query) {
     pageInfo { hasNextPage endCursor }
     nodes { ${ORDER_FIELDS} }
   }
@@ -46,7 +64,10 @@ type OrderNode = {
   currentTotalPriceSet: Money;
   totalRefundedSet: Money | null;
   currentTaxLines: { priceSet: Money }[];
+  /** Absent = not asked for or not sent (the stored shippingTaxes stays); null = sent unreadable. */
+  shippingLines?: { nodes: ShippingLineNode[] } | null;
 };
+type ShippingLineNode = { discountedPriceSet: Money | null; taxLines: { priceSet: Money | null }[] | null };
 
 /** One order as the ShopOrder row stores it. Amounts are decimal strings in the shop currency, never floats. */
 export type ShopOrderRow = {
@@ -66,8 +87,20 @@ export type ShopOrderRow = {
    */
   gross: string;
   shipping: string;
-  /** Sum of currentTaxLines (not totalTaxSet), kept with taxesIncluded so VAT can be taken out later. */
+  /**
+   * Sum of currentTaxLines (not totalTaxSet), kept with taxesIncluded so VAT can be taken out. Includes the shipping
+   * tax: checked live on B&C 2026-11-26 (tax-excluded orders: taxes = 20 % of netSales + shipping, not of netSales;
+   * a tax-included one: taxes = (netSales + shipping) × 0.2 / 1.2).
+   */
   taxes: string;
+  /**
+   * The tax on the shipping still charged: shippingLines' tax lines × current shipping ÷ the lines' discounted price,
+   * so a refunded shipping charge takes its tax with it; free shipping (price 0) or no shipping line → "0.00".
+   * Discounted, not original, price: Shopify taxes shipping after its discount, and currentShippingPriceSet equalled
+   * Σ discountedPriceSet on every B&C order read live 2026-11-26 (100 orders; none had a shipping discount, so
+   * original = discounted there). undefined = not sent (the stored value stays); null = sent but unreadable.
+   */
+  shippingTaxes?: string | null;
   taxesIncluded: boolean;
   /** currentTotalPriceSet. */
   total: string;
@@ -138,6 +171,33 @@ const add = (...values: string[]) => values.reduce((sum, v) => sum.plus(v), new 
 
 const amount = (m: Money | null | undefined) => m?.shopMoney.amount ?? "0";
 
+/** A money amount as written, or null when it isn't a plain decimal. */
+const plain = (m: Money | null | undefined) => (m && typeof m.shopMoney?.amount === "string" && DECIMAL.test(m.shopMoney.amount) ? m.shopMoney.amount : null);
+
+/** ShopOrderRow.shippingTaxes from the order's shipping lines; null when any amount is unreadable. */
+export function shippingTaxesOf(lines: ShippingLineNode[] | null | undefined, current: Money | null): string | null {
+  if (!Array.isArray(lines)) return null;
+  let charged = new Prisma.Decimal(0);
+  let tax = new Prisma.Decimal(0);
+  for (const l of lines) {
+    const price = plain(l?.discountedPriceSet);
+    if (price === null || !Array.isArray(l.taxLines)) return null;
+    charged = charged.plus(price);
+    for (const t of l.taxLines) {
+      const v = plain(t?.priceSet);
+      if (v === null) return null;
+      tax = tax.plus(v);
+    }
+  }
+  const now = current ? plain(current) : "0";
+  if (now === null) return null;
+  // Free shipping: nothing charged, so no tax to scale (and no division by 0).
+  if (charged.lte(0) || tax.isZero()) return "0.00";
+  // Never more than the lines' own tax, even if the current price somehow exceeds the charged one.
+  const share = Prisma.Decimal.min(1, Prisma.Decimal.max(0, new Prisma.Decimal(now).div(charged)));
+  return tax.mul(share).toFixed(2);
+}
+
 export function mapOrder(o: OrderNode): ShopOrderRow {
   const netSales = add(amount(o.currentSubtotalPriceSet));
   const discounts = add(amount(o.currentTotalDiscountsSet));
@@ -158,6 +218,7 @@ export function mapOrder(o: OrderNode): ShopOrderRow {
     refunded: add(amount(o.totalRefundedSet)),
     sourceName: o.sourceName,
     shopifyUpdatedAt: new Date(o.updatedAt),
+    ...(o.shippingLines !== undefined ? { shippingTaxes: shippingTaxesOf(o.shippingLines?.nodes, o.currentShippingPriceSet) } : {}),
   };
 }
 
@@ -308,6 +369,13 @@ export function mapAskCartOrder(o: AskCartOrder): ShopOrderRow | null {
       const priceSet = shopMoney(t?.priceSet);
       return priceSet ? [{ priceSet }] : [];
     }),
+    // Not sent → left out (the stored value stays); sent but not a list → null (unreadable, never 0).
+    shippingLines: o.shippingLines === undefined ? undefined
+      : Array.isArray(o.shippingLines) ? { nodes: o.shippingLines.map((l) => ({
+          discountedPriceSet: shopMoney(l?.discountedPriceSet),
+          taxLines: Array.isArray(l?.taxLines) ? l.taxLines.map((t) => ({ priceSet: shopMoney(t?.priceSet) })) : null,
+        })) }
+      : null,
   });
   return { ...row, ...askCartExtras(o, row.currency) };
 }

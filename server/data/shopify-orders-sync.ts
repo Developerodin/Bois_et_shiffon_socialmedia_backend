@@ -53,22 +53,27 @@ export async function upsertOrders(scope: { workspaceId: string; brandId: string
     fulfillment_status: r.fulfillmentStatus, fulfillment_sent: r.fulfillmentStatus !== undefined,
     financial_status: r.financialStatus, financial_sent: r.financialStatus !== undefined, discount_codes: r.discountCodes,
     line_items_truncated: r.lines ? (r.lineItemsTruncated ?? false) : undefined,
+    // Three states: not sent (keep the stored value), sent unreadable (null), a value.
+    shipping_taxes: r.shippingTaxes ?? null, shipping_sent: r.shippingTaxes !== undefined,
   })));
   // `WHERE true` ends the SELECT before ON CONFLICT, so the join's ON and the upsert's ON CONFLICT can't be misread.
   const upsert = Prisma.sql`
     INSERT INTO "ShopOrder" ("id", "workspaceId", "brandId", "connectionId", "shopifyId", "name", "processedAt", "cancelledAt", "test",
       "currency", "netSales", "discounts", "shipping", "taxes", "taxesIncluded", "total", "refunded", "sourceName", "shopifyUpdatedAt",
-      "fulfillmentStatus", "financialStatus", "discountCodes", "lineItemsTruncated", "updatedAt")
+      "fulfillmentStatus", "financialStatus", "discountCodes", "lineItemsTruncated", "shippingTaxes", "updatedAt")
     SELECT u.id, ${scope.workspaceId}, ${scope.brandId}, ${scope.connectionId}, u.shopify_id, u.name,
       u.processed_at AT TIME ZONE 'UTC', u.cancelled_at AT TIME ZONE 'UTC', u.test, u.currency, u.net_sales, u.discounts,
       u.shipping, u.taxes, u.taxes_included, u.total, u.refunded, u.source_name, u.shopify_updated_at AT TIME ZONE 'UTC',
       CASE WHEN u.fulfillment_sent THEN u.fulfillment_status ELSE s."fulfillmentStatus" END,
       CASE WHEN u.financial_sent THEN u.financial_status ELSE s."financialStatus" END,
-      COALESCE(u.discount_codes, s."discountCodes", ARRAY[]::text[]), COALESCE(u.line_items_truncated, s."lineItemsTruncated", false), now()
+      COALESCE(u.discount_codes, s."discountCodes", ARRAY[]::text[]), COALESCE(u.line_items_truncated, s."lineItemsTruncated", false),
+      -- Not COALESCE: lines sent but unreadable must clear a stale value, not keep it.
+      CASE WHEN u.shipping_sent THEN u.shipping_taxes ELSE s."shippingTaxes" END, now()
     FROM jsonb_to_recordset(${page}::jsonb) AS u(id text, shopify_id text, name text, processed_at timestamptz, cancelled_at timestamptz,
       test boolean, currency text, net_sales numeric, discounts numeric, shipping numeric, taxes numeric, taxes_included boolean,
       total numeric, refunded numeric, source_name text, shopify_updated_at timestamptz, fulfillment_status text, fulfillment_sent boolean,
-      financial_status text, financial_sent boolean, discount_codes text[], line_items_truncated boolean)
+      financial_status text, financial_sent boolean, discount_codes text[], line_items_truncated boolean, shipping_taxes numeric,
+      shipping_sent boolean)
     LEFT JOIN "ShopOrder" s ON s."brandId" = ${scope.brandId} AND s."shopifyId" = u.shopify_id
     WHERE true
     ON CONFLICT ("brandId", "shopifyId") DO UPDATE SET
@@ -79,7 +84,7 @@ export async function upsertOrders(scope: { workspaceId: string; brandId: string
       "refunded" = EXCLUDED."refunded", "sourceName" = EXCLUDED."sourceName", "shopifyUpdatedAt" = EXCLUDED."shopifyUpdatedAt",
       "fulfillmentStatus" = EXCLUDED."fulfillmentStatus", "financialStatus" = EXCLUDED."financialStatus",
       "discountCodes" = EXCLUDED."discountCodes", "lineItemsTruncated" = EXCLUDED."lineItemsTruncated",
-      "updatedAt" = now()
+      "shippingTaxes" = EXCLUDED."shippingTaxes", "updatedAt" = now()
     WHERE "ShopOrder"."shopifyUpdatedAt" <= EXCLUDED."shopifyUpdatedAt"`;
   const withLines = rows.filter((r) => r.lines);
   // No line items on this page (the pasted-token path, or an AskCart that doesn't send them): one statement, as before.

@@ -88,7 +88,12 @@ async function postsSection(scope: Scope, week: DateRange, now: Date): Promise<D
 async function salesSection(scope: Scope, week: DateRange): Promise<DigestSection> {
   if (!(await synced(scope, "SHOPIFY_ORDERS"))) return { kind: "sales", key: "crm.read", data: null };
   const sum = await salesSummary(scope, week);
-  return { kind: "sales", key: "crm.read", data: sum.currencies.map((c) => ({ currency: c.currency, orders: c.totals.orders, netSales: c.totals.netSales })) };
+  // Revenue is net of VAT (decision 2); a currency without it gets no revenue figure, never the VAT-included one.
+  return {
+    kind: "sales",
+    key: "crm.read",
+    data: sum.currencies.map((c) => ({ currency: c.currency, orders: c.totals.orders, netExVat: c.netExVat, exVatFrom: c.exVatFrom })),
+  };
 }
 
 async function adsSection(scope: Scope, week: DateRange): Promise<DigestSection> {

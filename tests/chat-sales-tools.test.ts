@@ -120,14 +120,23 @@ describe("sales tools: access and input", () => {
 
 describe("salesSummary", () => {
   const totals = { orders: 2, gross: "10.00", discounts: "0.00", netSales: "10.00", total: "12.00", refunded: "0.00" };
-  const currencies = [{ currency: "EUR", totals, previous: totals, days: [{ day: "2026-11-02", ...totals }] }];
+  const currencies = [{ currency: "EUR", totals, previous: totals, days: [{ day: "2026-11-02", ...totals }], netExVat: "8.50", exVatFrom: null, exVatMissing: 0 }];
 
   it("includes days as columns + rows for a month, not for a longer period", async () => {
     data.salesSummary.mockResolvedValue({ currencies });
     const month = await run(chatTools(scope).salesSummary, { from: "2026-11-01", to: "2026-12-01" });
-    expect(month.currencies).toEqual([{ currency: "EUR", totals, previous: totals, days: { columns: ["day", "orders", "netSales", "total"], rows: [["2026-11-02", 2, "10.00", "12.00"]] } }]);
+    expect(month.currencies).toEqual([{ currency: "EUR", totals, previous: totals, netExVat: "8.50", exVatFrom: null, exVatMissing: 0, days: { columns: ["day", "orders", "netSales", "total"], rows: [["2026-11-02", 2, "10.00", "12.00"]] } }]);
     const longer = await run(chatTools(scope).salesSummary, { from: "2026-11-01", to: "2026-12-02" });
     expect((longer.currencies as object[])[0]).not.toHaveProperty("days");
+  });
+});
+
+describe("salesSummary without VAT", () => {
+  it("salesSummary tool returns netExVat, exVatFrom and exVatMissing per currency", async () => {
+    const totals = { orders: 2, gross: "10.00", discounts: "0.00", netSales: "10.00", total: "12.00", refunded: "0.00" };
+    data.salesSummary.mockResolvedValue({ currencies: [{ currency: "EUR", totals, previous: totals, days: [], netExVat: "8.33", exVatFrom: "2026-11-10", exVatMissing: 1 }] });
+    const out = await run(chatTools(scope).salesSummary, range);
+    expect((out.currencies as object[])[0]).toMatchObject({ netExVat: "8.33", exVatFrom: "2026-11-10", exVatMissing: 1 });
   });
 });
 

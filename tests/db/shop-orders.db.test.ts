@@ -85,6 +85,22 @@ describe("upsertOrders", () => {
   });
 });
 
+describe("upsertOrders: shippingTaxes", () => {
+  const stored = async () => (await prisma.shopOrder.findFirst({ where: { shopifyId: "gid://shopify/Order/1" } }))!.shippingTaxes?.toFixed(2) ?? null;
+  it("AskCart order without shippingLines keeps stored shippingTaxes; sent but unreadable → null; a value replaces", async () => {
+    await upsertOrders(scopeA(), [row("1", "2026-11-20T10:00:00Z", { shippingTaxes: "1.00" })]);
+    expect(await stored()).toBe("1.00");
+    // not sent (undefined): kept
+    await upsertOrders(scopeA(), [row("1", "2026-11-20T10:00:00Z")]);
+    expect(await stored()).toBe("1.00");
+    // sent, unreadable (null): cleared, never the stale value
+    await upsertOrders(scopeA(), [row("1", "2026-11-20T10:00:00Z", { shippingTaxes: null })]);
+    expect(await stored()).toBeNull();
+    await upsertOrders(scopeA(), [row("1", "2026-11-20T10:00:00Z", { shippingTaxes: "0.84" })]);
+    expect(await stored()).toBe("0.84");
+  });
+});
+
 describe("upsertOrders: AskCart line items", () => {
   const line = (id: string, extra: Partial<ShopOrderLineRow> = {}): ShopOrderLineRow => ({
     lineShopifyId: `gid://shopify/LineItem/${id}`, productId: "gid://shopify/Product/1", variantId: "gid://shopify/ProductVariant/1",

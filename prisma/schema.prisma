@@ -1740,8 +1740,11 @@ model ShopOrder {
   netSales           Decimal   @db.Decimal(14, 2)
   discounts          Decimal   @db.Decimal(14, 2)
   shipping           Decimal   @db.Decimal(14, 2)
-  /// sum of currentTaxLines, not totalTaxSet
+  /// sum of currentTaxLines, not totalTaxSet; includes the shipping tax (checked live 2026-11-26)
   taxes              Decimal   @db.Decimal(14, 2)
+  /// the tax on the shipping still charged (server/data/shopify-orders.ts shippingTaxesOf); null on rows read before
+  /// 20261126110000 or when the shipping lines came unreadable
+  shippingTaxes      Decimal?  @db.Decimal(14, 2)
   taxesIncluded      Boolean
   /// currentTotalPriceSet
   total              Decimal   @db.Decimal(14, 2)

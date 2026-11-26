@@ -168,7 +168,7 @@ describe("fetchAskCartOrders", () => {
     expect(orders).toEqual([{
       shopifyId: "gid://shopify/Order/1001", name: "#1001", processedAt: new Date("2026-11-02T10:00:00Z"), cancelledAt: null, test: false,
       currency: "INR", netSales: "100.00", discounts: "10.00", gross: "110.00", shipping: "5.00", taxes: "15.00", taxesIncluded: true,
-      total: "95.00", refunded: "0.00", sourceName: "web", shopifyUpdatedAt: new Date("2026-11-03T10:00:00Z"),
+      total: "95.00", refunded: "0.00", sourceName: "web", shopifyUpdatedAt: new Date("2026-11-03T10:00:00Z"), shippingTaxes: "0.00",
     }]);
     expect(cursorEnd).toEqual(new Date("2026-11-03T10:00:00Z"));
   });

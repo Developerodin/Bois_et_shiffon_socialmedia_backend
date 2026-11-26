@@ -138,6 +138,73 @@ describe("sales analysis", () => {
   });
 });
 
+describe("net sales without VAT (Task 2)", () => {
+  const shipLine = (price: string, tax: string) => ({ title: "Colissimo", originalPriceSet: m(price), discountedPriceSet: m(price), taxLines: [{ title: "TVA", rate: 0.2, priceSet: m(tax) }] });
+  // Tax-included: 120.00 items incl. 20.00 VAT, 6.00 shipping incl. 1.00 VAT → taxes 21.00, shippingTaxes 1.00.
+  const incl = (id: string, processedAt: string, extra: Record<string, unknown> = {}) => order(id, "2026-11-21T00:00:00Z", {
+    processedAt, currentSubtotalPriceSet: m("120.00"), currentShippingPriceSet: m("6.00"), currentTotalPriceSet: m("126.00"),
+    currentTaxLines: [{ title: "TVA", rate: 0.2, priceSet: m("21.00") }], shippingLines: [shipLine("6.00", "1.00")], ...extra,
+  });
+  // Tax-excluded: 100.00 items, 5.00 shipping, 21.00 VAT on top.
+  const excl = (id: string, processedAt: string) => order(id, "2026-11-21T00:00:00Z", {
+    processedAt, taxesIncluded: false, currentSubtotalPriceSet: m("100.00"), currentShippingPriceSet: m("5.00"), currentTotalPriceSet: m("126.00"),
+    currentTaxLines: [{ title: "TVA", rate: 0.2, priceSet: m("21.00") }], shippingLines: [shipLine("5.00", "1.00")],
+  });
+  /** As if read by the code before shippingTaxes existed: no value, written before SHIPPING_TAXES_SINCE. */
+  const readBefore = (id: string) => prisma.$executeRaw`
+    UPDATE "ShopOrder" SET "shippingTaxes" = NULL, "updatedAt" = '2026-11-25 23:59:00' WHERE "shopifyId" = ${`gid://shopify/Order/${id}`}`;
+  const eur = async (r = range) => (await salesSummary(brandScope(), r)).currencies.find((c) => c.currency === "EUR")!;
+
+  it("tax-included order: VAT comes off (item VAT only, shipping tax was never in netSales); tax-excluded order untouched", async () => {
+    await upsertOrders(scope(), [incl("v1", "2026-11-05T10:00:00Z"), excl("v2", "2026-11-06T10:00:00Z")]);
+    expect((await prisma.shopOrder.findFirst({ where: { shopifyId: "gid://shopify/Order/v1" } }))!.shippingTaxes!.toFixed(2)).toBe("1.00");
+    // 120 − (21 − 1) = 100; + 100
+    expect(await eur()).toMatchObject({ netExVat: "200.00", exVatFrom: null, exVatMissing: 0, totals: { netSales: "220.00" } });
+  });
+
+  it("pre-change rows → exVatFrom the day after the last of them; only later orders counted", async () => {
+    await upsertOrders(scope(), [incl("v1", "2026-11-05T10:00:00Z"), incl("v2", "2026-11-08T10:00:00Z"), incl("v3", "2026-11-12T10:00:00Z"), excl("v4", "2026-11-10T10:00:00Z")]);
+    await readBefore("v1");
+    await readBefore("v2");
+    // A tax-excluded row read before the change doesn't matter: its netSales has no VAT.
+    await readBefore("v4");
+    expect(await eur()).toMatchObject({ netExVat: "200.00", exVatFrom: "2026-11-09", exVatMissing: 0 });
+  });
+
+  it("exVatFrom only looks inside the range", async () => {
+    await upsertOrders(scope(), [incl("v1", "2026-10-20T10:00:00Z"), incl("v2", "2026-11-12T10:00:00Z")]);
+    await readBefore("v1");
+    expect(await eur()).toMatchObject({ netExVat: "100.00", exVatFrom: null });
+  });
+
+  it("an old row on the range's last day leaves no ex-VAT figure", async () => {
+    await upsertOrders(scope(), [incl("v1", "2026-11-30T10:00:00Z")]);
+    await readBefore("v1");
+    expect(await eur()).toMatchObject({ netExVat: null, exVatFrom: "2026-12-01", exVatMissing: 0 });
+  });
+
+  it("null after SHIPPING_TAXES_SINCE (lines sent unreadable) → counted in exVatMissing, exVatFrom unchanged", async () => {
+    await upsertOrders(scope(), [incl("v1", "2026-11-05T10:00:00Z", { shippingLines: [shipLine("6.00", "x")] }), incl("v2", "2026-11-12T10:00:00Z")]);
+    expect(await eur()).toMatchObject({ netExVat: "100.00", exVatFrom: null, exVatMissing: 1 });
+  });
+
+  it("unreadable history row (old shopifyUpdatedAt, written now) → exVatMissing, exVatFrom unchanged", async () => {
+    await upsertOrders(scope(), [
+      order("h1", "2025-01-10T00:00:00Z", { processedAt: "2026-11-03T10:00:00Z", currentTaxLines: [{ title: "TVA", rate: 0.2, priceSet: m("21.00") }], shippingLines: null }),
+      incl("v2", "2026-11-12T10:00:00Z"),
+    ]);
+    expect(await eur()).toMatchObject({ netExVat: "100.00", exVatFrom: null, exVatMissing: 1 });
+  });
+
+  it("upsert fills shippingTaxes on re-read", async () => {
+    await upsertOrders(scope(), [incl("v1", "2026-11-05T10:00:00Z")]);
+    await readBefore("v1");
+    expect((await eur()).exVatFrom).toBe("2026-11-06");
+    await upsertOrders(scope(), [incl("v1", "2026-11-05T10:00:00Z")]);
+    expect(await eur()).toMatchObject({ netExVat: "100.00", exVatFrom: null });
+  });
+});
+
 describe("syncShopifyOrders: re-reading orders AskCart sent incomplete", () => {
   it("holds the cursor at a recent one, not at one with 100 lines, an old one or another connection's", async () => {
     const now = new Date("2026-11-23T12:00:00Z");
