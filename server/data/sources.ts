@@ -250,7 +250,9 @@ export function enqueueBackfill(source: SourceRef & { syncedThrough: Date | null
  * A source whose backfill isn't through its end and has no backfill job queued or running gets its next window
  * queued too: a chain that died (out of retries) starts again from syncedThrough.
  * ponytail: one upsert per source (plus one job lookup per unfinished backfill); at a few thousand sources batch them
- * with createMany(skipDuplicates).
+ * with createMany(skipDuplicates). That lookup's `idempotencyKey startsWith` is a LIKE 'prefix%' the unique index
+ * can't serve under a non-C collation, so each one scans the Job table (about 1,000 rows today). Past tens of thousands
+ * of jobs, add a text_pattern_ops index on the key, or store the source id in its own column.
  */
 export async function enqueueDailyDataSyncs(now = new Date()) {
   const sources = await prisma.dataSource.findMany({
@@ -326,8 +328,9 @@ export async function runDataSync(payload: unknown, lease: Lease) {
 
   if (p.mode !== "backfill" && (await backfillRunning(source.id, lease.jobId))) {
     const runAt = new Date(Math.ceil((Date.now() + WAIT_MS) / 60_000) * 60_000);
-    // Keyed by the minute it runs at: a duplicate delivery queues one wait, and a later wait gets its own key.
-    await enqueueSourceSync(source, p.mode, { runAt, key: `data:${source.id}:wait:${runAt.toISOString()}` });
+    // Keyed by the minute it runs at: a duplicate delivery queues one wait, and a later wait gets its own key. A
+    // follow-up keeps its count, so waiting doesn't give its chain a fresh set of FOLLOW_UPS.
+    await enqueueSourceSync(source, p.mode, { runAt, key: `data:${source.id}:wait:${runAt.toISOString()}`, follow: p.follow });
     return;
   }
 
@@ -498,18 +501,24 @@ function orderHistory(r: DataSource): DataSourceDto["history"] {
 
 /** How far ahead a queued run still counts as "queued" on screen: the follow-up's minute, not the sweep's two hours. */
 const SOON_MS = 2 * 60_000;
+/**
+ * How long past its time a pending run still counts as "queued". Later than this, no worker is taking jobs: saying
+ * "queued" would keep the page polling every few seconds for a run that isn't coming.
+ */
+const OVERDUE_MS = 10 * 60_000;
 
 /**
- * The brand's data-sync jobs running now or due within SOON_MS, by source id; running wins over queued. Running
- * needs a live lease: a job whose process died stays RUNNING until another worker claims it, and must not show as
- * syncing meanwhile.
+ * The brand's data-sync jobs running now or due within SOON_MS (and not more than OVERDUE_MS late), by source id;
+ * running wins over queued. Running needs a live lease: a job whose process died stays RUNNING until another worker
+ * claims it, and must not show as syncing meanwhile. A daily or manual run waiting behind a running history window
+ * (its `:wait:` key, runDataSync) counts as part of that history run.
  * ponytail: reads the brand's due data jobs (a handful); the (status, runAt) index serves it.
  */
 async function syncRuns(scope: { workspaceId: string; brandId: string }) {
   const jobs = await prisma.job.findMany({
     where: { type: DATA_SYNC_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId,
-      OR: [{ status: "RUNNING", leasedUntil: { gte: new Date() } }, { status: "PENDING", runAt: { lte: new Date(Date.now() + SOON_MS) } }] },
-    select: { status: true, runAt: true, payload: true },
+      OR: [{ status: "RUNNING", leasedUntil: { gte: new Date() } }, { status: "PENDING", runAt: { gte: new Date(Date.now() - OVERDUE_MS), lte: new Date(Date.now() + SOON_MS) } }] },
+    select: { status: true, runAt: true, payload: true, idempotencyKey: true },
     orderBy: { runAt: "asc" },
   });
   const runs = new Map<string, { state: "queued" | "running"; runAt: Date; backfill: boolean }>();
@@ -518,7 +527,8 @@ async function syncRuns(scope: { workspaceId: string; brandId: string }) {
     const id = payload.dataSourceId;
     if (typeof id !== "string") continue;
     const state = j.status === "RUNNING" ? "running" : "queued";
-    if (!runs.has(id) || state === "running") runs.set(id, { state, runAt: j.runAt, backfill: payload.mode === "backfill" });
+    const backfill = payload.mode === "backfill" || !!j.idempotencyKey?.startsWith(`data:${id}:wait:`);
+    if (!runs.has(id) || state === "running") runs.set(id, { state, runAt: j.runAt, backfill });
   }
   return runs;
 }
