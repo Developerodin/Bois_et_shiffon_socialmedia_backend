@@ -28,7 +28,7 @@ export const MAX_SALES_CALLS = 8;
 export const readsShopData = (history: UIMessage[], tools: ReadonlySet<string> = SHOP_DATA_TOOLS) =>
   history.some((m) => m.parts.some((p) => p.type.startsWith("tool-") && tools.has(p.type.slice(5))));
 
-/** What a saved sales step holds for a viewer without crm.read. */
+/** What a sales step holds for someone without crm.read: the sales tools' refusal, and a saved step's output once hidden. */
 export const SALES_HIDDEN = { error: "Your role can't see sales." };
 const isSalesOutput = (p: UIMessage["parts"][number]) => p.type.startsWith("tool-") && SALES_TOOLS.has(p.type.slice(5)) && "output" in p;
 

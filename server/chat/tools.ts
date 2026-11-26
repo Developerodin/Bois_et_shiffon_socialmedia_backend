@@ -8,7 +8,7 @@ import {
 } from "@/server/data/sales-analysis";
 import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
 import { addDays, badRangeDetail, brandTimeZone, rangeDays, zoneToday } from "@/server/data/sources";
-import { MAX_SALES_CALLS } from "@/server/chat/turn";
+import { MAX_SALES_CALLS, SALES_HIDDEN } from "@/server/chat/turn";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
@@ -66,7 +66,7 @@ export function chatTools(scope: ChatScope) {
   // well as by the route's activeTools, which can't stop several calls made in parallel within one step.
   let salesCalls = 0;
   const salesGate = async () => {
-    if (!(await can("crm.read"))) return denied("sales");
+    if (!(await can("crm.read"))) return SALES_HIDDEN;
     if (++salesCalls > MAX_SALES_CALLS) return SALES_LIMIT;
     return null;
   };
