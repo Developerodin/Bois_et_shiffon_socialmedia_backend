@@ -286,12 +286,13 @@ describe("GET data-sources", () => {
     expect(o!.sync).toBeNull();
 
     // While it runs: the job is RUNNING and the run has stamped its start.
-    let seen: unknown;
-    next = async () => { [s] = await get(); seen = s!.sync; return { count: 3 }; };
+    let seen: unknown, seenLast: unknown;
+    next = async () => { [s] = await get(); seen = s!.sync; seenLast = s!.lastResult; return { count: 3 }; };
     const [job] = await dataJobs(search.id);
     await prisma.job.update({ where: { id: job!.id }, data: { status: "RUNNING", leasedUntil: new Date(Date.now() + 60_000) } });
     await runDataSync(job!.payload, lease);
     expect(seen).toMatchObject({ state: "running", since: expect.any(String) });
+    expect(seenLast).toBeNull(); // a first-ever run: only the start stamp is stored, no result yet
 
     // A run whose process died: RUNNING with its lease lapsed is not "running".
     await prisma.job.update({ where: { id: job!.id }, data: { leasedUntil: new Date(Date.now() - 1000) } });

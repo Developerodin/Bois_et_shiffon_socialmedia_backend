@@ -32,9 +32,16 @@ import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
  * Errors: throw ReconnectNeeded for a refused token (status ERROR, not retried), anything else to retry (maxAttempts 3).
  * A missing permission, a provider rate limit or a stop mid-window is not thrown: return reason "permission",
  * "rate_limited" or "partial". Provider text may go to the log (never URLs: tokens ride in query strings), never into
- * `lastResult`, which only holds DATA_SYNC_ERRORS strings.
+ * `lastResult` (StoredSyncResult), whose `error` only holds DATA_SYNC_ERRORS strings; beside it are counts, times and
+ * a running job's `runningSince` stamp.
  */
 export const DATA_SYNC_JOB = "data.sync";
+/**
+ * `DataSource.lastResult` as stored: the shared result plus `runningSince`, stamped when a run starts and dropped when
+ * recordSync replaces the whole value. Server-only: the screens get it as `sync.since`. A source's first run stamps a
+ * NULL lastResult, so the row can hold `runningSince` alone, with no `at`.
+ */
+type StoredSyncResult = DataSyncResult & { runningSince?: string };
 /** Follow-up runs in a row after cursor runs that stopped partway, and the wait before each. */
 export const FOLLOW_UPS = 5;
 const FOLLOW_UP_MS = 60_000;
@@ -233,7 +240,7 @@ export async function enqueueDailyDataSyncs(now = new Date()) {
 /** Saves the run's result. Only fixed strings reach `error`; `okAt` moves on a run with no reason. */
 async function recordSync(source: DataSource, reason: DataSyncReason | null, count: number, data: Prisma.DataSourceUpdateManyMutationInput = {}, startedAt: string | null = null) {
   const at = new Date().toISOString();
-  const prev = source.lastResult as DataSyncResult | null;
+  const prev = source.lastResult as StoredSyncResult | null;
   const lastResult: DataSyncResult = { at, startedAt, okAt: reason ? (prev?.okAt ?? null) : at, reason, count, error: reason ? DATA_SYNC_ERRORS[reason] : null };
   await prisma.dataSource.updateMany({
     where: { id: source.id, workspaceId: source.workspaceId, brandId: source.brandId },
@@ -340,7 +347,7 @@ export async function requestSourceSync(scope: Scope, kind: DataSourceKind): Pro
   let queued = false;
   let limited = false;
   for (const s of sources) {
-    const okAt = (s.lastResult as DataSyncResult | null)?.okAt;
+    const okAt = (s.lastResult as StoredSyncResult | null)?.okAt;
     if (okAt && Date.now() - Date.parse(okAt) < FRESH_MS) continue;
     const pending = await prisma.job.findFirst({
       where: { type: DATA_SYNC_JOB, workspaceId: s.workspaceId, brandId: s.brandId, payload: { path: ["dataSourceId"], equals: s.id },
@@ -375,7 +382,7 @@ export async function listDataSources(scope: { workspaceId: string; brandId: str
   const manage = perms.has("integrations.manage");
   const runs = await syncRuns(scope);
   return rows.map((r) => {
-    const last = r.lastResult as (DataSyncResult & { runningSince?: string }) | null;
+    const last = r.lastResult as StoredSyncResult | null;
     const job = runs.get(r.id);
     const zone = ((r.settings ?? {}) as { reportsIn?: unknown }).reportsIn;
     return {
@@ -383,7 +390,8 @@ export async function listDataSources(scope: { workspaceId: string; brandId: str
       kind: r.kind,
       ...(manage ? { label: r.label } : {}),
       status: r.status,
-      lastResult: last && { at: last.at, startedAt: last.startedAt ?? null, okAt: last.okAt ?? null, reason: last.reason ?? null, count: last.count ?? 0, error: last.reason ? (DATA_SYNC_ERRORS[last.reason] ?? null) : null },
+      // No `at` yet (a first run's start stamp alone): no result to show.
+      lastResult: last?.at ? { at: last.at, startedAt: last.startedAt ?? null, okAt: last.okAt ?? null, reason: last.reason ?? null, count: last.count ?? 0, error: last.reason ? (DATA_SYNC_ERRORS[last.reason] ?? null) : null } : null,
       sync: job ? { state: job.state, since: job.state === "running" ? (last?.runningSince ?? null) : job.runAt.toISOString() } : null,
       syncedThrough: dayOf(r.syncedThrough),
       reportsInZone: typeof zone === "string" ? zone : null,
