@@ -6,23 +6,28 @@ import { requireWorkspaceMember } from "@/server/auth/access";
 import { requestUserId } from "@/server/auth/request-user";
 import { TEAM_MEMBER, personName } from "@/server/content/person-name";
 import { prisma } from "@/server/db/prisma";
-import { clientMemberSql, visibleTasksAcrossSql } from "@/server/tasks/access";
+import { clientMemberSql, visibleNotificationsSql } from "@/server/tasks/access";
+import { adAlertText } from "@/server/ads/alerts";
 import { fromCursor, toCursor } from "@/server/tasks/cursor";
 import { taskProblem } from "@/server/tasks/errors";
-import type { NotificationDto, NotificationPageDto } from "@/shared";
+import type { AdAlertKind, NotificationDto, NotificationPageDto } from "@/shared";
 
 const PAGE = 20; // the query reads PAGE + 1 (LIMIT 21) to know if there is more
 // The count stops at 100 (LIMIT 100): the bell shows "99+" past that, so counting further is wasted work.
 
-/** Every notification read joins its task as `t`, so the task visibility rule applies. */
-const FROM = Prisma.sql`FROM "Notification" n JOIN "Task" t ON t.id = n."taskId"`;
+/**
+ * Every notification read left-joins its task as `t` (an AD_ALERT notice has none), so the task visibility rule
+ * applies to task notices and the ads rule to alert notices (visibleNotificationsSql).
+ */
+const FROM = Prisma.sql`FROM "Notification" n LEFT JOIN "Task" t ON t.id = n."taskId"`;
 
 /**
- * The person's notifications in one workspace that are about tasks they can still see (visibleTasksAcrossSql, the one
- * multi-brand visibility rule), so list and count always agree, also after someone loses access.
+ * The person's notifications in one workspace that they may still see: task notices about tasks they can still see
+ * (visibleTasksAcrossSql's multi-brand rule), ads alerts on brands where they still hold brand.read and ads.read. List
+ * and count use it, so they always agree, also after someone loses access.
  */
 export async function notificationWhereSql(userId: string, workspaceId: string): Promise<Prisma.Sql> {
-  return Prisma.sql`n."userId" = ${userId} AND n."workspaceId" = ${workspaceId} AND ${await visibleTasksAcrossSql(userId, workspaceId, "t")}`;
+  return Prisma.sql`n."userId" = ${userId} AND n."workspaceId" = ${workspaceId} AND ${await visibleNotificationsSql(userId, workspaceId)}`;
 }
 
 const Cursor = z.object({ createdAt: z.iso.datetime(), id: z.string().min(1).max(100) });
@@ -30,12 +35,16 @@ const Cursor = z.object({ createdAt: z.iso.datetime(), id: z.string().min(1).max
 type Row = {
   id: string; kind: string; brandId: string; taskId: string | null; taskTitle: string | null; actorId: string | null;
   actorName: string | null; actorEmail: string | null; actorGone: boolean | null; actorClient: boolean | null; readAt: Date | null; createdAt: Date;
+  alertKind: AdAlertKind | null; alertAccountId: string | null; alertCampaignName: string | null; alertCurrency: string | null; alertValues: unknown;
   count?: number;
 };
 
 const COLUMNS = (n: Prisma.Sql) => Prisma.sql`n.id, n.kind::text AS kind, n."brandId", n."taskId", t.title AS "taskTitle", n."actorId", a.name AS "actorName",
            a.email AS "actorEmail", (a."deletedAt" IS NOT NULL OR a.status <> 'ACTIVE') AS "actorGone",
-           ${n} AS "actorClient", n."readAt", n."createdAt"`;
+           ${n} AS "actorClient", n."readAt", n."createdAt", al.kind::text AS "alertKind", al."accountId" AS "alertAccountId",
+           al."campaignName" AS "alertCampaignName", al.currency AS "alertCurrency", al."values" AS "alertValues"`;
+/** An AD_ALERT notice's alert, for its text (same brand, so a notice can't show another brand's alert). */
+const ALERT = Prisma.sql`LEFT JOIN "AdAlert" al ON al.id = n."adAlertId" AND al."brandId" = n."brandId"`;
 
 /**
  * Unread notices come first, one row per kind and business (the newest, with `count`), so a morning of overdue tasks
@@ -55,13 +64,13 @@ export async function listNotifications(userId: string, workspaceId: string, cur
     SELECT * FROM (
       SELECT DISTINCT ON (n.kind, n."brandId") ${COLUMNS(actorClient)},
              (count(*) OVER (PARTITION BY n.kind, n."brandId"))::int AS count
-      ${FROM} LEFT JOIN "User" a ON a.id = n."actorId"
+      ${FROM} LEFT JOIN "User" a ON a.id = n."actorId" ${ALERT}
       WHERE ${base} AND n."readAt" IS NULL
       ORDER BY n.kind, n."brandId", n."createdAt" DESC, n.id DESC
     ) g ORDER BY "createdAt" DESC, id DESC`),
     prisma.$queryRaw<Row[]>(Prisma.sql`
     SELECT ${COLUMNS(actorClient)}
-    ${FROM} LEFT JOIN "User" a ON a.id = n."actorId"
+    ${FROM} LEFT JOIN "User" a ON a.id = n."actorId" ${ALERT}
     WHERE ${Prisma.join(where, " AND ")}
     ORDER BY n."createdAt" DESC, n.id DESC
     LIMIT 21`),
@@ -80,7 +89,10 @@ function toDto(r: Row): NotificationDto {
       ? { id: r.actorId, name: TEAM_MEMBER, gone: true, client: !!r.actorClient }
       : { id: r.actorId, name: personName({ name: r.actorName, email: r.actorEmail }, { reveal: false }), gone: !!r.actorGone, client: !!r.actorClient }
     : null;
-  return { id: r.id, kind: r.kind, count: r.count ?? 1, brandId: r.brandId, taskId: r.taskId, taskTitle: r.taskTitle, actor, readAt: r.readAt?.toISOString() ?? null, createdAt: r.createdAt.toISOString() };
+  const alert = r.alertKind
+    ? { kind: r.alertKind, text: adAlertText({ kind: r.alertKind, accountId: r.alertAccountId, campaignName: r.alertCampaignName, currency: r.alertCurrency ?? "", values: r.alertValues }) }
+    : null;
+  return { id: r.id, kind: r.kind, count: r.count ?? 1, brandId: r.brandId, taskId: r.taskId, taskTitle: r.taskTitle, actor, alert, readAt: r.readAt?.toISOString() ?? null, createdAt: r.createdAt.toISOString() };
 }
 
 /** Unread notifications, counted up to 100. */
@@ -90,9 +102,9 @@ export async function countUnread(userId: string, workspaceId: string): Promise<
   const [row] = await prisma.$queryRaw<{ count: number }[]>(Prisma.sql`
     SELECT count(*)::int AS count FROM (
       SELECT 1 FROM (
-        SELECT "taskId", "userId", "workspaceId" FROM "Notification"
+        SELECT "taskId", "userId", "workspaceId", "kind", "brandId", "adAlertId" FROM "Notification"
         WHERE "userId" = ${userId} AND "workspaceId" = ${workspaceId} AND "readAt" IS NULL OFFSET 0
-      ) n JOIN "Task" t ON t.id = n."taskId"
+      ) n LEFT JOIN "Task" t ON t.id = n."taskId"
       WHERE ${await notificationWhereSql(userId, workspaceId)} LIMIT 100) x`);
   return row?.count ?? 0;
 }

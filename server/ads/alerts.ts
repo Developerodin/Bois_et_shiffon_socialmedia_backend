@@ -7,6 +7,7 @@ import { listBudgets } from "@/server/data/budgets";
 import { rateTable, type Converted } from "@/server/data/fx";
 import type { AdSettings } from "@/server/data/meta-ads-sync";
 import { addDays, dayDate, dayOf, type SyncOutcome } from "@/server/data/sources";
+import { adAlertRecipients, notifyAdAlert } from "@/server/notifications/ads";
 import { cleanTitle } from "@/server/text";
 
 /**
@@ -317,7 +318,8 @@ const Payload = z.object({ workspaceId: z.string(), brandId: z.string(), dataSou
 /**
  * Job handler. Re-reads the source by id AND the payload's workspace and brand, kind META_ADS and not OFF, so a
  * payload naming another brand's source finds nothing. Reads the account's AdDay rows from S − 33 (the start of the
- * NO_PURCHASES lookback) to S, the EUR rates for the floors and the month's pacing, then stores each alert.
+ * NO_PURCHASES lookback) to S, the EUR rates for the floors and the month's pacing, then stores each alert. The bell's
+ * recipients are read once, before the writes, and only when something was found.
  */
 export async function runAdAlerts(payload: unknown) {
   const p = Payload.parse(payload);
@@ -345,15 +347,18 @@ export async function runAdAlerts(payload: unknown) {
   if (noRate) console.warn("[ads] no exchange rate: money-floored alerts skipped", source.brandId, source.id, settings.currency);
   const pace = evaluatePacing((await listBudgets(scope, p.day.slice(0, 7))).pacing.find((x) => x.platform === "META"), source.brandId);
   if (pace) candidates.push(pace);
-  for (const c of candidates) await recordAlert(scope, c);
+  if (!candidates.length) return;
+  const recipients = await adAlertRecipients(scope);
+  for (const c of candidates) await recordAlert(scope, c, recipients);
 }
 
 /**
  * Stores one alert, in its own transaction. The episode's row (same subject, lastDay ≥ day − 1; OVER_PACE: the same
  * month, which its subjectKey holds) is locked and moved on, with no new notice. Otherwise a new row; ON CONFLICT DO
- * NOTHING on dedupeKey makes a rerun, or two accounts' jobs racing on OVER_PACE, insert it once.
+ * NOTHING on dedupeKey makes a rerun, or two accounts' jobs racing on OVER_PACE, insert it once; only the inserted row
+ * notifies, so an episode never sends a second notice.
  */
-async function recordAlert(scope: { workspaceId: string; brandId: string }, c: Candidate) {
+async function recordAlert(scope: { workspaceId: string; brandId: string }, c: Candidate, recipients: readonly string[]) {
   const month = c.kind === "OVER_PACE";
   await prisma.$transaction(async (tx) => {
     const [found] = await tx.$queryRaw<{ id: string }[]>`
@@ -372,7 +377,7 @@ async function recordAlert(scope: { workspaceId: string; brandId: string }, c: C
         WHERE id = ${found.id}`;
       return;
     }
-    await tx.adAlert.createManyAndReturn({
+    const [inserted] = await tx.adAlert.createManyAndReturn({
       data: [{
         ...scope,
         kind: c.kind,
@@ -389,5 +394,6 @@ async function recordAlert(scope: { workspaceId: string; brandId: string }, c: C
       skipDuplicates: true,
       select: { id: true },
     });
+    if (inserted) await notifyAdAlert(tx, { id: inserted.id, ...scope }, recipients);
   });
 }

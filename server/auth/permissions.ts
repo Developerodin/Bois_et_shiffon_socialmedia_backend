@@ -86,22 +86,44 @@ export const CLIENT_GRANT_WHERE = { isSystem: true, slug: CLIENT_REVIEWER } as c
 export const isClientMember = (clientGrant: boolean, workspacePerms: readonly string[]) => clientGrant && !workspacePerms.includes("content.approve");
 
 /**
- * Does someone other than `userId` hold `key` on this brand? A client reviewer's grant doesn't count: clients are never
- * the "other" staff member. Three queries, computed in memory.
+ * Does someone hold every one of `keys` on a brand? Their workspace role's keys ∪ their project grant's (as
+ * effectivePermissions); without a workspace role (null), never: a grant counts only for someone with one.
+ */
+export function holdsAll(rolePerms: readonly string[] | null | undefined, grantPerms: readonly string[], keys: readonly PermissionKey[]) {
+  if (!rolePerms) return false;
+  return keys.every((k) => rolePerms.includes(k) || grantPerms.includes(k));
+}
+
+/**
+ * Who holds every one of `keys` on this brand: workspace members (their DB role, or the legacy enum's role) with
+ * role ∪ grant holding them all (holdsAll). `clients`: count a client reviewer's grant (permissionsOf does; the
+ * "other staff member" rules don't). `activeOnly`: only active, not deleted people. Three queries, computed in memory;
+ * never `Role.permissions { has }`, a possibly stale stored copy (Owner and Admin are read from code).
  * ponytail: reads every member of the workspace; a joined query if workspaces get large.
  */
-export async function hasOtherHolder(workspaceId: string, brandId: string, userId: string, key: PermissionKey) {
+export async function keyHolders(db: Db, workspaceId: string, brandId: string, keys: readonly PermissionKey[], opts: { clients: boolean; activeOnly: boolean }) {
+  const role = { select: { isSystem: true, slug: true, permissions: true } } as const;
   const [members, legacy, grants] = await Promise.all([
-    prisma.workspaceMember.findMany({ where: { workspaceId, userId: { not: userId } }, select: { userId: true, role: true, roleRef: { select: { isSystem: true, slug: true, permissions: true } } } }),
-    prisma.role.findMany({ where: { workspaceId, slug: { in: Object.values(LEGACY_ROLE_SLUG) } }, select: { isSystem: true, slug: true, permissions: true } }),
-    prisma.brandMember.findMany({ where: { workspaceId, brandId, userId: { not: userId } }, select: { userId: true, role: { select: { isSystem: true, slug: true, permissions: true } } } }),
+    db.workspaceMember.findMany({
+      where: { workspaceId, ...(opts.activeOnly ? { user: { status: "ACTIVE", deletedAt: null } } : {}) },
+      select: { userId: true, role: true, roleRef: role },
+    }),
+    db.role.findMany({ where: { workspaceId, slug: { in: Object.values(LEGACY_ROLE_SLUG) } }, select: { isSystem: true, slug: true, permissions: true } }),
+    db.brandMember.findMany({ where: { workspaceId, brandId }, select: { userId: true, role } }),
   ]);
   const legacyPerms = new Map(legacy.map((r) => [r.slug, rolePermissions(r)]));
-  const roleOf = (m: (typeof members)[number]) => (m.roleRef ? rolePermissions(m.roleRef) : legacyPerms.get(LEGACY_ROLE_SLUG[m.role]));
-  if (members.some((m) => roleOf(m)?.includes(key))) return true;
-  // As in effectivePermissions: a grant counts only for someone with a workspace role.
-  const withRole = new Set(members.filter((m) => roleOf(m)).map((m) => m.userId));
-  return grants.some((g) => withRole.has(g.userId) && !isClientGrant(g.role) && rolePermissions(g.role).includes(key));
+  const grantOf = new Map(grants.filter((g) => opts.clients || !isClientGrant(g.role)).map((g) => [g.userId, rolePermissions(g.role)]));
+  return members
+    .filter((m) => holdsAll(m.roleRef ? rolePermissions(m.roleRef) : legacyPerms.get(LEGACY_ROLE_SLUG[m.role]), grantOf.get(m.userId) ?? [], keys))
+    .map((m) => m.userId);
+}
+
+/**
+ * Does someone other than `userId` hold `key` on this brand? A client reviewer's grant doesn't count: clients are never
+ * the "other" staff member. Nobody is filtered out for being inactive (as before keyHolders).
+ */
+export async function hasOtherHolder(workspaceId: string, brandId: string, userId: string, key: PermissionKey) {
+  return (await keyHolders(prisma, workspaceId, brandId, [key], { clients: false, activeOnly: false })).some((id) => id !== userId);
 }
 
 /**

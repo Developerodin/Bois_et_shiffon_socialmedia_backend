@@ -2,6 +2,7 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import type { DataSource } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
+import { ensureSystemRoles } from "@/server/auth/permissions";
 import { ADS_ALERTS_JOB, enqueueAdAlerts, listAlerts, runAdAlerts } from "@/server/ads/alerts";
 import { addDays } from "@/server/data/sources";
 
@@ -10,6 +11,7 @@ import { addDays } from "@/server/data/sources";
  * when two accounts race, brand-scoped keys and reads, and listAlerts' two windows.
  */
 let ws: string;
+let owner: string;
 const S = "2026-11-25";
 const A = "aa-a";
 const B = "aa-b";
@@ -43,8 +45,13 @@ const ymd = (d: Date) => d.toISOString().slice(0, 10);
 beforeAll(async () => {
   ws = (await prisma.workspace.create({ data: { name: "W", slug: "w-ad-alerts" } })).id;
   for (const id of [A, B]) await prisma.brand.create({ data: { id, workspaceId: ws, slug: id, displayName: id } });
+  await ensureSystemRoles(ws);
+  owner = (await prisma.user.create({ data: { email: "owner@ad-alerts.test" } })).id;
+  const role = await prisma.role.findFirstOrThrow({ where: { workspaceId: ws, slug: "owner" } });
+  await prisma.workspaceMember.create({ data: { workspaceId: ws, userId: owner, roleId: role.id } });
 });
 beforeEach(async () => {
+  await prisma.notification.deleteMany({});
   await prisma.adAlert.deleteMany({});
   await prisma.adDay.deleteMany({});
   await prisma.adBudget.deleteMany({});
@@ -87,6 +94,8 @@ describe("runAdAlerts", () => {
     await run(s, "2026-11-26");
     const rows = await alerts();
     expect(rows.map((a) => [a.kind, ymd(a.firstDay), ymd(a.lastDay)])).toEqual([["SPEND_UP", S, "2026-11-26"]]);
+    // The episode's update sends no second notice.
+    expect((await prisma.notification.findMany()).map((n) => [n.kind, n.userId, n.adAlertId, n.taskId])).toEqual([["AD_ALERT", owner, rows[0].id, null]]);
     expect(rows[0].values).toMatchObject({ day: "2026-11-26", now: "100.00" });
     // A rerun of the earlier day keeps the later day and its figures.
     await run(s, S);
@@ -117,6 +126,7 @@ describe("runAdAlerts", () => {
     expect(pace.map((a) => [a.subjectKey, a.dedupeKey, ymd(a.firstDay), a.accountId, a.currency])).toEqual([
       [`OVER_PACE:${A}:2026-11`, `OVER_PACE:${A}:2026-11`, S, null, "EUR"],
     ]);
+    expect(await prisma.notification.count({ where: { adAlertId: pace[0].id } })).toBe(1);
   });
 
   it("two brands sharing one ad account each get their own SPEND_UP", async () => {

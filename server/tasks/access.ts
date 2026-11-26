@@ -1,7 +1,7 @@
 import "server-only";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
-import { brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, isClientGrant, isClientMember, memberRole } from "@/server/auth/permissions";
+import { brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, holdsAll, isClientGrant, isClientMember, memberRole } from "@/server/auth/permissions";
 import { CLIENT_REVIEWER, rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { CRM_TASK_KEYS } from "@/shared";
 import { lockRow } from "@/server/services/publishing";
@@ -140,11 +140,54 @@ export function visibleTaskSql(v: TaskViewer, alias = "t"): Prisma.Sql {
  * left out, as brandAccess refuses them.
  */
 export async function visibleTasksAcrossSql(userId: string, workspaceId: string, alias = "t"): Promise<Prisma.Sql> {
-  const a = ref(alias);
+  return tasksAcrossSql(await memberAccess(workspaceId, userId), userId, workspaceId, alias);
+}
+
+/**
+ * The person's workspace role and every project grant (with its role) in one workspace: two queries, read once per
+ * bell read or digest. The bell's task and ads branches and the digest's readerAccess build on it.
+ */
+export async function memberAccess(workspaceId: string, userId: string) {
   const [found, grants] = await Promise.all([
     memberRole(workspaceId, userId),
-    prisma.brandMember.findMany({ where: { workspaceId, userId }, select: { brandId: true, role: { select: { isSystem: true, slug: true, permissions: true } } } }),
+    prisma.brandMember.findMany({ where: { workspaceId, userId }, include: { role: true } }),
   ]);
+  return { found, grants };
+}
+type MemberAccess = Awaited<ReturnType<typeof memberAccess>>;
+
+/** The brand is in the workspace and not archived (brandAccess refuses archived brands). */
+const liveBrand = (a: Prisma.Sql, workspaceId: string) =>
+  Prisma.sql`EXISTS (SELECT 1 FROM "Brand" b WHERE b.id = ${a}."brandId" AND b."workspaceId" = ${workspaceId} AND b.status <> 'ARCHIVED')`;
+
+/** The keys an AD_ALERT notice needs on its brand, now: the same rule decides who is notified (keyHolders). */
+export const AD_ALERT_KEYS = ["brand.read", "ads.read"] as const satisfies readonly PermissionKey[];
+
+/**
+ * Which notifications a person sees in one workspace, as a SQL condition on Notification `n` LEFT JOIN Task `t`, from
+ * one memberAccess: a task notice while they can still see its task (visibleTasksAcrossSql's rule), an AD_ALERT notice
+ * while they hold brand.read and ads.read on its brand (role ∪ grant, workspace role required, holdsAll) and the brand
+ * isn't archived.
+ */
+export async function visibleNotificationsSql(userId: string, workspaceId: string): Promise<Prisma.Sql> {
+  const access = await memberAccess(workspaceId, userId);
+  const tasks = tasksAcrossSql(access, userId, workspaceId, "t");
+  const own = access.found?.role ? rolePermissions(access.found.role) : null;
+  const n = ref("n");
+  let brands: Prisma.Sql;
+  if (!own) brands = Prisma.sql`FALSE`;
+  else if (holdsAll(own, [], AD_ALERT_KEYS)) brands = Prisma.sql`TRUE`;
+  else {
+    const ids = access.grants.filter((g) => holdsAll(own, rolePermissions(g.role), AD_ALERT_KEYS)).map((g) => g.brandId);
+    brands = ids.length ? Prisma.sql`${n}."brandId" IN (${Prisma.join(ids)})` : Prisma.sql`FALSE`;
+  }
+  // The ads branch is on n: t is NULL for these rows under the LEFT JOIN.
+  const ads = Prisma.sql`(n.kind = 'AD_ALERT' AND n."adAlertId" IS NOT NULL AND ${brands} AND ${liveBrand(n, workspaceId)})`;
+  return Prisma.sql`((n."taskId" IS NOT NULL AND ${tasks}) OR ${ads})`;
+}
+
+function tasksAcrossSql({ found, grants }: MemberAccess, userId: string, workspaceId: string, alias: string): Prisma.Sql {
+  const a = ref(alias);
   if (!found?.role) return Prisma.sql`FALSE`;
   const own = rolePermissions(found.role);
   const reads = (perms: string[]) => perms.includes("brand.read") && perms.includes("tasks.read");
@@ -168,7 +211,7 @@ export async function visibleTasksAcrossSql(userId: string, workspaceId: string,
     : own.includes("tasks.all")
       ? [noneOf(client), Prisma.sql`FALSE`]
       : [anyOf(all), noneOf([...client, ...all])];
-  const live = Prisma.sql`EXISTS (SELECT 1 FROM "Brand" b WHERE b.id = ${a}."brandId" AND b."workspaceId" = ${workspaceId} AND b.status <> 'ARCHIVED')`;
+  const live = liveBrand(a, workspaceId);
   // A key in the workspace role reaches every brand (a grant only adds keys); else only the brands whose grant adds one.
   const crmSql = handlesCustomers(own) ? Prisma.sql`TRUE` : Prisma.sql`(${notCrm(a)} OR ${anyOf(crm)})`;
   return Prisma.sql`(${a}."workspaceId" = ${workspaceId} AND ${live} AND ${crmSql} AND (${allSql} OR (${mineSql} AND ${ownClause(userId, a)}) OR (${anyOf(client)} AND ${clientClause(userId, a)})))`;

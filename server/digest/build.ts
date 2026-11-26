@@ -2,14 +2,14 @@ import "server-only";
 import { Prisma, type DataSourceKind } from "@prisma/client";
 import type { DataSyncResult, DateRange, DigestBody, DigestBrand, DigestSection } from "@/shared";
 import { prisma } from "@/server/db/prisma";
-import { isClientGrant, isClientMember, memberRole, permissionsOf } from "@/server/auth/permissions";
+import { isClientGrant, isClientMember, permissionsOf } from "@/server/auth/permissions";
 import { rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { adsSummary } from "@/server/data/ads-read";
 import { postsWithMetrics } from "@/server/data/post-metrics-read";
 import { salesSummary } from "@/server/data/sales-read";
 import { searchSummary } from "@/server/data/search-read";
 import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
-import { handlesCustomers, taskViewer, visibleTaskSql } from "@/server/tasks/access";
+import { handlesCustomers, memberAccess, taskViewer, visibleTaskSql } from "@/server/tasks/access";
 import { openTaskSql } from "@/server/tasks/sql";
 
 /**
@@ -189,9 +189,9 @@ function hasNews(s: DigestSection) {
  * brandAccess does; null when they are no longer a member. The digest's builder, its page and its email all use it.
  */
 export async function readerAccess(userId: string, workspaceId: string) {
-  const [found, grants, brands] = await Promise.all([
-    memberRole(workspaceId, userId),
-    prisma.brandMember.findMany({ where: { workspaceId, userId }, include: { role: true } }),
+  // Role and grants from the bell's own load (memberAccess); the brands and permissionsOf per brand stay here.
+  const [{ found, grants }, brands] = await Promise.all([
+    memberAccess(workspaceId, userId),
     prisma.brand.findMany({ where: { workspaceId, status: { not: "ARCHIVED" } }, select: { id: true, displayName: true }, orderBy: { createdAt: "asc" } }),
   ]);
   if (!found?.role) return null;
