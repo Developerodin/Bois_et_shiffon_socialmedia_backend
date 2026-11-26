@@ -124,7 +124,6 @@ type OrderGroupRow = {
   key: string; currency: string; total_groups: number; orders: number; gross: Prisma.Decimal; discounts: Prisma.Decimal;
   net_sales: Prisma.Decimal; total: Prisma.Decimal; refunded: Prisma.Decimal;
 };
-type LineGroupRow = { key: string; currency: string; total_groups: number; orders: number; units: number; revenue: Prisma.Decimal };
 
 /**
  * Sales per group, per currency. Time groups keep the newest (when capped) and come oldest first; the others by net
@@ -136,19 +135,9 @@ export async function salesBreakdown(scope: Scope, range: DateRange, by: Breakdo
   const cap = Math.min(limit, MAX_ANALYSIS_ROWS);
   const time = TIME_BREAKDOWNS.includes(by);
   if (by === "collection" || by === "vendor") {
-    const rows = await prisma.$queryRaw<LineGroupRow[]>`
-      WITH ${brandBounds(scope, range)}, g AS (
-        SELECT ${by === "vendor" ? VENDOR_KEY : COLLECTION_KEY} AS key, l."currency" AS currency, count(DISTINCT l."orderShopifyId")::int AS orders,
-               sum(${units("l")})::int AS units, sum(${netSales("l")}) AS revenue
-        FROM (${countedLines(scope)}) l ${by === "collection" ? COLLECTION_JOIN : Prisma.empty}
-        GROUP BY 1, 2
-      ), ${capped(Prisma.sql`revenue DESC, key`)}
-      SELECT key, currency, orders, units, revenue, total_groups FROM r WHERE ${shown(cap)} ORDER BY currency, rn`;
-    return {
-      columns: [by, "currency", "orders", "units", "revenue"],
-      rows: rows.map((r) => [r.key, r.currency, r.orders, r.units, money(r.revenue)]),
-      moreGroups: hidden(rows),
-    };
+    // Same groups as topProducts by revenue, its columns reordered to this tool's.
+    const { rows, moreGroups } = await topProducts(scope, range, "revenue", by, cap);
+    return { columns: [by, "currency", "orders", "units", "revenue"], rows: rows.map(([key, currency, units, revenue, orders]) => [key, currency, orders, units, revenue]), moreGroups };
   }
   // Each order once per key (DISTINCT), then summed: an order's two rare codes are one "(other codes)" order.
   const rows = await prisma.$queryRaw<OrderGroupRow[]>`
