@@ -1809,14 +1809,12 @@ to the dev DB. See DATA_MODEL §12.
    orders carry `shippingTaxes` (see the money layer section above).
 
 **Waiting on outside parties:**
-- Meta Ads connection for B&C (a system user token or a login with ad access).
+- The Meta Ads connection for B&C.
 - Shopify approving `read_all_orders` for the Shop Assistant app; order history past 60 days stays dormant until then.
 - Meta's app review for Instagram insights; story numbers can't be live-checked until it passes.
 
 **Open small items:**
 - `tests/crawl.test.ts` is flaky (failed once, passed on rerun); find the timing it depends on.
-- Remove the `sma-money` worktrees. Their `node_modules` are junctions: delete those with `cmd /c rmdir <path>` first
-  (never a recursive delete through a junction, which empties the target), then the worktree folders, then
-  `git worktree prune`.
+- Remove the `sma-money` worktrees; their `node_modules` are junctions, so remove those with `cmd /c rmdir`.
 
 **Next:** chat tools for ads, posts and Search Console, then ads alerts.
