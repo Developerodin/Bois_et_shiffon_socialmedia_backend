@@ -1,5 +1,5 @@
 import { blockedAuditError } from "@/server/agents/definitions/site-audit";
-import { startAgentRun } from "@/server/agents/engine";
+import { AgentStartError, startAgentRun } from "@/server/agents/engine";
 import { prisma } from "@/server/db/prisma";
 import { AUDIT_FRESH_DAYS, creditBalance, CREDIT_COSTS, InsufficientCreditsError, refundCharge, spendCredits } from "@/server/services/credits";
 
@@ -170,4 +170,45 @@ export async function startCompetitorAudit(input: { workspaceId: string; brandId
     throw e;
   }
   return { status: "started", charged: CREDIT_COSTS.siteAudit };
+}
+
+export type AuditAllSkip = "not-tracked" | "fresh" | "blocked" | "running" | "credits" | "limit" | "failed";
+export type AuditAllResult = { started: string[]; skipped: { id: string; reason: AuditAllSkip }[]; balance: number };
+
+/**
+ * Audit several competitors at once, in the order given: the page puts the ones AI names most first and the never-audited
+ * before the stale (planAuditAll on the web), so the order is decided in one place. Each site goes through
+ * startCompetitorAudit, whose spend takes the workspace's credit lock, so a single audit pressed at the same time can't
+ * make the two overspend. Sites that are fresh, blocked or already running are skipped without a charge. Once credits
+ * run out (or the daily run cap is hit) the rest wait. One site failing to start doesn't stop the others, and those
+ * already started stay charged and are reported. The caller kicks the runner when anything started.
+ * ponytail: sequential starts, a few queries each; fine for a brand's handful of competitors (the route caps the list).
+ */
+export async function auditAllCompetitors(input: { workspaceId: string; brandId: string; userId: string; competitorIds: string[] }): Promise<AuditAllResult> {
+  const { competitors } = await listCompetitors(input.workspaceId, input.brandId);
+  const started: string[] = [];
+  const skipped: AuditAllResult["skipped"] = [];
+  let stop: "credits" | "limit" | null = null;
+  for (const id of [...new Set(input.competitorIds)]) {
+    const c = competitors.find((x) => x.id === id);
+    const reason: AuditAllSkip | null = !c ? "not-tracked" : c.auditRunning ? "running" : c.auditBlocked ? "blocked" : c.audit && !c.audit.stale ? "fresh" : stop;
+    if (reason) {
+      skipped.push({ id, reason });
+      continue;
+    }
+    try {
+      const r = await startCompetitorAudit({ workspaceId: input.workspaceId, brandId: input.brandId, userId: input.userId, competitorId: id });
+      if (r.status === "started") started.push(id);
+      else if (r.status === "insufficient-credits") skipped.push({ id, reason: (stop = "credits") });
+      else skipped.push({ id, reason: r.status === "blocked" ? "blocked" : "running" });
+    } catch (e) {
+      // startCompetitorAudit refunded its charge before rethrowing. The daily cap would refuse every later site too.
+      if (e instanceof AgentStartError && e.status === 429) skipped.push({ id, reason: (stop = "limit") });
+      else {
+        console.error("[competitors] audit-all: an audit didn't start", e);
+        skipped.push({ id, reason: "failed" });
+      }
+    }
+  }
+  return { started, skipped, balance: await creditBalance(input.workspaceId) };
 }

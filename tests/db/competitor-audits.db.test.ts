@@ -1,7 +1,8 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { blockedAuditError } from "@/server/agents/definitions/site-audit";
 import { prisma } from "@/server/db/prisma";
-import { listCompetitors, startCompetitorAudit } from "@/server/services/competitor-audits";
+import { creditBalance } from "@/server/services/credits";
+import { auditAllCompetitors, listCompetitors, startCompetitorAudit } from "@/server/services/competitor-audits";
 
 /** Competitor audits against Postgres: the full-over-partial pick and the blocked-site refusal's queries. */
 let ws: string;
@@ -41,5 +42,44 @@ describe("competitor audits", () => {
     const result = await startCompetitorAudit({ workspaceId: ws, brandId: "ca-b", userId, competitorId: "c-blocked" });
     expect(result).toMatchObject({ status: "blocked" });
     expect(await prisma.creditEntry.findMany({ where: { workspaceId: ws } })).toEqual(before);
+  });
+});
+
+describe("audit all", () => {
+  // Its own workspace: the starter grant (20 credits) pays for two audits.
+  let ws2: string;
+  beforeAll(async () => {
+    ws2 = (await prisma.workspace.create({ data: { name: "W2", slug: "w-competitor-audit-all" } })).id;
+    await prisma.brand.create({ data: { id: "aa-b", workspaceId: ws2, slug: "aa-b", displayName: "B" } });
+    const row = (id: string) => ({ id, workspaceId: ws2, brandId: "aa-b", name: id, domain: `${id}.test`, source: "manual" });
+    await prisma.competitor.createMany({ data: ["aa-new1", "aa-new2", "aa-new3", "aa-single", "aa-fresh", "aa-blocked", "aa-running"].map(row) });
+    await audit("aa-fresh.test", ago(2), { positioning: "fresh" });
+    await prisma.agentRun.createMany({
+      data: [
+        { workspaceId: ws2, brandId: "aa-b", agentKey: "site-audit", trigger: "manual", status: "FAILED", input: { domain: "aa-blocked.test" }, error: blockedAuditError("aa-blocked.test"), finishedAt: ago(1), createdAt: ago(1) },
+        { workspaceId: ws2, brandId: "aa-b", agentKey: "site-audit", trigger: "manual", status: "QUEUED", input: { domain: "aa-running.test" } },
+      ],
+    });
+  });
+
+  it("skips fresh, blocked and running sites, and never overspends alongside a single audit", async () => {
+    const [all, single] = await Promise.all([
+      auditAllCompetitors({ workspaceId: ws2, brandId: "aa-b", userId, competitorIds: ["aa-fresh", "aa-blocked", "aa-running", "aa-new1", "aa-new2", "aa-new3"] }),
+      startCompetitorAudit({ workspaceId: ws2, brandId: "aa-b", userId, competitorId: "aa-single" }),
+    ]);
+    expect(all.skipped.filter((s) => ["aa-fresh", "aa-blocked", "aa-running"].includes(s.id))).toEqual([
+      { id: "aa-fresh", reason: "fresh" },
+      { id: "aa-blocked", reason: "blocked" },
+      { id: "aa-running", reason: "running" },
+    ]);
+    // 20 credits pay for exactly two audits between the two callers, whichever took the lock first.
+    const startedCount = all.started.length + (single.status === "started" ? 1 : 0);
+    expect(startedCount).toBe(2);
+    expect(await creditBalance(ws2)).toBe(0);
+    // The ones audit-all couldn't pay for wait for credits, in the order given.
+    const waiting = ["aa-new1", "aa-new2", "aa-new3"].filter((id) => !all.started.includes(id));
+    expect(all.skipped.filter((s) => s.reason === "credits").map((s) => s.id)).toEqual(waiting);
+    expect(all.started).toEqual(["aa-new1", "aa-new2", "aa-new3"].slice(0, all.started.length));
+    expect(await prisma.agentRun.count({ where: { workspaceId: ws2, status: "QUEUED", NOT: { input: { path: ["domain"], equals: "aa-running.test" } } } })).toBe(2);
   });
 });
