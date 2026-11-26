@@ -62,7 +62,7 @@ export async function call<T>(url: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
-const form = (o: Record<string, string>): RequestInit => ({
+export const form = (o: Record<string, string>): RequestInit => ({
   method: "POST",
   headers: { "content-type": "application/x-www-form-urlencoded" },
   body: qs(o),
@@ -160,6 +160,20 @@ const META_ADS_SCOPES = ["ads_read"];
 const SIXTY_DAYS_S = 60 * 86_400;
 
 /**
+ * One connection per ad account, all sharing the token: the personal login (60-day expiry) and the pasted system user
+ * token (tokenExpiresAt null: it never expires, which is how a system token is told apart).
+ */
+export function metaAccountsToConnections(accounts: MetaAdAccount[], token: string, tokenExpiresAt: Date | null, scopes: string[]): ConnectedAccount[] {
+  return accounts.map((a) => ({
+    externalAccountId: a.id, // "act_123"
+    displayName: a.name,
+    credentials: { accessToken: token },
+    tokenExpiresAt,
+    scopes,
+  }));
+}
+
+/**
  * Meta ad accounts: their own login (same Meta app as META), asking ads_read only, so Facebook Pages logins never
  * gain ad access. The 60-day user token can't be refreshed without the person (noRefresh); one connection per account.
  */
@@ -187,14 +201,9 @@ const metaAds: Adapter = {
     const accounts = await metaAdAccounts(long.access_token);
     if (!accounts.length) throw new ProviderError("This Meta login has no active ad accounts. Sign in with the account that runs your ads.");
     // Meta sometimes leaves expires_in out of the long-lived answer; it is 60 days.
-    const tokenExpiresAt = expiry(long.expires_in ?? SIXTY_DAYS_S);
-    return accounts.map((a) => ({
-      externalAccountId: a.id, // "act_123"
-      displayName: a.name,
-      credentials: { accessToken: long.access_token },
-      tokenExpiresAt,
-      scopes: META_ADS_SCOPES,
-    }));
+    // Always an expiry: a connection without one holds a system user token (saveConnections' keep rule).
+    const tokenExpiresAt = expiry(long.expires_in || SIXTY_DAYS_S);
+    return metaAccountsToConnections(accounts, long.access_token, tokenExpiresAt, META_ADS_SCOPES);
   },
 };
 

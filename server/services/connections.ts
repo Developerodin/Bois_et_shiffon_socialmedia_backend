@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { IntegrationConnection, IntegrationProvider, Prisma } from "@prisma/client";
 import { requireBrandAccess } from "@/server/auth/access";
 import { requirePermission } from "@/server/auth/permissions";
@@ -210,22 +211,36 @@ export async function completeConnect(input: {
   if (!cfg) throw new ConnectionError("Provider keys were removed during connect");
   const accounts = await PROVIDERS[input.provider].exchange({ code: input.code, ...cfg });
 
-  const saved = await saveConnections({ workspaceId: st.workspaceId, brandId: st.brandId, provider: input.provider, userId: input.userId, accounts });
-  return { workspaceId: st.workspaceId, brandId: st.brandId, connections: saved };
+  // A personal Meta Ads login never replaces a working system user token (saveConnections' `keep`).
+  const saved = await saveConnections({
+    workspaceId: st.workspaceId, brandId: st.brandId, provider: input.provider, userId: input.userId, accounts,
+    ...(input.provider === "META_ADS" ? { keep: true as const } : {}),
+  });
+  return { workspaceId: st.workspaceId, brandId: st.brandId, connections: saved, kept: saved.kept };
 }
 
 /**
  * Save connected accounts (tokens encrypted; a reconnect replaces them in place) and the `integration.connected`
  * audit event in one transaction. Used by the OAuth callback and by Shopify's token connect.
+ *
+ * `keep` (Meta Ads personal logins only): an account already running on a working system user token (ACTIVE, no
+ * expiry) is left as it is, unless its META_ADS data source stopped at `permission` or `reconnect` (the system token
+ * broke), in which case the login replaces it. Each account is one conditional INSERT … ON CONFLICT … DO UPDATE …
+ * WHERE, so a pasted token and a login saving at once can't race past the rule. The returned array is the written
+ * rows, as without `keep`, with the kept account ids beside it as `kept`.
  */
 export async function saveConnections(input: {
   workspaceId: string; brandId: string; provider: IntegrationProvider; userId: string; accounts: ConnectedAccount[];
   /** Runs first in the same transaction; throw to save nothing (AskCart's one-brand rule). */
   guard?: (tx: Prisma.TransactionClient) => Promise<void>;
-}) {
+  keep?: true;
+  /** Merged into the audit event's metadata (the system token path says what it replaced). */
+  auditMetadata?: Record<string, unknown>;
+}): Promise<IntegrationConnection[] & { kept: string[] }> {
   const keyVersion = currentKeyVersion();
   return prisma.$transaction(async (tx) => {
     await input.guard?.(tx);
+    if (input.keep) return saveKeeping(tx, input, keyVersion);
     const rows = [];
     for (const a of input.accounts) {
       const data = {
@@ -260,11 +275,57 @@ export async function saveConnections(input: {
         action: "integration.connected",
         entityType: "IntegrationConnection",
         entityId: rows[0].id,
-        metadata: { provider: input.provider, accounts: rows.map((r) => r.displayName) },
+        metadata: { provider: input.provider, accounts: rows.map((r) => r.displayName), ...input.auditMetadata },
       },
     });
-    return rows;
+    return Object.assign(rows, { kept: [] as string[] });
   });
+}
+
+/** saveConnections with `keep`: see there. Runs inside its transaction. */
+async function saveKeeping(
+  tx: Prisma.TransactionClient,
+  input: Parameters<typeof saveConnections>[0],
+  keyVersion: number,
+): Promise<IntegrationConnection[] & { kept: string[] }> {
+  const written: string[] = [];
+  const kept: string[] = [];
+  for (const a of input.accounts) {
+    const ids = await tx.$queryRaw<{ id: string }[]>`
+      INSERT INTO "IntegrationConnection" ("id", "workspaceId", "brandId", "provider", "externalAccountId", "displayName", "scopes",
+        "encryptedCredentials", "credentialKeyVersion", "tokenExpiresAt", "status", "lastError", "connectedByUserId", "createdAt", "updatedAt")
+      VALUES (${randomUUID()}, ${input.workspaceId}, ${input.brandId}, ${input.provider}::"IntegrationProvider", ${a.externalAccountId}, ${a.displayName},
+        ${a.scopes}::text[], ${encryptCredentials(a.credentials, keyVersion)}, ${keyVersion}, (${a.tokenExpiresAt}::timestamptz AT TIME ZONE 'UTC'), 'ACTIVE'::"ConnectionStatus", NULL,
+        ${input.userId}, now(), now())
+      ON CONFLICT ("brandId", "provider", "externalAccountId") DO UPDATE SET
+        "displayName" = EXCLUDED."displayName", "scopes" = EXCLUDED."scopes", "encryptedCredentials" = EXCLUDED."encryptedCredentials",
+        "credentialKeyVersion" = EXCLUDED."credentialKeyVersion", "tokenExpiresAt" = EXCLUDED."tokenExpiresAt", "status" = EXCLUDED."status",
+        "lastError" = NULL, "connectedByUserId" = EXCLUDED."connectedByUserId", "updatedAt" = now()
+      WHERE NOT ("IntegrationConnection"."status" = 'ACTIVE' AND "IntegrationConnection"."tokenExpiresAt" IS NULL
+        AND NOT EXISTS (SELECT 1 FROM "DataSource" d WHERE d."connectionId" = "IntegrationConnection"."id" AND d."kind" = 'META_ADS'
+                        AND d."lastResult"->>'reason' IN ('permission', 'reconnect')))
+      RETURNING "id"`;
+    if (ids.length) written.push(ids[0].id);
+    else kept.push(a.externalAccountId);
+  }
+  const found = written.length ? await tx.integrationConnection.findMany({ where: { id: { in: written } } }) : [];
+  const rows = written.map((id) => found.find((r) => r.id === id)!);
+  const keptRows = kept.length
+    ? await tx.integrationConnection.findMany({ where: { brandId: input.brandId, provider: input.provider, externalAccountId: { in: kept } }, select: { id: true, displayName: true } })
+    : [];
+  await tx.auditEvent.create({
+    data: {
+      workspaceId: input.workspaceId,
+      brandId: input.brandId,
+      actorUserId: input.userId,
+      action: "integration.connected",
+      entityType: "IntegrationConnection",
+      // Every account kept: the audit names the first kept connection, never an empty array's first row.
+      entityId: rows[0]?.id ?? keptRows[0].id,
+      metadata: { provider: input.provider, accounts: rows.map((r) => r.displayName), ...(kept.length ? { kept: keptRows.map((r) => r.displayName) } : {}), ...input.auditMetadata },
+    },
+  });
+  return Object.assign(rows, { kept });
 }
 
 /**
