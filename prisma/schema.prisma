@@ -1753,7 +1753,8 @@ model ShopOrder {
   financialStatus    String?
   /// AskCart only; codes, never who used them
   discountCodes      String[]  @default([])
-  /// the order has more line items than ShopOrderLine holds (AskCart sends the first 100), or some were unreadable
+  /// AskCart's own flag: the order has more line items than it sent (it sends the first 100), or it paused mid-order.
+  /// Lines we couldn't read don't set it (the sync counts them as linesSkipped).
   lineItemsTruncated Boolean   @default(false)
   shopifyUpdatedAt   DateTime
   createdAt          DateTime  @default(now())
@@ -1765,8 +1766,9 @@ model ShopOrder {
   @@index([brandId, processedAt])
 }
 
-/// One line item of a ShopOrder (AskCart only; the pasted-token path stores none). Replaced as a set whenever its
-/// order's row is written with line items; an order read without them keeps the lines stored. No customer data.
+/// One line item of a ShopOrder (AskCart only; the pasted-token path stores none). Upserted whenever its order's row
+/// is written with line items; lines gone from the order are deleted only when the order was sent whole (not flagged
+/// lineItemsTruncated, no line we couldn't read). An order read without line items keeps the lines stored. No customer data.
 model ShopOrderLine {
   id              String   @id @default(cuid())
   workspaceId     String
