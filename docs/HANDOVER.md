@@ -1856,3 +1856,17 @@ alerts reach the bell only in a workspace with tasks on. The digest and the chat
    labels.
 3. Live-check the rules and tune the thresholds once B&C's Meta Ads is connected.
 4. Decide whether ads alerts need the bell outside the `tasks` flag.
+
+## SEO depth (branch `seo-depth`, 2026-11-26, not merged)
+
+Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (shared sync only) on `seo-depth`.
+
+- **Migrations to apply** (none applied to the dev DB yet, in order): `20261126150000_search_query_day`. Check each
+  keeps `SearchDay`'s and `SearchQueryDay`'s INCLUDE indexes.
+- **Search Console queries** (Task 1): each day also reads the top 500 queries and top 500 query-page pairs into
+  `SearchQueryDay` (400-day retention by housekeeping). Google's limits, read from its docs on 2026-11-26, are in the
+  header of server/data/search-console.ts. Existing sources get queries from their next daily run; no query backfill.
+- **Top queries** (Task 2): `GET search/queries` (analytics.read), the Search tab's "Top queries" table with its
+  coverage line, and the chat's `searchPerformance` (`topQueries`, `queryCoverage`, `queriesSince`; prompt v9).
+- Waits on Search Console verification for B&C: everything above ships tested against fixtures and stays empty until
+  then. Web components weren't browser-checked on the branch (no dev server or build was run).
