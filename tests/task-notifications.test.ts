@@ -102,11 +102,13 @@ describe("notification API", () => {
     const [count, groups, list] = db.$queryRaw.mock.calls.map(sqlOf);
     // Unread come as one row per kind and business with its count; the page itself is read ones only.
     const where = /FROM "Notification" n LEFT JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*LEFT JOIN "AdAlert" al ON al\.id = n\."adAlertId" AND al\."brandId" = n\."brandId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/;
-    expect(groups).toMatch(where);
-    expect(groups).toMatch(/DISTINCT ON \(n\.kind, n\."brandId"\)[\s\S]*count\(\*\) OVER \(PARTITION BY n\.kind, n\."brandId"\)[\s\S]*n\."readAt" IS NULL/);
+    // The groups pick one id per group from the fenced unread rows, visibility checked there, then join for those ids.
+    expect(groups).toMatch(/DISTINCT ON \(n\.kind, n\."brandId"\) n\.id, \(count\(\*\) OVER \(PARTITION BY n\.kind, n\."brandId"\)\)/);
+    expect(groups).toMatch(/"readAt" IS NULL OFFSET 0\s*\) n LEFT JOIN "Task" t ON t\.id = n\."taskId"\s*WHERE n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/);
+    expect(groups).toMatch(/\) g JOIN "Notification" n ON n\.id = g\.id LEFT JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*LEFT JOIN "AdAlert" al ON al\.id = n\."adAlertId" AND al\."brandId" = n\."brandId"/);
     expect(list).toMatch(/n\."readAt" IS NOT NULL/);
     // The count reads the unread rows through a fenced subquery aliased n, then applies the same where.
-    expect(count).toMatch(/"kind", "brandId", "adAlertId" FROM "Notification"[\s\S]*\) n LEFT JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/);
+    expect(count).toMatch(/kind, "brandId", "adAlertId", "createdAt" FROM "Notification"[\s\S]*\) n LEFT JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/);
     expect(list).toMatch(where);
     expect(list).toMatch(/LIMIT 21/);
   });

@@ -23,7 +23,7 @@ const FROM = Prisma.sql`FROM "Notification" n LEFT JOIN "Task" t ON t.id = n."ta
 
 /**
  * The person's notifications in one workspace that they may still see: task notices about tasks they can still see
- * (visibleTasksAcrossSql's multi-brand rule), ads alerts on brands where they still hold brand.read and ads.read. List
+ * (tasksAcrossSql's multi-brand rule, through visibleNotificationsSql), ads alerts on brands where they still hold brand.read and ads.read. List
  * and count use it, so they always agree, also after someone loses access.
  */
 export async function notificationWhereSql(userId: string, workspaceId: string): Promise<Prisma.Sql> {
@@ -47,8 +47,21 @@ const COLUMNS = (n: Prisma.Sql) => Prisma.sql`n.id, n.kind::text AS kind, n."bra
 const ALERT = Prisma.sql`LEFT JOIN "AdAlert" al ON al.id = n."adAlertId" AND al."brandId" = n."brandId"`;
 
 /**
+ * The person's unread notices in the workspace as `n`, with the columns the visibility rule and the group pick read.
+ * Fenced (OFFSET 0) so the planner reads them through the (userId, workspaceId, readAt) index before any join or
+ * LIMIT: without it, the LIMIT over the join made countUnread seq-scan Notification on every bell poll (38 ms at 1M
+ * rows, 0 unread).
+ */
+const unreadRows = (userId: string, workspaceId: string) => Prisma.sql`(
+        SELECT id, "taskId", "userId", "workspaceId", kind, "brandId", "adAlertId", "createdAt" FROM "Notification"
+        WHERE "userId" = ${userId} AND "workspaceId" = ${workspaceId} AND "readAt" IS NULL OFFSET 0
+      ) n`;
+
+/**
  * Unread notices come first, one row per kind and business (the newest, with `count`), so a morning of overdue tasks
  * or a burst of assignments is one line; then read ones newest first, 20 a page (`nextCursor` pages the read ones).
+ * The groups pick one id per group from the fenced unread rows (unreadRows), visibility checked there, and join the
+ * task, actor and alert for those ids only.
  * ponytail: groups are recounted on every open; at most kinds × businesses rows, so no paging for them.
  */
 export async function listNotifications(userId: string, workspaceId: string, cursor?: string): Promise<NotificationPageDto> {
@@ -61,13 +74,14 @@ export async function listNotifications(userId: string, workspaceId: string, cur
     after
       ? Promise.resolve([] as Row[])
       : prisma.$queryRaw<Row[]>(Prisma.sql`
-    SELECT * FROM (
-      SELECT DISTINCT ON (n.kind, n."brandId") ${COLUMNS(actorClient)},
-             (count(*) OVER (PARTITION BY n.kind, n."brandId"))::int AS count
-      ${FROM} LEFT JOIN "User" a ON a.id = n."actorId" ${ALERT}
-      WHERE ${base} AND n."readAt" IS NULL
+    SELECT ${COLUMNS(actorClient)}, g.count
+    FROM (
+      SELECT DISTINCT ON (n.kind, n."brandId") n.id, (count(*) OVER (PARTITION BY n.kind, n."brandId"))::int AS count
+      FROM ${unreadRows(userId, workspaceId)} LEFT JOIN "Task" t ON t.id = n."taskId"
+      WHERE ${base}
       ORDER BY n.kind, n."brandId", n."createdAt" DESC, n.id DESC
-    ) g ORDER BY "createdAt" DESC, id DESC`),
+    ) g JOIN "Notification" n ON n.id = g.id LEFT JOIN "Task" t ON t.id = n."taskId" LEFT JOIN "User" a ON a.id = n."actorId" ${ALERT}
+    ORDER BY n."createdAt" DESC, n.id DESC`),
     prisma.$queryRaw<Row[]>(Prisma.sql`
     SELECT ${COLUMNS(actorClient)}
     ${FROM} LEFT JOIN "User" a ON a.id = n."actorId" ${ALERT}
@@ -97,14 +111,9 @@ function toDto(r: Row): NotificationDto {
 
 /** Unread notifications, counted up to 100. */
 export async function countUnread(userId: string, workspaceId: string): Promise<number> {
-  // The unread rows are fenced (OFFSET 0) so the planner reads them through the (userId, workspaceId, readAt) index.
-  // Without it, the LIMIT over the join made it seq-scan Notification on every bell poll: 38 ms at 1M rows, 0 unread.
   const [row] = await prisma.$queryRaw<{ count: number }[]>(Prisma.sql`
     SELECT count(*)::int AS count FROM (
-      SELECT 1 FROM (
-        SELECT "taskId", "userId", "workspaceId", "kind", "brandId", "adAlertId" FROM "Notification"
-        WHERE "userId" = ${userId} AND "workspaceId" = ${workspaceId} AND "readAt" IS NULL OFFSET 0
-      ) n LEFT JOIN "Task" t ON t.id = n."taskId"
+      SELECT 1 FROM ${unreadRows(userId, workspaceId)} LEFT JOIN "Task" t ON t.id = n."taskId"
       WHERE ${await notificationWhereSql(userId, workspaceId)} LIMIT 100) x`);
   return row?.count ?? 0;
 }
