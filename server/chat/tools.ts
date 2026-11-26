@@ -9,7 +9,7 @@ import {
   BREAKDOWNS, hasOrderLines, MAX_ANALYSIS_ROWS, MAX_RISK_ROWS, PRODUCT_GROUPS, productSales, salesBreakdown, stockRisk, TIME_BREAKDOWNS, topProducts, truncatedOrders,
 } from "@/server/data/sales-analysis";
 import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
-import { addDays, badRangeDetail, brandTimeZone, liveSources, previousRange, rangeDays, zoneToday } from "@/server/data/sources";
+import { addDays, badRangeDetail, brandTimeZone, liveSources, previousRange, rangeDays, utcToday, zoneToday } from "@/server/data/sources";
 import { ADS_MAX_DAYS, adsCampaigns, adsDays, D, shopRevenueOverSpend, totalsOf, type AdsDayRow } from "@/server/data/ads-read";
 import { currentMonth, listBudgets, MonthSchema } from "@/server/data/budgets";
 import { MAX_POSTS, POSTS_MAX_DAYS, postsWithMetrics } from "@/server/data/post-metrics-read";
@@ -134,7 +134,8 @@ const RUNNABLE = AGENTS.filter((a) => a.key !== "systems-check" && !a.internal).
 export function chatTools(scope: ChatScope) {
   // Chat sees exactly what the person's role can see on screen: same permissions as the matching pages.
   let perms: Promise<Set<string>> | undefined;
-  const can = async (p: string) => (await (perms ??= effectivePermissions(scope.workspaceId, scope.userId, scope.brandId))).has(p);
+  const permsOf = () => (perms ??= effectivePermissions(scope.workspaceId, scope.userId, scope.brandId));
+  const can = async (p: string) => (await permsOf()).has(p);
   const denied = (what: string) => ({ error: `Your role can't see ${what}.` });
   // Data tools (CHAT_DATA_TOOLS): every key the tool needs, then at most MAX_GROUP_CALLS calls per group and
   // MAX_DATA_CALLS in all per message (one chatTools per message). Counted here as well as by the route's activeTools,
@@ -143,7 +144,7 @@ export function chatTools(scope: ChatScope) {
   let dataCalls = 0;
   const gate = async (name: string) => {
     const { keys, group } = CHAT_DATA_TOOLS[name];
-    const refusal = hiddenFor(keys, await (perms ??= effectivePermissions(scope.workspaceId, scope.userId, scope.brandId)));
+    const refusal = hiddenFor(keys, await permsOf());
     if (refusal) return refusal;
     // No await between the checks and the counts, so calls made in parallel can't both take the last slot.
     if ((groupCalls[group] ?? 0) >= MAX_GROUP_CALLS) return { error: `${GROUP_NAME[group]} tool limit reached for this message.` };
@@ -571,9 +572,9 @@ export function chatTools(scope: ChatScope) {
         const [now, before, recent] = await Promise.all([
           adsDays(scope, range, live.externalIds),
           adsDays(scope, prev, live.externalIds),
-          listAlerts(scope, { recentFrom: addDays(new Date().toISOString().slice(0, 10), -ALERT_DAYS) }, CHAT_ALERTS),
+          listAlerts(scope, { recentFrom: addDays(utcToday(), -ALERT_DAYS) }, CHAT_ALERTS),
         ]);
-        const roas = (r: AdsDayRow) => (r.spend.isZero() ? null : r.purchaseValue.div(r.spend).toDecimalPlaces(2).toNumber());
+        const roas = (r: AdsDayRow) => totalsOf(r.currency, r.spend, r.purchases, r.purchaseValue).roas;
         return {
           ...range,
           syncedThrough: live.syncedThrough,
@@ -602,7 +603,8 @@ export function chatTools(scope: ChatScope) {
       description:
         "Meta Ads campaigns for a period (default the last 30 synced days), ranked by spend, purchases or ROAS: spend, impressions, clicks, purchases, ROAS and cost per purchase per campaign, in its ad account's currency. Use for which campaigns work or waste money.",
       inputSchema: rangeInput("leave both out for the last 30 synced days").extend({
-        limit: z.number().int().min(1).max(MAX_ANALYSIS_ROWS).default(20),
+        // At most 25: its rows are the largest output the thread keeps.
+        limit: z.number().int().min(1).max(25).default(20),
         rankBy: z.enum(["spend", "purchases", "roas"]).default("spend"),
       }),
       execute: async ({ limit, rankBy, ...input }) => {
@@ -639,7 +641,7 @@ export function chatTools(scope: ChatScope) {
         const refused = await gate("adBudgets");
         if (refused) return refused;
         if (!MonthSchema.safeParse(month).success) return { error: "month must be YYYY-MM, from 24 months back to 12 ahead." };
-        const { budgets, pacing } = await listBudgets(scope, month);
+        const { budgets, pacing } = await listBudgets(scope, month, await adSources());
         const notes = pacing.map((p) =>
           p.state === "ok"
             ? p.staleRateFrom ? `Spend converted at ECB rates; uses a rate from ${p.staleRateFrom}.` : null
@@ -664,7 +666,7 @@ export function chatTools(scope: ChatScope) {
         if (refused) return refused;
         const range = await adsRange(input);
         if (!("from" in range)) return range;
-        const { ratio, currency, why, staleRateFrom } = await shopRevenueOverSpend(scope, range);
+        const { ratio, currency, why, staleRateFrom } = await shopRevenueOverSpend(scope, range, (await adSources()).externalIds);
         const notes = [
           ...(currency ? [`Shop net sales without VAT ÷ Meta spend converted to ${currency} at the ECB daily rates.`] : []),
           "Shopify days and ad account days may differ by a few hours.",

@@ -204,13 +204,13 @@ describe("adCampaigns", () => {
     expect((await run(chatTools(scope).adsSummary, range)).offNote).toBe("Switched-off ad accounts are left out.");
   });
 
-  it("caps at 60 rows, counts the rest and cleans campaign names", async () => {
+  it("caps at 25 rows, counts the rest and cleans campaign names", async () => {
     data.adsCampaigns.mockResolvedValue(Array.from({ length: 70 }, (_, i) => campaign(`c${i}`, "act_1", `${100 - i}.00`, 1, 1, i ? `C${i}` : "Spring\nsale\u202e\u200bpromo")));
     const t = chatTools(scope);
-    expect(parse(t.adCampaigns, { limit: 61 })).toBe(false);
-    const out = await run(t.adCampaigns, { ...range, limit: 60 });
-    expect(out.rows).toHaveLength(60);
-    expect(out.moreCampaigns).toBe(10);
+    expect(parse(t.adCampaigns, { limit: 26 })).toBe(false);
+    const out = await run(t.adCampaigns, { ...range, limit: 25 });
+    expect(out.rows).toHaveLength(25);
+    expect(out.moreCampaigns).toBe(45);
     expect((out.rows as unknown[][])[0][0]).toBe("Spring sale promo");
   });
 
@@ -241,7 +241,8 @@ describe("adBudgets", () => {
     });
     const out = await run(chatTools(scope).adBudgets, {});
     vi.useRealTimers();
-    expect(data.listBudgets).toHaveBeenCalledWith(scope, "2026-11");
+    expect(data.listBudgets).toHaveBeenCalledWith(scope, "2026-11", { externalIds: ["act_1"], syncedThrough: "2026-11-24", offCount: 0 });
+    expect(data.liveSources).toHaveBeenCalledTimes(1);
     expect(out.notes).toEqual(["Spend converted at ECB rates; uses a rate from 2026-11-10.", "Google Ads spend arrives in Phase 3."]);
     expect(out.budgets).toEqual([{ platform: "META", amount: "1000.00", currency: "EUR" }, { platform: "GOOGLE", amount: "1.00", currency: "EUR" }]);
   });
@@ -255,7 +256,8 @@ describe("revenuePerAdSpend", () => {
   it("explains a missing ratio and a stale rate", async () => {
     data.shopRevenueOverSpend.mockResolvedValue({ ratio: null, currency: "EUR", why: "vat_missing", staleRateFrom: "2026-11-02" });
     const out = await run(chatTools(scope).revenuePerAdSpend, range);
-    expect(data.shopRevenueOverSpend).toHaveBeenCalledWith(scope, range);
+    expect(data.shopRevenueOverSpend).toHaveBeenCalledWith(scope, range, ["act_1"]);
+    expect(data.liveSources).toHaveBeenCalledTimes(1);
     expect(out.notes).toEqual([
       "Shop net sales without VAT ÷ Meta spend converted to EUR at the ECB daily rates.",
       "Shopify days and ad account days may differ by a few hours.",

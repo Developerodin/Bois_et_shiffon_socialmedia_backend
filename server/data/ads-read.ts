@@ -58,9 +58,9 @@ export async function adsSummary(scope: Scope, range: DateRange, opts: { crmRead
  * Net sales without VAT (Task 2) ÷ ad spend over the same days, the spend converted to the shop's currency. Shopify
  * days are the brand's and ad days the ad account's, so the two may differ by a few hours (the screen says so).
  * Reads the ex-VAT figure alone (sales-read.ts exVat), for the range's currencies only. No figure when orders were
- * left out of the ex-VAT sum (exVatMissing): the ratio would read low.
+ * left out of the ex-VAT sum (exVatMissing): the ratio would read low. `accountIds`: the live ad accounts, if already read.
  */
-export async function shopRevenueOverSpend(scope: Scope, range: DateRange): Promise<ShopRevenueOverSpend> {
+export async function shopRevenueOverSpend(scope: Scope, range: DateRange, accountIds?: string[]): Promise<ShopRevenueOverSpend> {
   const none = (why: ShopRevenueOverSpend["why"], currency: string | null = null): ShopRevenueOverSpend => ({ ratio: null, currency, why, staleRateFrom: null });
   const vat = await exVat(scope, range);
   if (vat.size > 1) return none("currencies");
@@ -69,7 +69,7 @@ export async function shopRevenueOverSpend(scope: Scope, range: DateRange): Prom
   const [currency, shop] = entry;
   if (shop.netExVat === null || shop.exVatFrom !== null) return none("no_revenue", currency);
   if (shop.exVatMissing > 0) return none("vat_missing", currency);
-  const spend = await convertedSpend(scope, range.from, range.to, currency);
+  const spend = await convertedSpend(scope, range.from, range.to, currency, accountIds);
   if (!spend) return none("no_rate", currency);
   if (spend.total.isZero()) return none("no_spend", currency);
   return { ratio: D(shop.netExVat).div(spend.total).toDecimalPlaces(2).toNumber(), currency, why: null, staleRateFrom: spend.stale };
