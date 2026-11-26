@@ -213,41 +213,42 @@ model Brand {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  workspace      Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  profile        BrandProfile?
-  members        BrandMember[]
-  agentRuns      AgentRun[]
-  agentEvents    AgentEvent[]
-  agentConfigs   BrandAgentConfig[]
-  contextDocs    BrandContextDoc[]
-  connections    IntegrationConnection[]
-  auditReports   AuditReport[]
-  chatThreads    ChatThread[]
-  opportunities  Opportunity[]
-  contentItems   ContentItem[]
-  learningNotes  LearningNote[]
-  competitors    Competitor[]
-  invitations    Invitation[]
-  photoShoots    PhotoShoot[]
-  reelAssets     ReelAsset[]
-  products       Product[]
-  catalogPages   CatalogPage[]
-  campaigns      Campaign[]
-  tasks          Task[]
-  workProjects   WorkProject[]
-  taskComments   TaskComment[]
-  notifications  Notification[]
-  dataSources    DataSource[]
-  postMetrics    PostMetric[]
-  shopOrders     ShopOrder[]
-  shopOrderLines ShopOrderLine[]
-  searchDays     SearchDay[]
-  adDays         AdDay[]
-  adBudgets      AdBudget[]
-  adAlerts       AdAlert[]
-  shopifyWrites  ShopifyWrite[]
-  blogArticles   BlogArticle[]
-  quotes         Quote[]
+  workspace       Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  profile         BrandProfile?
+  members         BrandMember[]
+  agentRuns       AgentRun[]
+  agentEvents     AgentEvent[]
+  agentConfigs    BrandAgentConfig[]
+  contextDocs     BrandContextDoc[]
+  connections     IntegrationConnection[]
+  auditReports    AuditReport[]
+  chatThreads     ChatThread[]
+  opportunities   Opportunity[]
+  contentItems    ContentItem[]
+  learningNotes   LearningNote[]
+  competitors     Competitor[]
+  invitations     Invitation[]
+  photoShoots     PhotoShoot[]
+  reelAssets      ReelAsset[]
+  products        Product[]
+  catalogPages    CatalogPage[]
+  campaigns       Campaign[]
+  tasks           Task[]
+  workProjects    WorkProject[]
+  taskComments    TaskComment[]
+  notifications   Notification[]
+  dataSources     DataSource[]
+  postMetrics     PostMetric[]
+  shopOrders      ShopOrder[]
+  shopOrderLines  ShopOrderLine[]
+  searchDays      SearchDay[]
+  searchQueryDays SearchQueryDay[]
+  adDays          AdDay[]
+  adBudgets       AdBudget[]
+  adAlerts        AdAlert[]
+  shopifyWrites   ShopifyWrite[]
+  blogArticles    BlogArticle[]
+  quotes          Quote[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1845,6 +1846,43 @@ model SearchDay {
   /// The migration adds INCLUDE (clicks, impressions, positionSum) so reads are index-only; migrate diff shows it as a
   /// re-create, don't let a generated migration drop it. No other index: any would be a prefix of this one.
   @@unique([brandId, siteUrl, dimension, day, page])
+}
+
+enum SearchQueryDimension {
+  QUERY
+  QUERY_PAGE
+}
+
+/// Search Console queries per Google day: QUERY (page "") and QUERY_PAGE, top QUERIES_PER_DAY each, as Google
+/// reports them. Google leaves anonymised queries out, so sums sit below SearchDay's SITE total.
+/// Written with SearchDay by the SEARCH_CONSOLE sync (server/data/search-sync.ts), only for days whose query calls
+/// succeeded; rows older than QUERY_RETENTION_DAYS (400) deleted by housekeeping (server/jobs/runner.ts).
+/// ponytail: ~1,000 rows/brand/day, ~400k per brand at steady state. Ceiling ~20M rows (~50 brands); then roll rows
+/// older than 90 days into weekly rows.
+model SearchQueryDay {
+  id          String               @id @default(cuid())
+  workspaceId String
+  brandId     String
+  siteUrl     String
+  dimension   SearchQueryDimension
+  /// Google's day (Pacific time)
+  day         DateTime             @db.Date
+  /// at most MAX_QUERY_KEY chars; siteUrl + query + page at most MAX_QUERY_ROW_KEY_BYTES (btree tuple limit)
+  query       String
+  /// "" for QUERY
+  page        String
+  clicks      Int
+  impressions Int
+  /// position × impressions, as SearchDay
+  positionSum Float
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  /// The migration adds INCLUDE (clicks, impressions, positionSum), as SearchDay's: don't let a generated migration
+  /// drop it.
+  @@unique([brandId, siteUrl, dimension, day, query, page])
+  /// housekeeping's delete
+  @@index([day])
 }
 
 /// GOOGLE is added in its own migration (20261126120000): Postgres can't use a value added by ALTER TYPE … ADD VALUE

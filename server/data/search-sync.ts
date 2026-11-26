@@ -27,6 +27,9 @@ async function readSites(conn: IntegrationConnection) {
 
 // ---- sync --------------------------------------------------------------------------------------------------------
 
+/** Query rows (SearchQueryDay) older than this many days are deleted by housekeeping (13 months: same month last year). */
+export const QUERY_RETENTION_DAYS = 400;
+
 /** Backfill on a new site: 90 Google days, read 30 at a time, oldest first. */
 export const BACKFILL_DAYS = 90;
 export const BACKFILL_WINDOW_DAYS = 30;
@@ -36,7 +39,9 @@ const asDate = (day: string) => new Date(`${day}T00:00:00Z`);
 
 /**
  * Replaces each given (complete) day of a site: per day and dimension, delete then insert. A repeated or overlapping
- * run writes the same rows; a page Google dropped for a day is gone. Call inside one transaction.
+ * run writes the same rows; a page Google dropped for a day is gone. A day's query rows (SearchQueryDay) are replaced
+ * only when its query calls succeeded (`queriesComplete`): a failed query call never wipes rows an earlier run stored.
+ * Call inside a transaction.
  */
 export async function replaceDays(tx: Prisma.TransactionClient, source: SourceKey, days: SearchDayResult[]) {
   const { workspaceId, brandId, externalId: siteUrl } = source;
@@ -54,16 +59,27 @@ export async function replaceDays(tx: Prisma.TransactionClient, source: SourceKe
     ];
     await tx.searchDay.createMany({ data: rows });
     count += rows.length;
+    if (!d.queriesComplete) continue;
+    await tx.searchQueryDay.deleteMany({ where: { brandId, siteUrl, day, workspaceId } });
+    const queryRows: Prisma.SearchQueryDayCreateManyInput[] = [
+      ...d.queries.map((q) => ({ ...base, dimension: "QUERY" as const, query: q.query, page: "", clicks: q.clicks, impressions: q.impressions, positionSum: q.positionSum })),
+      ...d.queryPages.map((q) => ({ ...base, dimension: "QUERY_PAGE" as const, query: q.query, page: q.page, clicks: q.clicks, impressions: q.impressions, positionSum: q.positionSum })),
+    ];
+    if (queryRows.length) await tx.searchQueryDay.createMany({ data: queryRows });
+    count += queryRows.length;
   }
   return count;
 }
 
 /**
  * Daily and manual runs re-read Google's last 3 days (the newest ~2 are preliminary); backfill reads its window.
- * Every complete day is written in one transaction. A permission stop writes nothing; a rate-limit (or time-cap)
+ * Each complete day is written in its own transaction, in day order, so a failure keeps the days before it (up to
+ * ~1,500 rows a day with queries; one window-sized transaction would grow with the window). A permission stop writes nothing; a rate-limit (or time-cap)
  * stop writes the complete days before it ("rate_limited" or "partial"); the window is incomplete, so the backfill
  * chain retries it later.
  * A failed stop writes the complete days, then throws (retried); a reconnect stop throws, writing nothing.
+ * halveOnCap: two query calls a day make a 30-day backfill window likelier to hit the client's time cap; a window
+ * still capped after its retries is read again at half length.
  */
 registerSync("SEARCH_CONSOLE", async (ctx) => {
   if (!ctx.connection) throw new ReconnectNeeded("Search Console source has no Google connection");
@@ -73,12 +89,12 @@ registerSync("SEARCH_CONSOLE", async (ctx) => {
   if (stop === "reconnect") stopReason(stop); // throws: nothing written
   if (stop === "permission") return { count: 0, reason: "permission" };
   const complete = days.filter((d) => d.complete);
-  // ponytail: one transaction of up to 30 days × ~500 rows; the timeout is raised for that. If it nears it, split per day.
-  const count = complete.length ? await prisma.$transaction((tx) => replaceDays(tx, ctx.source, complete), { timeout: 60_000 }) : 0;
+  let count = 0;
+  for (const d of complete) count += await prisma.$transaction((tx) => replaceDays(tx, ctx.source, [d]), { timeout: 30_000 });
   // After the write: a failed stop throws here (retried) with the finished days already kept.
   const reason = stopReason(stop);
   return { count, complete: !stop && complete.length === days.length, reason, ...(ctx.window ? {} : { window: { from, to } }) };
-});
+}, { halveOnCap: true });
 
 // ---- site picker -------------------------------------------------------------------------------------------------
 

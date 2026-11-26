@@ -15,10 +15,30 @@ import type { SyncStop } from "@/server/data/sync-stop";
  * - 5xx, a network error or a timeout → "failed", also keeping the days already complete.
  * - The run passed MAX_MS → "capped", keeping the days already complete.
  * - The last ~2 days are preliminary (`dataState: "all"`), which is why the daily job re-reads 3.
+ * - A failed query call (QUERY or QUERY_PAGE) marks only that day's queries incomplete and skips the query calls of
+ *   the run's later days (a load-quota error would repeat); SITE and PAGE go on.
  * Request URLs are never logged and the token is scrubbed from any logged provider text (it rides in a header, but
  * Google's error text is not ours to trust).
  */
 
+/*
+ * Google's limits and behaviour, read from Google's documentation on 2026-11-26 (not from memory):
+ * - https://developers.google.com/webmaster-tools/limits : Search Analytics 1,200 queries per minute per site and per
+ *   user, 40,000 per minute and 30,000,000 per day per project. A separate "load" quota, short-term (10-minute chunks)
+ *   and long-term (1-day chunks): "Queries are expensive when you group and/or filter by either page or query string.
+ *   Queries grouped/filtered by page AND query string are the most expensive", and load grows with the date range,
+ *   so every page and query call here asks for one day. Exceeding it returns "quota exceeded"; Google says wait 15
+ *   minutes (the backfill chain's retry does that). A daily run makes 1 + 3 × 3 = 10 calls, a 30-day window 91.
+ * - https://developers.google.com/webmaster-tools/v1/searchanalytics/query : rowLimit 1–25,000 (default 1,000), paging
+ *   by startRow, so 500 rows need one request. "Results are sorted by click count, in descending order, unless you
+ *   group by date": the top 500 are the 500 most-clicked rows (ties arbitrary), which declines.ts's cap floor relies
+ *   on. dataState "all" includes fresh data; "All values after the first_incomplete_date may still change".
+ * - https://developers.google.com/webmaster-tools/v1/how-tos/all-your-data : at most 50K rows per day per search type,
+ *   sorted by clicks; "Data is typically available after 2-3 days"; grouping by page and/or query "may drop some data".
+ * - https://developers.google.com/search/blog/2022/10/performance-data-deep-dive : "the actual anonymized queries are
+ *   always omitted from the tables", so query sums sit below the site total.
+ * - Not stated anywhere read: whether IDN hosts come back as punycode or Unicode; urlKey (shared/seo-url.ts) folds both.
+ */
 const API = "https://www.googleapis.com/webmasters/v3";
 export const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
 
@@ -27,6 +47,12 @@ export const PAGES_PER_DAY = 500;
 const MAX_MS = 4 * 60_000;
 /** Longer page URLs are skipped and counted, so the stored key stays bounded. */
 export const MAX_PAGE_KEY = 1000;
+/** Top queries and top query-page pairs kept per day, one request each (sorted by clicks, as pages). */
+export const QUERIES_PER_DAY = 500;
+/** Longer query text is skipped and counted. */
+export const MAX_QUERY_KEY = 200;
+/** UTF-8 bytes of siteUrl + query + page: Postgres refuses a btree entry over ~2,700 bytes and the INCLUDE columns add a little. */
+export const MAX_QUERY_ROW_KEY_BYTES = 2_000;
 
 export type StopReason = Exclude<SyncStop, "missing_scope">;
 
@@ -39,7 +65,22 @@ export class SearchConsoleError extends Error {
 
 export type Metrics = { clicks: number; impressions: number; positionSum: number };
 export type PageMetrics = Metrics & { page: string };
-export type SearchDayResult = { day: string; site: Metrics; pages: PageMetrics[]; skippedPages: number; complete: boolean };
+export type QueryMetrics = Metrics & { query: string; page: string };
+/**
+ * `complete`: SITE and PAGE were read. `queriesComplete`: both query calls were read too (the caller replaces a
+ * day's query rows only then). `queries` have page "".
+ */
+export type SearchDayResult = {
+  day: string;
+  site: Metrics;
+  pages: PageMetrics[];
+  skippedPages: number;
+  complete: boolean;
+  queries: QueryMetrics[];
+  queryPages: QueryMetrics[];
+  skippedQueries: number;
+  queriesComplete: boolean;
+};
 export type SearchWindow = { days: SearchDayResult[]; stoppedReason?: StopReason };
 
 type Row = { keys?: string[]; clicks?: number; impressions?: number; position?: number };
@@ -102,9 +143,33 @@ function daysBetween(from: string, to: string): string[] {
 export async function fetchSearchWindow(token: string, siteUrl: string, from: string, to: string): Promise<SearchWindow> {
   const days = daysBetween(from, to);
   const url = `${API}/sites/${encodeURIComponent(siteUrl)}/searchAnalytics/query`;
-  const empty = (day: string): SearchDayResult => ({ day, site: { clicks: 0, impressions: 0, positionSum: 0 }, pages: [], skippedPages: 0, complete: false });
+  const empty = (day: string): SearchDayResult => ({
+    day,
+    site: { clicks: 0, impressions: 0, positionSum: 0 },
+    pages: [],
+    skippedPages: 0,
+    complete: false,
+    queries: [],
+    queryPages: [],
+    skippedQueries: 0,
+    queriesComplete: false,
+  });
   const result = days.map(empty);
   const started = Date.now();
+  let queriesOn = true;
+  const bytes = (s: string) => new TextEncoder().encode(s).length;
+  const queryRows = async (day: string, dimensions: string[], out: QueryMetrics[]) => {
+    let skipped = 0;
+    const r = await google<{ rows?: Row[] }>(token, url, { startDate: day, endDate: day, dimensions, dataState: "all", rowLimit: QUERIES_PER_DAY });
+    for (const row of r.rows ?? []) {
+      const query = row.keys?.[0] ?? "";
+      const page = dimensions.length > 1 ? (row.keys?.[1] ?? "") : "";
+      const bad = !query || query.length > MAX_QUERY_KEY || (dimensions.length > 1 && (!page || page.length > MAX_PAGE_KEY));
+      if (bad || bytes(siteUrl + query + page) > MAX_QUERY_ROW_KEY_BYTES) skipped++;
+      else out.push({ query, page, ...metrics(row) });
+    }
+    return skipped;
+  };
 
   try {
     const site = await google<{ rows?: Row[] }>(token, url, { startDate: from, endDate: to, dimensions: ["date"], dataState: "all", rowLimit: days.length });
@@ -125,6 +190,16 @@ export async function fetchSearchWindow(token: string, siteUrl: string, from: st
       d.pages = pages;
       d.skippedPages = skipped;
       d.complete = true;
+      if (!queriesOn) continue;
+      try {
+        const queries: QueryMetrics[] = [];
+        const queryPages: QueryMetrics[] = [];
+        const skippedQueries = (await queryRows(d.day, ["query"], queries)) + (await queryRows(d.day, ["query", "page"], queryPages));
+        Object.assign(d, { queries, queryPages, skippedQueries, queriesComplete: true });
+      } catch (e) {
+        if (!(e instanceof SearchConsoleError)) throw e;
+        queriesOn = false; // this day's and later days' queries stay incomplete; their SITE and PAGE rows still count
+      }
     }
     return { days: result };
   } catch (e) {

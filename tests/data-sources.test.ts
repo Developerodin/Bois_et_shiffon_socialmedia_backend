@@ -4,7 +4,7 @@ const db = vi.hoisted(() => {
   const del = () => ({ deleteMany: vi.fn(async () => ({ count: 0 })) });
   return {
     // pruneOldRows and the daily agents, for the sweep test
-    rateLimitBucket: del(), transientEntry: del(), oAuthStateTransaction: del(), job: del(), emailOutbox: del(), digest: del(), agentEvent: del(), pageView: del(),
+    rateLimitBucket: del(), transientEntry: del(), oAuthStateTransaction: del(), job: del(), emailOutbox: del(), digest: del(), agentEvent: del(), pageView: del(), searchQueryDay: del(),
     brand: { findMany: vi.fn(async () => []) },
   };
 });

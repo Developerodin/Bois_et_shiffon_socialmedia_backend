@@ -7,7 +7,7 @@ const db = vi.hoisted(() => {
     notification: { updateMany: vi.fn(), deleteMany: vi.fn() },
     workspaceMember: { findUnique: vi.fn() },
     // pruneOldRows and the daily agents, for the sweep test
-    rateLimitBucket: del(), transientEntry: del(), oAuthStateTransaction: del(), job: del(), emailOutbox: del(), digest: del(), agentEvent: del(), pageView: del(),
+    rateLimitBucket: del(), transientEntry: del(), oAuthStateTransaction: del(), job: del(), emailOutbox: del(), digest: del(), agentEvent: del(), pageView: del(), searchQueryDay: del(),
     brand: { findMany: vi.fn(async () => []) },
     $queryRaw: vi.fn(),
     $executeRaw: vi.fn(async () => 0),

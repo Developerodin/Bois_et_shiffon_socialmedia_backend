@@ -441,3 +441,16 @@ Two migrations, both additive: `20261126140000_notification_ad_alert_kind`, `202
   `lastDay` on instead of making a new row. Indexes `(brandId, subjectKey, lastDay)`, `(brandId, lastDay)` (the chat's
   recent alerts) and `(brandId, createdAt)` (the digest's week). Cascades with the brand. Written by the `ads.alerts`
   job (server/ads/alerts.ts).
+
+## 14. SEO depth (2026-11-26)
+
+Additive migrations, from `20261126150000` on (docs/superpowers/plans/2026-11-26-seo-depth.md).
+
+- `SearchQueryDay` (`20261126150000_search_query_day`): Search Console queries per Google day, beside `SearchDay`.
+  `dimension` (`SearchQueryDimension`: QUERY with `page` "", QUERY_PAGE with both), `query` (at most 200 chars),
+  `page`, `clicks`, `impressions`, `positionSum` (position × impressions). Unique on `(brandId, siteUrl, dimension,
+  day, query, page)` with `INCLUDE (clicks, impressions, positionSum)` added by hand in the migration (keep it, as
+  `SearchDay`'s); `siteUrl + query + page` is at most 2,000 UTF-8 bytes so the btree entry fits. Index `(day)` for
+  housekeeping, which deletes rows older than 400 days. Top 500 of each dimension per day (Google sorts by clicks and
+  leaves anonymised queries out, so sums sit below the SITE total). A day's rows are replaced only when its query calls
+  succeeded. Cascades with the brand. ~1,000 rows per brand per day.
