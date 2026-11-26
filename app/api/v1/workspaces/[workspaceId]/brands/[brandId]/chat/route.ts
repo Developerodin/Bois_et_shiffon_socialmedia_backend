@@ -19,7 +19,7 @@ import { isOutOfCreditsText, logRun, OUT_OF_CREDITS } from "@/server/ai/provider
 import { hitRateLimit, limitKey } from "@/server/auth/rate-limit";
 import { ChatBody, chatSystemPrompt, CHAT_PROMPT_VERSION, withPage, withPageNotes } from "@/server/chat/prompt";
 import { chatTools } from "@/server/chat/tools";
-import { activeTools, askedToSearch, historyWindow } from "@/server/chat/turn";
+import { activeTools, askedToSearch, hideSalesOutputs, historyWindow } from "@/server/chat/turn";
 import { prisma } from "@/server/db/prisma";
 
 // Streaming replies with a few tool steps can take a while.
@@ -40,6 +40,10 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       orderBy: { updatedAt: "desc" },
       select: { id: true, messages: true },
     });
+    // A person who has lost crm.read since keeps the thread but not the sales figures in it.
+    if (thread && !scope.perms.has("crm.read")) {
+      return Response.json({ thread: { ...thread, messages: hideSalesOutputs(thread.messages as unknown as UIMessage[]) } });
+    }
     return Response.json({ thread });
   } catch (error) {
     return fromAccessError(error);
