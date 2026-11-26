@@ -1,7 +1,7 @@
 import { blockedAuditError } from "@/server/agents/definitions/site-audit";
-import { startAgentRun } from "@/server/agents/engine";
+import { AgentStartError, startAgentRun } from "@/server/agents/engine";
 import { prisma } from "@/server/db/prisma";
-import { AUDIT_FRESH_DAYS, creditBalance, CREDIT_COSTS, InsufficientCreditsError, refundCharge, spendCredits } from "@/server/services/credits";
+import { AUDIT_FRESH_DAYS, creditBalance, CREDIT_COSTS, hasUnlimitedCredits, InsufficientCreditsError, refundCharge, spendCredits } from "@/server/services/credits";
 
 /**
  * How long a "this site blocks automated readers" failure hides the Audit button. Not forever: a site may relax its bot
@@ -77,7 +77,8 @@ export async function listCompetitors(workspaceId: string, brandId: string) {
   const runningDomains = new Set(running.map((r) => (r.input as { domain?: string } | null)?.domain));
   const mentions = new Map(((geo?.metrics as { competitors?: { name: string; mentions: number }[] } | null)?.competitors ?? []).map((c) => [c.name.toLowerCase(), c.mentions]));
   return {
-    credits: { balance, auditCost: CREDIT_COSTS.siteAudit },
+    // `unlimited`: the workspace is never charged (UNLIMITED_CREDIT_WORKSPACES), so the page must not cap audits at the balance.
+    credits: { balance, auditCost: CREDIT_COSTS.siteAudit, unlimited: hasUnlimitedCredits(workspaceId) },
     competitors: competitors.map((c) => {
       const newest = audits.find((a) => a.domain === c.domain) ?? null;
       const audit = fresh.find((a) => a.domain === c.domain && !isPartial(a)) ?? newest;
@@ -170,4 +171,48 @@ export async function startCompetitorAudit(input: { workspaceId: string; brandId
     throw e;
   }
   return { status: "started", charged: CREDIT_COSTS.siteAudit };
+}
+
+export type AuditAllSkip = "not-tracked" | "fresh" | "blocked" | "running" | "credits" | "limit" | "disabled" | "failed";
+export type AuditAllResult = { started: string[]; skipped: { id: string; reason: AuditAllSkip }[]; balance: number };
+
+/**
+ * Audit several competitors at once, in the order given: the page puts the ones AI names most first and the never-audited
+ * before the stale (planAuditAll on the web), so the order is decided in one place. Each site goes through
+ * startCompetitorAudit, whose spend takes the workspace's credit lock, so a single audit pressed at the same time can't
+ * make the two overspend. Sites that are fresh, blocked or already running are skipped without a charge. Once credits
+ * run out (or the daily run cap is hit, or site audits are turned off for the brand) the rest wait. The web's
+ * planAuditAll (lib/competitor-audit.ts) picks candidates with the same fresh / blocked / running rules as the skips below. One site failing to start doesn't stop the others, and those
+ * already started stay charged and are reported. The caller kicks the runner when anything started.
+ * ponytail: sequential starts, a few queries each; fine for a brand's handful of competitors (the route caps the list).
+ */
+export async function auditAllCompetitors(input: { workspaceId: string; brandId: string; userId: string; competitorIds: string[] }): Promise<AuditAllResult> {
+  const { competitors } = await listCompetitors(input.workspaceId, input.brandId);
+  const started: string[] = [];
+  const skipped: AuditAllResult["skipped"] = [];
+  let stop: "credits" | "limit" | "disabled" | null = null;
+  for (const id of [...new Set(input.competitorIds)]) {
+    const c = competitors.find((x) => x.id === id);
+    const reason: AuditAllSkip | null = !c ? "not-tracked" : c.auditRunning ? "running" : c.auditBlocked ? "blocked" : c.audit && !c.audit.stale ? "fresh" : stop;
+    if (reason) {
+      skipped.push({ id, reason });
+      continue;
+    }
+    try {
+      const r = await startCompetitorAudit({ workspaceId: input.workspaceId, brandId: input.brandId, userId: input.userId, competitorId: id });
+      if (r.status === "started") started.push(id);
+      else if (r.status === "insufficient-credits") skipped.push({ id, reason: (stop = "credits") });
+      else skipped.push({ id, reason: r.status === "blocked" ? "blocked" : "running" });
+    } catch (e) {
+      // startCompetitorAudit refunded its charge before rethrowing. The daily cap (429) and a disabled site-audit agent
+      // (409) would refuse every later site too, so stop instead of charging and refunding for each.
+      if (e instanceof AgentStartError && e.status === 429) skipped.push({ id, reason: (stop = "limit") });
+      else if (e instanceof AgentStartError && e.status === 409) skipped.push({ id, reason: (stop = "disabled") });
+      else {
+        console.error("[competitors] audit-all: an audit didn't start", e);
+        skipped.push({ id, reason: "failed" });
+      }
+    }
+  }
+  return { started, skipped, balance: await creditBalance(input.workspaceId) };
 }
