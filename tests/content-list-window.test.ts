@@ -11,7 +11,9 @@ vi.mock("@/server/services/publishing", () => ({ createPost: vi.fn(), ownMediaKe
 vi.mock("@/server/storage/media", () => ({ signedMediaUrl: vi.fn() }));
 vi.mock("@/server/stories/service", () => ({ coverUrl: vi.fn(), createStory: vi.fn(), failStoryStart: vi.fn(), STORY_RENDER_JOB: "story.render", STORY_START_NOTE: "", itemForRequest: vi.fn(), storyTab: vi.fn() }));
 
-import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/route";
+import { GET, POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/route";
+import { startAgentRun } from "@/server/agents/engine";
+import { createPost, postAiAllowed } from "@/server/services/publishing";
 import { contentRange } from "@/server/content/window";
 
 type Where = { id?: string; workspaceId?: string; brandId?: string; status?: { in?: string[]; not?: string }; OR?: Where[]; NOT?: Where; updatedAt?: { gte: Date }; scheduledFor?: { gte: Date; lt: Date } };
@@ -214,5 +216,31 @@ describe("contentRange", () => {
     expect(typeof contentRange("2026-01-01", "2026-03-05")).toBe("string"); // 63 days
     expect(typeof contentRange("2026-01-01", null)).toBe("string");
     expect(typeof contentRange("2026-01-02", "2026-01-01")).toBe("string");
+  });
+});
+
+describe("POST /content scheduledFor", () => {
+  const post = { channel: "INSTAGRAM_POST", goal: "newArrival", product: { title: "Milo", photoKey: "w1/b1/a.jpg" } };
+  const send = (body: object) => POST(new Request("http://x/content", { method: "POST", body: JSON.stringify(body) }), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) });
+  beforeEach(() => {
+    db.perms = new Set(["brand.read", "content.create"]);
+    vi.mocked(createPost).mockReset().mockResolvedValue({ item: { id: "n1" }, repeated: false });
+    vi.mocked(postAiAllowed).mockResolvedValue(true);
+    vi.mocked(startAgentRun).mockResolvedValue(undefined as never);
+  });
+
+  it("passes no date when none is sent, as before", async () => {
+    expect((await send(post)).status).toBe(201);
+    expect(vi.mocked(createPost).mock.calls[0]![0]).not.toHaveProperty("scheduledFor");
+  });
+
+  it("passes the instant an offset date names", async () => {
+    expect((await send({ ...post, scheduledFor: "2030-03-04T10:00:00+01:00" })).status).toBe(201);
+    expect(vi.mocked(createPost).mock.calls[0]![0].scheduledFor).toEqual(new Date("2030-03-04T09:00:00Z"));
+  });
+
+  it("answers 400 for a date without an offset or that isn't one, and makes nothing", async () => {
+    for (const scheduledFor of ["2030-03-04T10:00", "2030-03-04", "soon", 5]) expect((await send({ ...post, scheduledFor })).status, String(scheduledFor)).toBe(400);
+    expect(createPost).not.toHaveBeenCalled();
   });
 });
