@@ -1,7 +1,7 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { prisma } from "@/server/db/prisma";
 import { ensureSystemRoles } from "@/server/auth/permissions";
-import { buildDigest, readableDigest, readerAccess } from "@/server/digest/build";
+import { buildDigest, clearSectionMemo, readableDigest, readerAccess, sweepAt } from "@/server/digest/build";
 
 /**
  * buildDigest on built-in roles. `admin` is workspace Admin (every key); `viewer`, `client` hold the Viewer and Client
@@ -100,5 +100,61 @@ describe("buildDigest", () => {
     await prisma.contentItem.create({ data: { workspaceId: other, brandId: otherBrand, title: "Other", channel: "INSTAGRAM_POST", status: "AWAITING_APPROVAL" } });
     expect((await buildDigest(user.admin!, ws, NOW))?.brands.map((b) => b.brandId)).toEqual([brand]);
     expect((await buildDigest(user.admin!, other, NOW))?.brands.map((b) => b.brandId)).toEqual([otherBrand]);
+  });
+});
+
+describe("ads alerts in the digest", () => {
+  // Digests of Monday 11-23 (sweep 05:00 UTC, cutoff 08:00) and Monday 11-30.
+  const week23 = sweepAt("2026-11-16");
+  const week30 = sweepAt("2026-11-23");
+  let seq = 0;
+  const alert = (brandId: string, kind: "SPEND_UP" | "ROAS_DOWN", day: string, createdAt: string) =>
+    prisma.adAlert.create({
+      data: {
+        workspaceId: ws, brandId, kind, accountId: "act_1", currency: "EUR", firstDay: new Date(day), lastDay: new Date(day),
+        values: { day, now: "60.00", baseline: "40.00", ratio: "1.50", roas: "1.95", baselineRoas: "3.00" },
+        subjectKey: `k${++seq}`, dedupeKey: `k${seq}:${day}`, createdAt: new Date(createdAt),
+      },
+    });
+  const adsOf = (body: Awaited<ReturnType<typeof buildDigest>>, brandId = brand) =>
+    body?.brands.find((b) => b.brandId === brandId)?.sections.find((s) => s.kind === "ads");
+  const days = (body: Awaited<ReturnType<typeof buildDigest>>, brandId = brand) => {
+    const s = adsOf(body, brandId);
+    return s?.kind === "ads" ? (s.alerts ?? []).map((a) => [a.kind, a.firstDay]) : undefined;
+  };
+
+  beforeEach(async () => {
+    clearSectionMemo();
+    await prisma.adAlert.deleteMany({});
+  });
+
+  it("lists the alerts raised in its week by when they were raised; one raised after the cutoff waits for the next digest", async () => {
+    // A ROAS_DOWN for Saturday 11-21 raised in Wednesday 11-25's run (S = 11-24): the Monday 11-30 digest.
+    await alert(brand, "ROAS_DOWN", "2026-11-21", "2026-11-25T06:30:00Z");
+    // Raised by Monday 11-23's own sync (06:00, before the 08:00 cutoff): the 11-23 digest.
+    await alert(brand, "SPEND_UP", "2026-11-22", "2026-11-23T06:00:00Z");
+    // Raised Monday 11-30 at 09:00, after that digest's cutoff: the 12-07 digest.
+    await alert(brand, "SPEND_UP", "2026-11-29", "2026-11-30T09:00:00Z");
+    expect(days(await buildDigest(user.admin!, ws, NOW, week23))).toEqual([["SPEND_UP", "2026-11-22"]]);
+    expect(days(await buildDigest(user.admin!, ws, NOW, week30))).toEqual([["ROAS_DOWN", "2026-11-21"]]);
+    expect(days(await buildDigest(user.admin!, ws, NOW, sweepAt("2026-11-30")))).toEqual([["SPEND_UP", "2026-11-29"]]);
+    const s = adsOf(await buildDigest(user.admin!, ws, NOW, week30));
+    expect(s?.kind === "ads" && s.alerts?.[0]).toMatchObject({ text: expect.stringContaining("ROAS down 35% on act_1"), lastDay: "2026-11-21" });
+  });
+
+  it("a reader without ads.read gets no alerts: the ads section isn't there", async () => {
+    await alert(brand, "SPEND_UP", "2026-11-22", "2026-11-23T06:00:00Z");
+    expect(adsOf(await buildDigest(user.viewer!, ws, NOW, week23))).toBeUndefined();
+  });
+
+  it("a brand with only alerts to report still gets its digest", async () => {
+    const quiet = (await prisma.brand.create({ data: { workspaceId: ws, slug: "alerts-only", displayName: "Alerts only" } })).id;
+    expect((await buildDigest(user.admin!, ws, NOW, week23))?.brands.map((b) => b.brandId)).toEqual([brand]);
+    clearSectionMemo();
+    await alert(quiet, "SPEND_UP", "2026-11-22", "2026-11-23T06:00:00Z");
+    const body = await buildDigest(user.admin!, ws, NOW, week23);
+    expect(body?.brands.map((b) => b.brandId)).toEqual([brand, quiet]);
+    expect(adsOf(body, quiet)).toMatchObject({ data: null, alerts: [{ kind: "SPEND_UP", firstDay: "2026-11-22" }] });
+    await prisma.brand.update({ where: { id: quiet }, data: { status: "ARCHIVED" } });
   });
 });

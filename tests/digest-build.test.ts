@@ -9,6 +9,7 @@ vi.mock("@/server/data/sales-read", () => ({ salesSummary: vi.fn() }));
 vi.mock("@/server/data/ads-read", () => ({ adsSummary: vi.fn() }));
 vi.mock("@/server/data/search-read", () => ({ searchSummary: vi.fn() }));
 vi.mock("@/server/data/post-metrics-read", () => ({ postsWithMetrics: vi.fn() }));
+vi.mock("@/server/ads/alerts", () => ({ listAlerts: vi.fn(async () => ({ alerts: [], more: 0 })) }));
 
 import type { DigestBody } from "@/shared";
 import type { PermissionKey } from "@/server/auth/permissions.catalog";

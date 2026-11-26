@@ -4,6 +4,7 @@ import type { DataSyncResult, DateRange, DigestBody, DigestBrand, DigestSection 
 import { prisma } from "@/server/db/prisma";
 import { isClientGrant, isClientMember, permissionsOf } from "@/server/auth/permissions";
 import { rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
+import { listAlerts } from "@/server/ads/alerts";
 import { adsSummary } from "@/server/data/ads-read";
 import { postsWithMetrics } from "@/server/data/post-metrics-read";
 import { salesSummary } from "@/server/data/sales-read";
@@ -31,6 +32,13 @@ export function endedWeek(today: string): DateRange {
 }
 /** The digest row's label: the ended week's Monday in UTC. Each brand section carries its own week. */
 export const digestWeekStart = (now: Date) => endedWeek(zoneToday("UTC", now)).from;
+/**
+ * Digests run this long after the Monday sweep (job.ts), so the Monday data syncs it queued (spread over 2 h) have
+ * finished; it is also the cutoff for the week's ads alerts (adsSection).
+ */
+export const AFTER_SWEEP_MS = 3 * 60 * 60_000;
+/** Ads alerts a digest lists per brand; the rest are counted. */
+const DIGEST_ALERTS = 10;
 /** The Monday 05:00 UTC sweep that queued the digest labelled `weekStart`: the instant each brand's week is read at. */
 export const sweepAt = (weekStart: string) => new Date(Date.parse(`${weekStart}T05:00:00Z`) + 7 * 86_400_000);
 /**
@@ -96,13 +104,29 @@ async function salesSection(scope: Scope, week: DateRange): Promise<DigestSectio
   };
 }
 
-async function adsSection(scope: Scope, week: DateRange): Promise<DigestSection> {
-  if (!(await synced(scope, "META_ADS"))) return { kind: "ads", key: "ads.read", data: null };
+/**
+ * The week's ads figures, and the ads alerts RAISED in the 7 days before this digest's cutoff (weekAt +
+ * AFTER_SWEEP_MS), by when they were raised, not by their day: a conversion alert's day is 3 days before it is
+ * raised, so a day-overlap rule would drop one raised early in the week. With one fixed cutoff each alert lands in
+ * exactly one weekly digest. Alerts are read even without synced data (an alert implies one, but don't depend on it).
+ * Ceiling: a Monday sync finishing after the cutoff puts its alert in the next week's digest (never lost).
+ */
+async function adsSection(scope: Scope, week: DateRange, weekAt: Date): Promise<DigestSection> {
+  const cutoff = weekAt.getTime() + AFTER_SWEEP_MS;
+  const [source, raised] = await Promise.all([
+    synced(scope, "META_ADS"),
+    listAlerts(scope, { createdFrom: new Date(cutoff - 7 * 86_400_000), createdBefore: new Date(cutoff) }, DIGEST_ALERTS),
+  ]);
+  // adAlertText cleaned each text (one line, no control or bidi characters), so the plain-text email can't be forged.
+  const alerts = raised.alerts.map((a) => ({ kind: a.kind, text: a.text, firstDay: a.firstDay, lastDay: a.lastDay }));
+  const extra = alerts.length ? { alerts, ...(raised.more ? { moreAlerts: raised.more } : {}) } : {};
+  if (!source) return { kind: "ads", key: "ads.read", data: null, ...extra };
   const sum = await adsSummary(scope, week);
   return {
     kind: "ads",
     key: "ads.read",
     data: sum.totals.map((t) => ({ currency: t.currency, spend: t.spend, purchases: t.purchases, purchaseValue: t.purchaseValue, roas: t.roas })),
+    ...extra,
   };
 }
 
@@ -124,10 +148,13 @@ const memo = new Map<string, { at: number; sections: Promise<DigestSection[]> }>
 /** Tests: forget the memoised sections. */
 export const clearSectionMemo = () => memo.clear();
 
-/** The brand's sections other than tasks for this set of keys, built once per (brand, week, keys) and shared. */
-export function brandSections(scope: Scope, perms: ReadonlySet<string>, week: DateRange, zone: string, now: Date): Promise<DigestSection[]> {
+/**
+ * The brand's sections other than tasks for this set of keys, built once per (brand, week, sweep, keys) and shared.
+ * `weekAt`: the sweep the digest belongs to (the ads alerts' cutoff); defaults to `now`.
+ */
+export function brandSections(scope: Scope, perms: ReadonlySet<string>, week: DateRange, zone: string, now: Date, weekAt = now): Promise<DigestSection[]> {
   const keys = SHARED_KEYS.filter((k) => perms.has(k));
-  const memoKey = `${scope.brandId}|${week.from}|${keys.join(",")}`;
+  const memoKey = `${scope.brandId}|${week.from}|${weekAt.toISOString()}|${keys.join(",")}`;
   const hit = memo.get(memoKey);
   if (hit && now.getTime() - hit.at < MEMO_MS) return hit.sections;
   const g = (kind: string, run: () => Promise<DigestSection>) => guarded(scope.brandId, kind, run);
@@ -136,7 +163,7 @@ export function brandSections(scope: Scope, perms: ReadonlySet<string>, week: Da
     keys.includes("analytics.read") ? g("seo", () => seoSection(scope)) : [],
     keys.includes("analytics.read") ? g("posts", () => postsSection(scope, week, now)) : [],
     keys.includes("crm.read") ? g("sales", () => salesSection(scope, week)) : [],
-    keys.includes("ads.read") ? g("ads", () => adsSection(scope, week)) : [],
+    keys.includes("ads.read") ? g("ads", () => adsSection(scope, week, weekAt)) : [],
   ]).then((parts) => parts.flat());
   if (memo.size >= MEMO_MAX) memo.clear();
   memo.set(memoKey, { at: now.getTime(), sections });
@@ -180,7 +207,8 @@ function hasNews(s: DigestSection) {
     case "tasks": return s.done + s.open + s.overdue > 0;
     case "seo": return !!s.data && s.data.totals.impressions + s.data.previous.impressions > 0;
     case "posts": return s.published > 0;
-    case "sales": case "ads": return !!s.data?.length;
+    case "sales": return !!s.data?.length;
+    case "ads": return !!s.data?.length || !!s.alerts?.length;
   }
 }
 
@@ -219,7 +247,7 @@ export async function buildDigest(userId: string, workspaceId: string, now = new
     const zone = await brandTimeZone(scope);
     const week = brandWeek(zone, weekAt);
     const [shared, tasks] = await Promise.all([
-      brandSections(scope, a.perms, week, zone, now),
+      brandSections(scope, a.perms, week, zone, now, weekAt),
       a.perms.has("tasks.read") ? guarded(brandId, "tasks", () => tasksSection({ ...scope, userId, perms: a.perms, clientReviewer: a.clientReviewer }, week, zone, now)) : [],
     ]);
     const sections = [...shared.filter((s) => s.kind === "content"), ...tasks, ...shared.filter((s) => s.kind !== "content")];
