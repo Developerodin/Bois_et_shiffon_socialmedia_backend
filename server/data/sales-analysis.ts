@@ -118,7 +118,7 @@ const DISCOUNT_JOIN = Prisma.sql`
   LEFT JOIN LATERAL unnest(o."discountCodes") AS dc(code) ON true
   LEFT JOIN (SELECT code, count(DISTINCT x.id) AS n FROM co x, unnest(x."discountCodes") AS code GROUP BY code) cn ON cn.code = dc.code`;
 
-export type BreakdownResult = Capped & { basis: "orders" | "lines"; columns: string[] };
+export type BreakdownResult = Capped & { columns: string[] };
 
 type OrderGroupRow = {
   key: string; currency: string; total_groups: number; orders: number; gross: Prisma.Decimal; discounts: Prisma.Decimal;
@@ -145,7 +145,6 @@ export async function salesBreakdown(scope: Scope, range: DateRange, by: Breakdo
       ), ${capped(Prisma.sql`revenue DESC, key`)}
       SELECT key, currency, orders, units, revenue, total_groups FROM r WHERE ${shown(cap)} ORDER BY currency, rn`;
     return {
-      basis: "lines",
       columns: [by, "currency", "orders", "units", "revenue"],
       rows: rows.map((r) => [r.key, r.currency, r.orders, r.units, money(r.revenue)]),
       moreGroups: hidden(rows),
@@ -164,7 +163,6 @@ export async function salesBreakdown(scope: Scope, range: DateRange, by: Breakdo
     SELECT key, currency, orders, gross, discounts, net_sales, total, refunded, total_groups FROM r WHERE ${shown(cap)}
     ORDER BY currency, ${time ? Prisma.sql`key` : Prisma.sql`rn`}`;
   return {
-    basis: "orders",
     columns: [by, "currency", "orders", "gross", "discounts", "netSales", "total", "refunded", "avgOrderValue"],
     rows: rows.map((r) => [
       r.key, r.currency, r.orders, money(r.gross), money(r.discounts), money(r.net_sales), money(r.total), money(r.refunded),

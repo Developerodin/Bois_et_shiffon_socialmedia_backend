@@ -52,7 +52,7 @@ beforeEach(() => {
   perms.set = new Set(["crm.read"]);
   data.hasOrderLines.mockResolvedValue(true);
   data.truncatedOrders.mockResolvedValue(0);
-  data.salesBreakdown.mockResolvedValue({ basis: "orders", columns: [], rows: [], moreGroups: 0 });
+  data.salesBreakdown.mockResolvedValue({ columns: [], rows: [], moreGroups: 0 });
   data.topProducts.mockResolvedValue({ rows: [], moreGroups: 0 });
   data.productSales.mockResolvedValue({ variants: [], weeks: [] });
   data.stockRisk.mockResolvedValue({ sellers: [], slow: [] });
@@ -141,7 +141,7 @@ describe("per-product tools without line items", () => {
 
   it("a line-based breakdown says so too", async () => {
     data.hasOrderLines.mockResolvedValue(false);
-    data.salesBreakdown.mockResolvedValue({ basis: "lines", columns: [], rows: [], moreGroups: 0 });
+    data.salesBreakdown.mockResolvedValue({ columns: [], rows: [], moreGroups: 0 });
     expect((await run(chatTools(scope).salesBreakdown, { ...range, by: "vendor" })).note).toMatch(/line items/);
   });
 
@@ -152,7 +152,7 @@ describe("per-product tools without line items", () => {
 
 describe("salesBreakdown", () => {
   it("passes the grouping through, cleans shop text and says how many groups are hidden", async () => {
-    data.salesBreakdown.mockResolvedValue({ basis: "orders", columns: ["channel", "currency", "orders"], rows: [[`web${BIDI}shop`, "EUR", 4]], moreGroups: 3 });
+    data.salesBreakdown.mockResolvedValue({ columns: ["channel", "currency", "orders"], rows: [[`web${BIDI}shop`, "EUR", 4]], moreGroups: 3 });
     const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "channel", limit: 1 });
     expect(data.salesBreakdown).toHaveBeenCalledWith(scope, range, "channel", 1);
     expect(out.rows).toEqual([["web shop", "EUR", 4]]);
@@ -160,14 +160,14 @@ describe("salesBreakdown", () => {
   });
 
   it("weeks: says the first and last can be partial, and time groups keep the most recent", async () => {
-    data.salesBreakdown.mockResolvedValue({ basis: "orders", columns: [], rows: [["2026-11-02", "EUR", 1]], moreGroups: 1 });
+    data.salesBreakdown.mockResolvedValue({ columns: [], rows: [["2026-11-02", "EUR", 1]], moreGroups: 1 });
     const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "week" });
     expect(out.notes).toEqual([expect.stringContaining("most recent"), expect.stringContaining("partial")]);
   });
 
   it("line-based groups say revenue is net and count incomplete orders", async () => {
     data.truncatedOrders.mockResolvedValue(2);
-    data.salesBreakdown.mockResolvedValue({ basis: "lines", columns: [], rows: [["Tables", "EUR", 1, 2, "90.00"]], moreGroups: 0 });
+    data.salesBreakdown.mockResolvedValue({ columns: [], rows: [["Tables", "EUR", 1, 2, "90.00"]], moreGroups: 0 });
     const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "collection" });
     expect(out.notes).toEqual([expect.stringContaining("net of refunds"), expect.stringMatching(/^2 orders .* incomplete/)]);
   });
