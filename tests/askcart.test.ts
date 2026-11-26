@@ -175,6 +175,15 @@ describe("fetchAskCartOrders", () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
+  it("returns orders oldest update first, an order re-read with a newer update moving to its new place", async () => {
+    stubFetch(
+      { body: page([order(1, "2026-11-03T10:00:00Z"), order(2, "2026-11-04T10:00:00Z")], { complete: false, nextCursor: "c1" }) },
+      { body: page([order(1, "2026-11-05T10:00:00Z"), order(3, "2026-11-04T12:00:00Z")]) },
+    );
+    const { orders } = await fetchAskCartOrders(SECRET, SINCE);
+    expect(orders.map((o) => o.name)).toEqual(["#2", "#3", "#1"]);
+  });
+
   it("a page AskCart cut short (rateLimited) is normal: it waits the page's Retry-After and resumes from nextCursor", async () => {
     vi.mocked(sleep).mockClear();
     const f = stubFetch(
