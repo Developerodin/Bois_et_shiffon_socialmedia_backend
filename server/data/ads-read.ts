@@ -1,9 +1,9 @@
 import { Prisma } from "@prisma/client";
-import { previousRange } from "./sources";
+import { dayDate, previousRange } from "./sources";
 import type { AdsCampaignDto, AdsSummaryDto, AdsTotals, DateRange, ShopRevenueOverSpend } from "@/shared";
 import { prisma } from "@/server/db/prisma";
 import { convertedSpend } from "./budgets";
-import { salesSummary } from "./sales-read";
+import { exVat } from "./sales-read";
 
 /**
  * Ads numbers for the Ads tab and its export, read only from AdDay (never from Meta). Callers have checked ads.read.
@@ -21,7 +21,6 @@ type Scope = { workspaceId: string; brandId: string };
 export const ADS_MAX_DAYS = 366;
 
 export const D = (v: Prisma.Decimal | string | number | null | undefined) => new Prisma.Decimal(v ?? 0);
-const dayDate = (day: string) => new Date(`${day}T00:00:00Z`);
 
 /** ROAS and cost per purchase from sums; null where the divisor is zero. */
 export function totalsOf(currency: string, spend: Prisma.Decimal, purchases: number, purchaseValue: Prisma.Decimal): AdsTotals {
@@ -51,24 +50,29 @@ async function totals(scope: Scope, range: DateRange): Promise<AdsTotals[]> {
  */
 export async function adsSummary(scope: Scope, range: DateRange, opts: { crmRead?: boolean } = {}): Promise<AdsSummaryDto> {
   const prev = previousRange(range);
-  const [now, before] = await Promise.all([totals(scope, range), totals(scope, prev)]);
-  return { totals: now, previous: before, previousRange: prev, ...(opts.crmRead ? { shopRevenueOverSpend: await shopRevenueOverSpend(scope, range) } : {}) };
+  const [now, before, ratio] = await Promise.all([totals(scope, range), totals(scope, prev), opts.crmRead ? shopRevenueOverSpend(scope, range) : null]);
+  return { totals: now, previous: before, previousRange: prev, ...(ratio ? { shopRevenueOverSpend: ratio } : {}) };
 }
 
 /**
  * Net sales without VAT (Task 2) ÷ ad spend over the same days, the spend converted to the shop's currency. Shopify
  * days are the brand's and ad days the ad account's, so the two may differ by a few hours (the screen says so).
+ * Reads the ex-VAT figure alone (sales-read.ts exVat), for the range's currencies only. No figure when orders were
+ * left out of the ex-VAT sum (exVatMissing): the ratio would read low.
  */
 export async function shopRevenueOverSpend(scope: Scope, range: DateRange): Promise<ShopRevenueOverSpend> {
   const none = (why: ShopRevenueOverSpend["why"], currency: string | null = null): ShopRevenueOverSpend => ({ ratio: null, currency, why, staleRateFrom: null });
-  const { currencies } = await salesSummary(scope, range);
-  if (currencies.length > 1) return none("currencies");
-  const shop = currencies[0];
-  if (!shop || shop.netExVat === null || shop.exVatFrom !== null) return none("no_revenue", shop?.currency ?? null);
-  const spend = await convertedSpend(scope, range.from, range.to, shop.currency);
-  if (!spend) return none("no_rate", shop.currency);
-  if (spend.total.isZero()) return none("no_spend", shop.currency);
-  return { ratio: D(shop.netExVat).div(spend.total).toDecimalPlaces(2).toNumber(), currency: shop.currency, why: null, staleRateFrom: spend.stale };
+  const vat = await exVat(scope, range);
+  if (vat.size > 1) return none("currencies");
+  const [entry] = [...vat];
+  if (!entry) return none("no_revenue");
+  const [currency, shop] = entry;
+  if (shop.netExVat === null || shop.exVatFrom !== null) return none("no_revenue", currency);
+  if (shop.exVatMissing > 0) return none("vat_missing", currency);
+  const spend = await convertedSpend(scope, range.from, range.to, currency);
+  if (!spend) return none("no_rate", currency);
+  if (spend.total.isZero()) return none("no_spend", currency);
+  return { ratio: D(shop.netExVat).div(spend.total).toDecimalPlaces(2).toNumber(), currency, why: null, staleRateFrom: spend.stale };
 }
 
 type CampaignRow = {

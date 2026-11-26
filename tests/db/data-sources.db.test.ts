@@ -266,6 +266,19 @@ describe("runDataSync", () => {
     expect((await dataJobs(s.id)).map((j) => (j.payload as { mode: string }).mode)).toEqual(["daily"]);
   });
 
+  it("a stopped chain keeps an earlier stop's reason and ERROR status", async () => {
+    const plan = { start: "2024-11-27", end: "2026-11-25", days: 14 };
+    const s = await source("ds-a", "SHOPIFY_ORDERS", {
+      settings: { backfill: plan }, status: "ERROR",
+      lastResult: { at: "2026-11-20T00:00:00.000Z", okAt: null, reason: "permission", count: 0, error: "e" },
+    });
+    next = async () => ({ count: 0, reason: null, stopChain: true, settings: { unset: ["backfill"] } });
+    await runDataSync(payload(s, { mode: "backfill", from: "2025-03-02", to: "2025-03-15", end: plan.end }), lease);
+    const row = await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } });
+    expect(row.status).toBe("ERROR");
+    expect(row.lastResult).toMatchObject({ reason: "permission", okAt: null });
+  });
+
   it("capped after retries → window halved with an :h key, backfill.days saved; rate-limited never halved", async () => {
     const plan = { start: "2025-01-01", end: "2025-12-31", days: 14 };
     const s = await source("ds-a", "SHOPIFY_ORDERS", { settings: { reportsIn: "x", backfill: plan }, syncedThrough: new Date("2025-02-28") });

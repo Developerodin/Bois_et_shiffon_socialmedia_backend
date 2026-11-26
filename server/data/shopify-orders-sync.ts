@@ -24,13 +24,15 @@ const PAGE = 100;
 /** How far back the order history goes once the store allows reading all orders (decision 7: 24 months). */
 export const HISTORY_DAYS = 730;
 /**
- * Days per history window. AskCart: 14 (~233 B&C orders, ~10 pages of 25 at ~3.1 s, ~30 s); a token: 30.
+ * Days per history window. AskCart: 14 (~233 B&C orders, ~10 pages of 25 at ~3.1 s, ~30 s). A token: 14 too, since
+ * a run on that path reads about 40 pages of ORDERS_PAGE (~560 orders) before the time cap: 30-day windows of a busy
+ * month would never complete and spend 3 h of retries before halving.
  * ponytail: a window must finish in one run (MAX_MS 180 s): ~58 AskCart pages, ~1,450 orders. B&C's two years are
  * ~12.2k orders, ~53 windows, a 30–45 min chain. A busy-season window can come close to the cap; one that still caps
  * after its retries is halved (registerSync halveOnCap), down to 1 day. Upgrade path: resume a window from AskCart's
  * nextCursor saved in the job payload. The catalogue sync isn't starved: it shares AskCart's per-token pacing.
  */
-export const HISTORY_WINDOW_DAYS = { askCart: 14, token: 30 };
+export const HISTORY_WINDOW_DAYS = { askCart: 14, token: 14 };
 /** A pasted token's scopes are asked of Shopify at most once a day (settings.scopesCheckedAt). */
 const SCOPES_CHECK_MS = 24 * 3_600_000;
 

@@ -887,7 +887,7 @@ async function storyJobLost(attemptId: string) {
       data: { workspaceId: a.workspaceId, brandId: a.brandId, actorUserId: a.createdByUserId, action: `content.publish.${status.toLowerCase()}`, entityType: "PublicationAttempt", entityId: a.id, metadata: { lost: true, posted, total: st.frames } },
     });
   }, TX);
-  // Settled PUBLISHED or PARTIAL: its numbers read (enqueueStoryRead checks the status it was given).
+  // Settled PUBLISHED or PARTIAL: its numbers read (enqueueStoryRead reads the attempt's status back and skips others).
   await enqueueStoryRead(attemptId);
 }
 

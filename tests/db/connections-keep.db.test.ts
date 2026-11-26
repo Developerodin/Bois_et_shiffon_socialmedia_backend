@@ -71,7 +71,9 @@ describe("saveConnections keep (personal Meta Ads logins)", () => {
   it("a system token stopped at permission (or reconnect) → the personal login replaces it", async () => {
     await save(SYSTEM, ["act_1"], { expires: null });
     const { id } = await tokenOf("act_1");
-    await prisma.dataSource.create({ data: { workspaceId: ws, brandId: B, kind: "META_ADS", externalId: "act_1", connectionId: id, lastResult: { at: "x", okAt: null, reason: "permission", count: 0, error: "e" } } });
+    // A stop the sync recorded after the system token was saved.
+    const at = new Date(Date.now() + 1000).toISOString();
+    await prisma.dataSource.create({ data: { workspaceId: ws, brandId: B, kind: "META_ADS", externalId: "act_1", connectionId: id, lastResult: { at, okAt: null, reason: "permission", count: 0, error: "e" } } });
     const rows = await save(PERSONAL, ["act_1"], { keep: true });
     expect(rows.kept).toEqual([]);
     expect(await tokenOf("act_1")).toMatchObject({ token: PERSONAL, id });
@@ -89,12 +91,44 @@ describe("saveConnections keep (personal Meta Ads logins)", () => {
     expect(audit.metadata).toMatchObject({ kept: ["Ads act_1"], accounts: [] });
   });
 
-  it("paste and OAuth at once (two real parallel transactions) → the system token is kept", async () => {
+  it("a stop recorded before the system token was saved doesn't let a personal login replace it", async () => {
     await save(PERSONAL, ["act_1"]);
-    for (let i = 0; i < 5; i++) {
-      await Promise.all([save(SYSTEM, ["act_1"], { expires: null }), save(PERSONAL, ["act_1"], { keep: true })]);
-      expect(await tokenOf("act_1")).toMatchObject({ token: SYSTEM, expires: null });
+    const { id } = await tokenOf("act_1");
+    await prisma.dataSource.create({ data: { workspaceId: ws, brandId: B, kind: "META_ADS", externalId: "act_1", connectionId: id, lastResult: { at: new Date(Date.now() - 60_000).toISOString(), okAt: null, reason: "reconnect", count: 0, error: "e" } } });
+    await save(SYSTEM, ["act_1"], { expires: null });
+    expect((await save(PERSONAL, ["act_1"], { keep: true })).kept).toEqual(["act_1"]);
+    expect(await tokenOf("act_1")).toMatchObject({ token: SYSTEM, expires: null });
+  });
+
+  it("paste and OAuth at once: the login waits on the paste's open transaction, then keeps the system token", async () => {
+    await save(PERSONAL, ["act_1"]);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let pasted!: () => void;
+    const written = new Promise<void>((r) => (pasted = r));
+    // The paste writes its row, then holds its transaction open (row locked) until released.
+    const paste = saveConnections({
+      workspaceId: ws, brandId: B, provider: "META_ADS", userId: "u1", accounts: metaAccountsToConnections([account("act_1")], SYSTEM, null, ["ads_read"]),
+      after: async () => {
+        pasted();
+        await held;
+      },
+    });
+    await written;
+    const login = save(PERSONAL, ["act_1"], { keep: true });
+    // Release only once the login's statement is waiting on the paste's row lock.
+    for (let i = 0; i < 100; i++) {
+      const [w] = await prisma.$queryRaw<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%INSERT INTO "IntegrationConnection"%'`;
+      if (w.n > 0) break;
+      await new Promise((r) => setTimeout(r, 20));
     }
+    release();
+    await paste;
+    const rows = await login;
+    expect(rows.kept).toEqual(["act_1"]);
+    expect(rows).toHaveLength(0);
+    expect(await tokenOf("act_1")).toMatchObject({ token: SYSTEM, expires: null });
   });
 
   it("without keep: today's upsert, [conn] still works and kept is empty", async () => {
@@ -108,6 +142,23 @@ describe("saveConnections keep (personal Meta Ads logins)", () => {
 });
 
 describe("POST integrations/meta-ads/system-token", () => {
+  it("clears the old token's stop on its sources (reason and ERROR) in the save", async () => {
+    await save(PERSONAL, ["act_1"]);
+    const { id } = await tokenOf("act_1");
+    const okAt = "2026-11-20T00:00:00.000Z";
+    const src = await prisma.dataSource.create({
+      data: { workspaceId: ws, brandId: B, kind: "META_ADS", externalId: "act_1", connectionId: id, status: "ERROR", settings: { currency: "EUR" },
+        lastResult: { at: new Date().toISOString(), okAt, reason: "reconnect", count: 0, error: "e" } },
+    });
+    meta.check.mockResolvedValue({ scopes: ["ads_read"], accounts: [account("act_1")] });
+    expect((await post(SYSTEM)).status).toBe(201);
+    const after = await prisma.dataSource.findUniqueOrThrow({ where: { id: src.id } });
+    expect(after.status).toBe("ACTIVE");
+    expect(after.lastResult).toMatchObject({ reason: null, error: null, okAt });
+    // A personal login right after keeps the fresh system token.
+    expect((await save(PERSONAL, ["act_1"], { keep: true })).kept).toEqual(["act_1"]);
+  });
+
   it("a valid token saves the accounts with no expiry, replacing a personal login in place; token never in the response", async () => {
     await save(PERSONAL, ["act_1"]);
     const before = await tokenOf("act_1");

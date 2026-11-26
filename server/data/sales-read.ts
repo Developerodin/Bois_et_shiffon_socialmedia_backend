@@ -79,8 +79,9 @@ type ExVatRow = { currency: string; last_old: Date | null; net_ex_vat: Prisma.De
  * Per currency for `range`: net sales without VAT, from the day after the last tax-included order read before
  * SHIPPING_TAXES_SINCE inside the range (exVatFrom; null = the whole range), and how many later orders were left out
  * because their shipping tax couldn't be read (exVatMissing). Range-bounded, on the same (brandId, processedAt) index.
+ * Keyed by the currencies with orders in the range only (the ad ratio counts the shop's currencies from it).
  */
-async function exVat(scope: Scope, range: DateRange) {
+export async function exVat(scope: Scope, range: DateRange) {
   const rows = await prisma.$queryRaw<ExVatRow[]>`
     WITH ${brandBounds(scope, range)}, o AS (${countedOrders(scope)}),
     old AS (
@@ -109,7 +110,8 @@ async function exVat(scope: Scope, range: DateRange) {
  */
 export async function salesSummary(scope: Scope, range: DateRange): Promise<SalesSummaryDto> {
   const both = { from: previousRange(range).from, to: range.to };
-  const rows = await prisma.$queryRaw<Row[]>`
+  // The ex-VAT read runs beside the main one (two queries at once on the pool).
+  const [rows, vat] = await Promise.all([prisma.$queryRaw<Row[]>`
     WITH ${brandBounds(scope, both)}, o AS (
       SELECT CASE WHEN o.local::date >= ${range.from}::date THEN 'cur' ELSE 'prev' END AS period, o."currency", o.local::date AS day,
              o."netSales", o."discounts", o."total", o."refunded"
@@ -120,9 +122,7 @@ export async function salesSummary(scope: Scope, range: DateRange): Promise<Sale
            sum("total") AS total, sum("refunded") AS refunded
     FROM o
     GROUP BY GROUPING SETS ((period, "currency", day), (period, "currency"))
-    ORDER BY "currency", day NULLS FIRST`;
-
-  const vat = await exVat(scope, range);
+    ORDER BY "currency", day NULLS FIRST`, exVat(scope, range)]);
   const byCurrency = new Map<string, SalesCurrency>();
   for (const r of rows) {
     let c = byCurrency.get(r.currency);

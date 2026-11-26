@@ -103,8 +103,8 @@ describe("brandSections", () => {
     ] } as never);
     const sales = (await brandSections(scope, MANAGER, WEEK, "UTC", NOW)).find((s) => s.kind === "sales");
     expect(sales).toEqual({ kind: "sales", key: "crm.read", data: [
-      { currency: "EUR", orders: 3, netExVat: "25.00", exVatFrom: "2026-11-18" },
-      { currency: "USD", orders: 1, netExVat: null, exVatFrom: "2026-11-23" },
+      { currency: "EUR", orders: 3, netExVat: "25.00", exVatFrom: "2026-11-18", exVatMissing: 0 },
+      { currency: "USD", orders: 1, netExVat: null, exVatFrom: "2026-11-23", exVatMissing: 0 },
     ] });
   });
 

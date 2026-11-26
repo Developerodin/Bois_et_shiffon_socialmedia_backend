@@ -236,11 +236,17 @@ export async function saveConnections(input: {
   keep?: true;
   /** Merged into the audit event's metadata (the system token path says what it replaced). */
   auditMetadata?: Record<string, unknown>;
+  /** Runs last in the same transaction with the written rows (the system token clears its sources' old stops). */
+  after?: (tx: Prisma.TransactionClient, rows: IntegrationConnection[]) => Promise<void>;
 }): Promise<IntegrationConnection[] & { kept: string[] }> {
   const keyVersion = currentKeyVersion();
   return prisma.$transaction(async (tx) => {
     await input.guard?.(tx);
-    if (input.keep) return saveKeeping(tx, input, keyVersion);
+    if (input.keep) {
+      const kept = await saveKeeping(tx, input, keyVersion);
+      await input.after?.(tx, kept);
+      return kept;
+    }
     const rows = [];
     for (const a of input.accounts) {
       const data = {
@@ -278,6 +284,7 @@ export async function saveConnections(input: {
         metadata: { provider: input.provider, accounts: rows.map((r) => r.displayName), ...input.auditMetadata },
       },
     });
+    await input.after?.(tx, rows);
     return Object.assign(rows, { kept: [] as string[] });
   });
 }
@@ -303,7 +310,10 @@ async function saveKeeping(
         "lastError" = NULL, "connectedByUserId" = EXCLUDED."connectedByUserId", "updatedAt" = now()
       WHERE NOT ("IntegrationConnection"."status" = 'ACTIVE' AND "IntegrationConnection"."tokenExpiresAt" IS NULL
         AND NOT EXISTS (SELECT 1 FROM "DataSource" d WHERE d."connectionId" = "IntegrationConnection"."id" AND d."kind" = 'META_ADS'
-                        AND d."lastResult"->>'reason' IN ('permission', 'reconnect')))
+                        AND d."lastResult"->>'reason' IN ('permission', 'reconnect')
+                        -- Only a stop recorded after this token was saved: an older one is about the token it replaced.
+                        AND d."lastResult"->>'at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+                        AND ((d."lastResult"->>'at')::timestamptz AT TIME ZONE 'UTC') > "IntegrationConnection"."updatedAt"))
       RETURNING "id"`;
     if (ids.length) written.push(ids[0].id);
     else kept.push(a.externalAccountId);
@@ -311,7 +321,7 @@ async function saveKeeping(
   const found = written.length ? await tx.integrationConnection.findMany({ where: { id: { in: written } } }) : [];
   const rows = written.map((id) => found.find((r) => r.id === id)!);
   const keptRows = kept.length
-    ? await tx.integrationConnection.findMany({ where: { brandId: input.brandId, provider: input.provider, externalAccountId: { in: kept } }, select: { id: true, displayName: true } })
+    ? await tx.integrationConnection.findMany({ where: { workspaceId: input.workspaceId, brandId: input.brandId, provider: input.provider, externalAccountId: { in: kept } }, select: { id: true, displayName: true } })
     : [];
   await tx.auditEvent.create({
     data: {

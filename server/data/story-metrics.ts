@@ -87,16 +87,15 @@ export async function enqueueStoryRead(attemptId: string, now = Date.now()) {
  */
 export async function enqueueMissedStoryReads(now = new Date()) {
   const since = new Date(now.getTime() - 24 * 3_600_000);
-  const rows = await prisma.$queryRaw<{ id: string }[]>`
-    SELECT a.id FROM "PublicationAttempt" a
+  const rows = await prisma.$queryRaw<{ id: string; target: unknown }[]>`
+    SELECT a.id, a.target FROM "PublicationAttempt" a
     JOIN "ContentItem" c ON c.id = a."contentItemId" AND c."workspaceId" = a."workspaceId" AND c."brandId" = a."brandId"
     WHERE a.status IN ('PUBLISHED', 'PARTIAL') AND a.provider = 'INSTAGRAM' AND c.channel = 'INSTAGRAM_STORY'
       AND a."updatedAt" >= (${since.toISOString()}::timestamptz AT TIME ZONE 'UTC')
       AND NOT EXISTS (SELECT 1 FROM "Job" j WHERE j."idempotencyKey" = 'story:' || a.id)`;
   let queued = 0;
   for (const r of rows) {
-    const a = await prisma.publicationAttempt.findUnique({ where: { id: r.id }, select: { target: true } });
-    const first = firstFrameAt(a?.target);
+    const first = firstFrameAt(r.target);
     if (first === null || now.getTime() - first > CATCH_UP_MS) continue;
     if (await enqueueStoryRead(r.id, now.getTime())) queued++;
   }
@@ -122,7 +121,7 @@ export async function runStoryRead(payload: unknown) {
     select: { id: true, workspaceId: true, brandId: true, connectionId: true, target: true },
   });
   if (!a) return void console.warn("[story-metrics] no such story attempt for this brand; nothing read", p.attemptId);
-  const conn = await prisma.integrationConnection.findFirst({ where: { id: a.connectionId, workspaceId: a.workspaceId, brandId: a.brandId, status: "ACTIVE" } });
+  const conn = await prisma.integrationConnection.findFirst({ where: { id: a.connectionId, workspaceId: a.workspaceId, brandId: a.brandId, provider: "INSTAGRAM", status: "ACTIVE" } });
   if (!conn) return void console.warn("[story-metrics] the story's connection is gone or another brand's; nothing read", a.id);
   const frames = readableFrames(a.target);
   if (!frames.length) return;

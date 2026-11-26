@@ -170,6 +170,9 @@ describe("shop revenue ÷ ad spend", () => {
     auth.perms = perms;
     return (await summary(new Request("http://x?from=2026-10-01&to=2026-10-10"), { params })).json();
   };
+  beforeEach(async () => {
+    await adSource("act_1", "2026-10-10");
+  });
 
   it("with crm.read: net ex-VAT revenue ÷ spend converted to the shop currency; absent without crm.read", async () => {
     await order("2026-10-03", "600");
@@ -193,5 +196,29 @@ describe("shop revenue ÷ ad spend", () => {
     expect((await summaryAs(MANAGER())).shopRevenueOverSpend).toMatchObject({ ratio: null, why: "no_rate" });
     await order("2026-10-04", "5", "USD");
     expect((await summaryAs(MANAGER())).shopRevenueOverSpend).toMatchObject({ ratio: null, why: "currencies" });
+  });
+
+  it("only the range's currencies count (not the previous period's); orders whose VAT couldn't be read → no figure", async () => {
+    await order("2026-09-25", "5", "USD"); // the previous period only
+    await order("2026-10-03", "600");
+    await spend("2026-10-03", "200");
+    expect((await summaryAs(MANAGER())).shopRevenueOverSpend).toMatchObject({ ratio: 3, currency: "EUR" });
+    // A tax-included order written after the change without its shipping tax: left out of the ex-VAT sum.
+    await prisma.shopOrder.create({
+      data: { workspaceId: ws, brandId: "bu-a", connectionId: "c", shopifyId: "o-missing", name: "#2", processedAt: new Date("2026-10-04T10:00:00Z"), test: false,
+        currency: "EUR", netSales: "100", discounts: "0", shipping: "5", taxes: "21", taxesIncluded: true, total: "105", refunded: "0", shopifyUpdatedAt: new Date("2026-10-04T10:00:00Z") },
+    });
+    expect((await summaryAs(MANAGER())).shopRevenueOverSpend).toMatchObject({ ratio: null, why: "vat_missing" });
+  });
+
+  it("spend of an ad account switched off doesn't count", async () => {
+    await order("2026-10-03", "600");
+    await spend("2026-10-03", "200");
+    await prisma.adDay.create({
+      data: { workspaceId: ws, brandId: "bu-a", platform: "META", accountId: "act_off", campaignId: "x", campaignName: "C", day: new Date("2026-10-03T00:00:00Z"),
+        currency: "EUR", spend: "400", impressions: 1, clicks: 1, purchases: 0, purchaseValue: "0" },
+    });
+    await prisma.dataSource.create({ data: { workspaceId: ws, brandId: "bu-a", kind: "META_ADS", externalId: "act_off", status: "OFF", settings: { currency: "EUR" } } });
+    expect((await summaryAs(MANAGER())).shopRevenueOverSpend).toMatchObject({ ratio: 3 });
   });
 });

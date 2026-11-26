@@ -273,7 +273,7 @@ describe("syncShopifyOrders: order history past 60 days", () => {
     expect((await syncShopifyOrders(daily(conn), now)).settings).toEqual({ set: { scopesCheckedAt: now.toISOString(), allOrders: false } });
     m.grantedScopes.mockResolvedValueOnce({ name: "Shop", scopes: ["read_orders", "read_all_orders"] });
     expect((await syncShopifyOrders(daily(conn), now)).settings).toEqual({
-      set: { scopesCheckedAt: now.toISOString(), allOrders: true, backfill: { start: "2024-11-23", end: "2026-11-22", days: 30 } },
+      set: { scopesCheckedAt: now.toISOString(), allOrders: true, backfill: { start: "2024-11-23", end: "2026-11-22", days: 14 } },
     });
     m.grantedScopes.mockClear();
     expect(await syncShopifyOrders(daily(conn, { scopesCheckedAt: new Date(now.getTime() - 3_600_000).toISOString() }), now)).not.toHaveProperty("settings");

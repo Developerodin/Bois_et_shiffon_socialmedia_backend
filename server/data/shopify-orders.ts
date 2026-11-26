@@ -37,9 +37,13 @@ export const MAX_QUERY_COST = 800;
 /**
  * Orders per page on the pasted-token path: as many as fit MAX_QUERY_COST (14 at the estimate above; was 100 before
  * shippingLines, itself estimated ~1,400, over Shopify's limit). Task 6's created_at query uses the same constant.
- * ponytail: with MAX_PAGES that is ~700 orders a run; a busier store catches up over the follow-up runs.
+ * ponytail: the time cap (MAX_MS), not MAX_PAGES, ends a run: Shopify restores ~50 points a second, so a page of
+ * ~800 waits for the bucket and a run reads about 40 pages, ~560 orders. A busier store catches up over the follow-up
+ * runs; the history windows on this path are sized for it (HISTORY_WINDOW_DAYS.token).
  */
 export const ORDERS_PAGE = Math.floor((MAX_QUERY_COST - 2) / ORDER_NODE_COST);
+/** Whether this process has logged a token-path page's real query cost yet (once is enough to check the estimate). */
+let costLogged = false;
 
 /** One query for both reads: by update time (daily, UPDATED_AT) and by creation day (history, CREATED_AT). */
 export const ORDERS_QUERY = `query Orders($after: String, $query: String!, $sortKey: OrderSortKeys!) {
@@ -282,7 +286,13 @@ export async function fetchOrders(
     type Page = { orders: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: OrderNode[] } };
     let data: Page;
     try {
-      ({ data } = await shopifyQuery<Page>(conn.shop, conn.accessToken, ORDERS_QUERY, { after, query, sortKey }, signal));
+      let cost: { requestedQueryCost?: number } | undefined;
+      ({ data, cost } = await shopifyQuery<Page>(conn.shop, conn.accessToken, ORDERS_QUERY, { after, query, sortKey }, signal));
+      // ORDER_NODE_COST is an estimate: the first page a process reads logs Shopify's own figure (no token, no shop).
+      if (!costLogged && cost?.requestedQueryCost !== undefined) {
+        costLogged = true;
+        console.info("[shopify-orders] requestedQueryCost", cost.requestedQueryCost, "for", ORDERS_PAGE, "orders a page");
+      }
     } catch (err) {
       const none = (stoppedReason: SyncStop): FetchOrdersResult => ({ orders: [], cursorEnd: sinceUpdatedAt, stoppedReason });
       // ACCESS_DENIED is a missing scope (read_orders), not a dead token: the connection must not be marked for reconnect.

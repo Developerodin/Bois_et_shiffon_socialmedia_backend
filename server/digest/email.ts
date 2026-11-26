@@ -13,7 +13,8 @@ function salesLine(c: DigestSales) {
   const orders = `${n(c.orders)} orders`;
   if (c.netExVat === undefined) return c.netSales === undefined ? orders : `${orders}, ${c.netSales} ${c.currency} net`;
   if (c.netExVat === null) return orders;
-  return `${orders}, ${c.netExVat} ${c.currency} net excl. VAT${c.exVatFrom ? ` from ${c.exVatFrom}` : ""}`;
+  const missing = c.exVatMissing ? ` (${n(c.exVatMissing)} orders left out: their VAT couldn't be read)` : "";
+  return `${orders}, ${c.netExVat} ${c.currency} net excl. VAT${c.exVatFrom ? ` from ${c.exVatFrom}` : ""}${missing}`;
 }
 
 function sectionLines(s: DigestSection): string[] {

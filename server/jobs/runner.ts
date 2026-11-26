@@ -184,8 +184,8 @@ async function dailySweep() {
   // "data" only queues each data source's sync (no provider calls), spread over the next two hours; "post-metric
   // sources" first gives each brand with published posts its POST_METRICS source. "fx" queues the day's exchange-rate
   // read (server/data/fx.ts), one short job outside the data cap; "story reads" queues reads the publish paths missed.
-  // "digest" queues Monday's digests for
-  // after those syncs, last: a workspace-wide insert that must never hold up the steps before it.
+  // "digest" queues Monday's digests for after those syncs, last: a workspace-wide insert that must never hold up the
+  // steps before it.
   for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["fx", enqueueFxSync], ["story reads", enqueueMissedStoryReads], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites], ["digest", enqueueWeeklyDigests]] as const) {
     try {
       await step(now);

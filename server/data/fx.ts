@@ -4,7 +4,7 @@ import { prisma } from "@/server/db/prisma";
 import { parseSheet } from "@/server/catalog/import-file";
 import { BodyTooLarge, cappedText } from "@/server/integrations/capped-text";
 import { enqueueJob } from "@/server/jobs/queue";
-import { addDays } from "@/server/data/sources";
+import { addDays, dayOf } from "@/server/data/sources";
 
 /**
  * ECB euro reference rates (plan 2026-11-26-phase-2-followup, Task 1), so ad spend and shop sales in different
@@ -90,7 +90,6 @@ export function enqueueFxSync(now = new Date()) {
   return enqueueJob({ type: FX_SYNC_JOB, payload: {}, idempotencyKey: `fx:${now.toISOString().slice(0, 10)}`, maxAttempts: 3 });
 }
 
-const dayOf = (d: Date) => d.toISOString().slice(0, 10);
 
 /**
  * The non-EUR ECB currencies in use, each with the brands using it: Meta ad accounts' currencies

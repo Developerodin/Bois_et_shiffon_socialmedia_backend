@@ -4,6 +4,7 @@ import { AD_BUDGET_PLATFORMS, isEcbCurrency, type AdBudgetDto, type AdBudgetsDto
 import { prisma } from "@/server/db/prisma";
 import { minorDigits, tooPrecise } from "@/server/quotes/quotes";
 import { rateTable } from "./fx";
+import { dayDate, dayOf } from "./sources";
 
 /**
  * Monthly ad budgets per platform (plan 2026-11-26-phase-2-followup, Task 3) and Meta's pacing against them. Read
@@ -37,18 +38,21 @@ export type BudgetInput = z.infer<typeof BudgetBody>;
 
 const firstDay = (month: string) => `${month}-01`;
 const lastDay = (month: string) => new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10);
-const dayDate = (day: string) => new Date(`${day}T00:00:00Z`);
-const dayOf = (d: Date) => d.toISOString().slice(0, 10);
 const daysBetween = (from: string, to: string) => (Date.parse(to) - Date.parse(from)) / 86_400_000 + 1;
 
 /**
- * The spend of `platform` per currency and day over from..to, converted into `currency`; null when a rate is
- * missing. Also the oldest stale rate used.
+ * The brand's Meta spend per currency and day over from..to, converted into `currency`; null when a rate is missing.
+ * Also the oldest stale rate used. Only ad accounts whose source is on (an account switched off keeps its old rows,
+ * which mustn't count against this month's budget).
  */
 export async function convertedSpend(scope: Scope, from: string, to: string, currency: string) {
+  const accounts = await prisma.dataSource.findMany({
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "META_ADS", status: { not: "OFF" } },
+    select: { externalId: true },
+  });
   const rows = await prisma.adDay.groupBy({
     by: ["currency", "day"],
-    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, platform: "META", day: { gte: dayDate(from), lte: dayDate(to) } },
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, platform: "META", accountId: { in: accounts.map((a) => a.externalId) }, day: { gte: dayDate(from), lte: dayDate(to) } },
     _sum: { spend: true },
   });
   const table = await rateTable([currency, ...rows.map((r) => r.currency)], from, to);
@@ -60,7 +64,7 @@ export async function convertedSpend(scope: Scope, from: string, to: string, cur
     total = total.plus(c.amount);
     if (c.stale && c.rateDay && (stale === null || c.rateDay < stale)) stale = c.rateDay;
   }
-  return { total, stale, any: rows.length > 0 };
+  return { total, stale };
 }
 
 /** Meta pacing for a month's budget (see PacingDto). */
@@ -122,6 +126,9 @@ export async function setBudget(scope: Scope & { userId: string }, input: Budget
   const where = { brandId_platform_month: { brandId: scope.brandId, platform: input.platform, month: dayDate(firstDay(input.month)) } };
   const clear = new Prisma.Decimal(input.amount).isZero();
   return prisma.$transaction(async (tx) => {
+    // One writer per brand, platform and month at a time: the audit's previous amount is the one replaced, and two
+    // first-time saves can't both try to create the row.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`ads-budget:${scope.brandId}:${input.platform}:${input.month}`}))`;
     const previous = await tx.adBudget.findFirst({ where: { workspaceId: scope.workspaceId, ...where.brandId_platform_month } });
     let row: { id: string } | null = null;
     if (clear) {

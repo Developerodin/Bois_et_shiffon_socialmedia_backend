@@ -152,7 +152,14 @@ export const rangeDays = (range: DateRange) => (Date.parse(range.to) - Date.pars
 export function previousRange(range: DateRange): DateRange {
   return { from: addDays(range.from, -rangeDays(range)), to: addDays(range.from, -1) };
 }
-const dayOf = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
+/** A @db.Date value (UTC midnight) as "YYYY-MM-DD"; null stays null. The one helper for these columns. */
+export function dayOf(d: Date): string;
+export function dayOf(d: Date | null): string | null;
+export function dayOf(d: Date | null) {
+  return d ? d.toISOString().slice(0, 10) : null;
+}
+/** "YYYY-MM-DD" as the UTC-midnight Date a @db.Date column takes. */
+export const dayDate = (day: string) => new Date(`${day}T00:00:00Z`);
 
 // ---- jobs ---------------------------------------------------------------------------------------------------------
 
@@ -267,9 +274,10 @@ export async function enqueueDailyDataSyncs(now = new Date()) {
 }
 
 /**
- * Saves the run's result. Only fixed strings reach `error`; `okAt` moves on a run with no reason, unless the run
- * stopped its chain (`quiet`: not a success, not a failure). `settings` is merged in by one jsonb statement in the
- * same transaction: `- unset` then `|| set`, top-level keys only, so keys it doesn't name are kept.
+ * Saves the run's result. Only fixed strings reach `error`; `okAt` moves on a run with no reason. A run that stopped
+ * its chain (`quiet`: not a success, not a failure) keeps the previous okAt, reason, error and status, so it never
+ * hides an earlier stop. `settings` is merged in by one jsonb statement in the same transaction: `- unset` then
+ * `|| set`, top-level keys only, so keys it doesn't name are kept.
  */
 async function recordSync(
   source: DataSource,
@@ -282,10 +290,12 @@ async function recordSync(
   const at = new Date().toISOString();
   const prev = source.lastResult as StoredSyncResult | null;
   const okAt = reason || opts.quiet ? (prev?.okAt ?? null) : at;
-  const lastResult: DataSyncResult = { at, startedAt, okAt, reason, count, error: reason ? DATA_SYNC_ERRORS[reason] : null };
+  const kept = opts.quiet ? (prev?.reason ?? null) : reason;
+  const lastResult: DataSyncResult = { at, startedAt, okAt, reason: kept, count, error: kept ? DATA_SYNC_ERRORS[kept] : null };
   const where = { id: source.id, workspaceId: source.workspaceId, brandId: source.brandId };
   // A permission or rate stop isn't the connection's fault; the source stays on and tries again tomorrow.
-  const write = prisma.dataSource.updateMany({ where, data: { ...data, lastResult, status: reason === "reconnect" || reason === "permission" ? "ERROR" : "ACTIVE" } });
+  const status = opts.quiet ? {} : { status: reason === "reconnect" || reason === "permission" ? ("ERROR" as const) : ("ACTIVE" as const) };
+  const write = prisma.dataSource.updateMany({ where, data: { ...data, lastResult, ...status } });
   const patch = opts.settings;
   if (!patch || (!patch.unset?.length && !Object.keys(patch.set ?? {}).length)) return void (await write);
   await prisma.$transaction([

@@ -92,7 +92,7 @@ async function salesSection(scope: Scope, week: DateRange): Promise<DigestSectio
   return {
     kind: "sales",
     key: "crm.read",
-    data: sum.currencies.map((c) => ({ currency: c.currency, orders: c.totals.orders, netExVat: c.netExVat, exVatFrom: c.exVatFrom })),
+    data: sum.currencies.map((c) => ({ currency: c.currency, orders: c.totals.orders, netExVat: c.netExVat, exVatFrom: c.exVatFrom, exVatMissing: c.exVatMissing })),
   };
 }
 
