@@ -90,6 +90,11 @@ describe("ROAS_DOWN (on D_conv = S − 3)", () => {
     expect(kinds(rows)).toEqual([]);
   });
 
+  it("a baseline with purchases but no purchase value (ROAS 0) raises nothing", () => {
+    const rows = [...days("2026-11-15", "2026-11-21", 100, 4, 0), row("2026-11-22", 100, 6, 0), ...days("2026-11-23", S, 100, 2, 0)];
+    expect(kinds(rows)).toEqual([]);
+  });
+
   it("−50% with only 3 purchases on D_conv → none", () => {
     expect(kinds(roasRows(3, 150))).toEqual([]);
   });

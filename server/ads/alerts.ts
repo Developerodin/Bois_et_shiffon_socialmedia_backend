@@ -140,7 +140,8 @@ export function evaluateAccount(rows: AlertDayRow[], ctx: AccountContext): { can
       if (d.purchases >= ROAS_MIN_PURCHASES_DAY && b.purchases >= ROAS_MIN_PURCHASES_BASE && d.spend.gte(convFloor.amount) && !b.spend.isZero()) {
         const roas = d.value.div(d.spend);
         const baseRoas = b.value.div(b.spend);
-        if (roas.lte(baseRoas.mul(ROAS_DOWN_RATIO))) {
+        // A zero baseline ROAS (purchases reported without values) can't drop: every day would raise one.
+        if (baseRoas.gt(0) && roas.lte(baseRoas.mul(ROAS_DOWN_RATIO))) {
           out.push({
             ...base,
             kind: "ROAS_DOWN",
