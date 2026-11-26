@@ -21,6 +21,17 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
         { status: 402 },
       );
     }
+    // Nothing was charged. The code lets the page tell this from other 409s and reload to show when to try again.
+    if (result.status === "blocked") {
+      return problemResponse({
+        type: "https://api.brandpilot/errors/site-blocked",
+        title: "Site blocks automated readers",
+        status: 409,
+        detail: "This site blocked automated readers on your last audit, so another would fail the same way. No credits were spent.",
+        code: "audit.siteBlocked",
+        until: result.until,
+      });
+    }
     if (result.status === "started") kickRunner();
     return Response.json(result, { status: result.status === "started" ? 202 : 200 });
   } catch (error) {
