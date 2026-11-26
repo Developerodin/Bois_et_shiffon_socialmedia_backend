@@ -38,12 +38,23 @@ export const isAskCart = (conn: { externalAccountId: string; scopes?: string[] }
 export const ASKCART_REFUSED = "AskCart can't reach the store. Open AskCart in Shopify admin to reconnect it, then connect Shopify via AskCart again.";
 export const ASKCART_KEY_REFUSED = "AskCart no longer accepts this platform's access to the store. Connect Shopify via AskCart again.";
 export const ASKCART_MODE_CHANGED = "AskCart now connects each store on its own. Connect Shopify via AskCart again.";
+export const ASKCART_SCOPE_MISSING = "This platform's AskCart access doesn't cover this data. Connect Shopify via AskCart again to grant it.";
 /**
- * The reason shown in Connections for a ReconnectNeeded from AskCart: our access (401), a connection from the other
- * mode (askCartToken), or the store's install (503).
+ * Not a reconnect: AskCart's own Shopify access lapsed (503 store_reconnect_needed). Our token stays valid; the
+ * merchant opens AskCart once in Shopify admin and the next sync works.
+ */
+export const ASKCART_STORE_LAPSED = "AskCart lost its access to the store. Open AskCart once in Shopify admin; the next sync then works.";
+/**
+ * The reason shown in Connections for a ReconnectNeeded from AskCart: our access (401), a scope the token lacks (403),
+ * a connection from the other mode (askCartToken), or the store's install (legacy secret's 503).
  */
 export const askCartReason = (e: Error) =>
-  e.message.startsWith("AskCart 401") ? ASKCART_KEY_REFUSED : e.message.startsWith("AskCart mode") ? ASKCART_MODE_CHANGED : ASKCART_REFUSED;
+  e.message.startsWith("AskCart 401") ? ASKCART_KEY_REFUSED
+  : e.message.startsWith("AskCart 403") ? ASKCART_SCOPE_MISSING
+  : e.message.startsWith("AskCart mode") ? ASKCART_MODE_CHANGED
+  : ASKCART_REFUSED;
+/** AskCart's own Shopify access lapsed: temporary, not our connection's fault (see ASKCART_STORE_LAPSED). */
+export const isAskCartStoreLapsed = (e: unknown) => e instanceof AskCartError && e.code === "store_reconnect_needed";
 
 /** Any other non-2xx answer, a body that isn't JSON or one over the cap. Carries the status and AskCart's code only. */
 export class AskCartError extends Error {
@@ -176,8 +187,9 @@ async function cappedText(res: Response) {
 /**
  * One call to `${ASKCART_URL}/api/partner/<path>`. `bearer` is the brand's token (or the INTERIM shared secret); the
  * token endpoint takes none. 429 and 503 shopify_throttled wait Retry-After (at most 30 s) and retry, twice; then
- * AskCartError. A bearer call answered 401, or 503 store_not_connected / store_reconnect_needed, throws ReconnectNeeded:
- * a person has to act. Everything else that isn't 2xx throws AskCartError (403 read_all_orders_pending carries
+ * AskCartError. A bearer call answered 401, 403 insufficient_scope or (legacy secret) 503 store_not_connected throws
+ * ReconnectNeeded: someone has to connect again. 503 store_reconnect_needed is an AskCartError, not retried here: our
+ * token stays valid and the merchant only has to open AskCart in Shopify admin (isAskCartStoreLapsed). Everything else that isn't 2xx throws AskCartError (403 read_all_orders_pending carries
  * visibleSince). 204 → null.
  */
 export async function askCartRequest<T>(
@@ -221,7 +233,7 @@ export async function askCartRequest<T>(
     // AskCart's codes are short identifiers; anything else (an HTML page) is dropped rather than echoed.
     const code = typeof error === "string" && /^[a-z_]{1,60}$/.test(error) ? error : null;
     // 403 insufficient_scope: the token lacks a scope it needs and never gains one; only a new connect fixes it.
-    const storeGone = (res.status === 503 && (code === "store_not_connected" || code === "store_reconnect_needed")) || (res.status === 403 && code === "insufficient_scope");
+    const storeGone = (res.status === 503 && code === "store_not_connected") || (res.status === 403 && code === "insufficient_scope");
     if (opts.bearer !== undefined && (res.status === 401 || storeGone)) throw new ReconnectNeeded(`AskCart ${res.status}${code ? ` ${code}` : ""}`);
     const err = new AskCartError(res.ok ? 502 : res.status, res.ok ? "bad_body" : code, typeof visibleSince === "string" ? visibleSince : null);
     const wait = Number(res.headers.get("retry-after") ?? 2);

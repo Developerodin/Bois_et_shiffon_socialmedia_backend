@@ -14,7 +14,7 @@ import { sameRow, shopifyRows } from "@/server/catalog/sync";
 import { fetchAskCartOrders } from "@/server/data/shopify-orders";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import {
-  ASKCART_KEY_REFUSED, ASKCART_REFUSED, AskCartError, askCartCatalog, askCartConfig, askCartVariants, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
+  ASKCART_KEY_REFUSED, ASKCART_REFUSED, ASKCART_SCOPE_MISSING, AskCartError, isAskCartStoreLapsed, askCartCatalog, askCartConfig, askCartVariants, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
   askCartShop, askCartTokenRequest, isAskCart,
 } from "@/server/shopify/askcart";
 
@@ -90,12 +90,20 @@ describe("askCartGet", () => {
   it.each([
     [error(401, "unauthorized"), ASKCART_KEY_REFUSED],
     [error(503, "store_not_connected", {}, { "retry-after": "60" }), ASKCART_REFUSED],
-    [error(503, "store_reconnect_needed"), ASKCART_REFUSED],
+    [error(403, "insufficient_scope", { scope: "read:orders" }), ASKCART_SCOPE_MISSING],
   ])("%j → ReconnectNeeded with a readable reason", async (res, reason) => {
     stubFetch(res);
     const e = await thrown(askCartShop(SECRET));
     expect(e).toBeInstanceOf(ReconnectNeeded);
     expect(askCartReason(e)).toBe(reason);
+  });
+
+  it("503 store_reconnect_needed is temporary: an AskCartError (our token stays valid), not ReconnectNeeded, and not waited on", async () => {
+    const f = stubFetch(error(503, "store_reconnect_needed", {}, { "retry-after": "5" }));
+    const e = await thrown(askCartShop(SECRET));
+    expect(e).not.toBeInstanceOf(ReconnectNeeded);
+    expect(isAskCartStoreLapsed(e)).toBe(true);
+    expect(f).toHaveBeenCalledOnce();
   });
 
   it("429 waits Retry-After and retries, then succeeds", async () => {
@@ -229,7 +237,7 @@ describe("fetchAskCartOrders", () => {
     expect(orders).toHaveLength(1);
   });
 
-  it.each([error(401, "unauthorized"), error(503, "store_reconnect_needed"), error(503, "store_not_connected")])(
+  it.each([error(401, "unauthorized"), error(403, "insufficient_scope"), error(503, "store_not_connected")])(
     "%j throws ReconnectNeeded for the caller to mark the connection",
     async (res) => {
       stubFetch({ body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1" }) }, res);
@@ -329,7 +337,7 @@ describe("askCartCatalog", () => {
   });
 
   it("a refused store throws ReconnectNeeded, as the token path does", async () => {
-    stubFetch(error(503, "store_reconnect_needed"));
+    stubFetch(error(503, "store_not_connected"));
     expect(await thrown(askCartCatalog(SECRET, null, 5000))).toBeInstanceOf(ReconnectNeeded);
   });
 

@@ -26,7 +26,7 @@ import { decryptCredentials } from "@/server/crypto/credentials";
 import { runCatalogSync } from "@/server/catalog/sync";
 import { ConnectionError, disconnect } from "@/server/services/connections";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
-import { ASKCART_MODE_CHANGED, ASKCART_REFUSED } from "@/server/shopify/askcart";
+import { ASKCART_MODE_CHANGED, ASKCART_STORE_LAPSED } from "@/server/shopify/askcart";
 import { completeAskCartConnect } from "@/server/shopify/askcart-connect";
 import { askCartToken } from "@/server/shopify/askcart-token";
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/integrations/shopify/askcart/route";
@@ -380,13 +380,13 @@ describe("INTERIM single-store mode", () => {
     expect((await lastSync("ac-a")).walk).toBeUndefined();
   });
 
-  it("store_reconnect_needed marks the connection with AskCart's reason, not Shopify's token text", async () => {
+  it("store_reconnect_needed leaves the connection active and tells the merchant to open AskCart", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.stubGlobal("fetch", vi.fn(async () => json({ name: "B&C", currencyCode: "INR" })));
     await connect("ac-a");
     vi.stubGlobal("fetch", vi.fn(async () => json({ error: "store_reconnect_needed" }, 503)));
     await expect(runCatalogSync({ workspaceId: ws, brandId: "ac-a" })).rejects.toThrow("AskCart 503 store_reconnect_needed");
-    expect(await conn("ac-a")).toMatchObject({ status: "ERROR", lastError: ASKCART_REFUSED });
-    expect(await lastSync("ac-a")).toMatchObject({ reason: "shopify-refused", error: ASKCART_REFUSED });
+    expect(await conn("ac-a")).toMatchObject({ status: "ACTIVE" });
+    expect(await lastSync("ac-a")).toMatchObject({ reason: "failed", error: ASKCART_STORE_LAPSED });
   });
 });
