@@ -135,3 +135,12 @@ describe("saveRates", () => {
     expect(await saveRates("EUR", rates)).toBe(0);
   });
 });
+
+describe("fx.sync and budgets", () => {
+  it("fx.sync fetches a budget-only currency", async () => {
+    await prisma.adBudget.create({ data: { workspaceId: ws, brandId: "fx-a", platform: "META", month: new Date("2026-11-01T00:00:00Z"), amount: "100", currency: "CHF", updatedByUserId: "u1" } });
+    await run();
+    expect(calls.map((c) => c.currency)).toEqual(["CHF"]);
+    await prisma.adBudget.deleteMany({});
+  });
+});

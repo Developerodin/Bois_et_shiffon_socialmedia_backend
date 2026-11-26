@@ -32,7 +32,7 @@ beforeEach(() => {
   db.$queryRaw.mockResolvedValue([{ published: 2, scheduled: 1, awaitingApproval: 0 }]);
   db.dataSource.findFirst.mockResolvedValue({ syncedThrough: new Date("2026-11-20T00:00:00Z"), lastResult: null });
   vi.mocked(salesSummary).mockResolvedValue({ currencies: [totals("EUR", 3), totals("USD", 1)] } as never);
-  vi.mocked(adsSummary).mockResolvedValue({ totals: [], previous: [], previousRange: WEEK, budget: null });
+  vi.mocked(adsSummary).mockResolvedValue({ totals: [], previous: [], previousRange: WEEK });
   vi.mocked(searchSummary).mockResolvedValue({ hasSite: true, daysIn: "America/Los_Angeles", range: WEEK, previousRange: WEEK, totals: { ...ZERO, impressions: 5 }, previous: ZERO, days: [] });
   vi.mocked(postsWithMetrics).mockResolvedValue([]);
 });

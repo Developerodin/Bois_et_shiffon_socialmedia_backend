@@ -94,7 +94,7 @@ const dayOf = (d: Date) => d.toISOString().slice(0, 10);
 
 /**
  * The non-EUR ECB currencies in use, each with the brands using it: Meta ad accounts' currencies
- * (DataSource.settings.currency) and per brand the currencies of its orders processed in the last 60 days (the
+ * (DataSource.settings.currency), ad budgets' currencies, and per brand the currencies of its orders processed in the last 60 days (the
  * (brandId, processedAt) index). A currency outside ECB_CURRENCIES is skipped, never fetched.
  */
 export async function currenciesInUse(now = new Date()) {
@@ -112,6 +112,8 @@ export async function currenciesInUse(now = new Date()) {
   for (const s of sources) {
     if (s.kind === "META_ADS") add((s.settings as { currency?: unknown } | null)?.currency, s.brandId);
   }
+  // Budgets carry their own currency (a budget-only one still needs rates for pacing). A small table: read whole.
+  for (const b of await prisma.adBudget.findMany({ distinct: ["brandId", "currency"], select: { brandId: true, currency: true } })) add(b.currency, b.brandId);
   for (const brandId of new Set(sources.filter((s) => s.kind === "SHOPIFY_ORDERS").map((s) => s.brandId))) {
     const rows = await prisma.$queryRaw<{ currency: string }[]>`
       SELECT DISTINCT "currency" FROM "ShopOrder" WHERE "brandId" = ${brandId} AND "processedAt" > ${since}`;

@@ -181,7 +181,6 @@ describe("ads routes", () => {
       ],
       previous: [{ currency: "EUR", spend: "4.00", purchases: 0, purchaseValue: "8.00", roas: 2, costPerPurchase: null }],
       previousRange: { from: "2026-10-30", to: "2026-10-31" },
-      budget: null,
     });
   });
 

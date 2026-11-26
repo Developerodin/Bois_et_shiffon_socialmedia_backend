@@ -243,6 +243,7 @@ model Brand {
   shopOrderLines ShopOrderLine[]
   searchDays     SearchDay[]
   adDays         AdDay[]
+  adBudgets      AdBudget[]
   shopifyWrites  ShopifyWrite[]
   blogArticles   BlogArticle[]
   quotes         Quote[]
@@ -1836,8 +1837,31 @@ model SearchDay {
   @@unique([brandId, siteUrl, dimension, day, page])
 }
 
+/// GOOGLE is added in its own migration (20261126120000): Postgres can't use a value added by ALTER TYPE … ADD VALUE
+/// in the same transaction. Only budgets use GOOGLE for now; the Meta Ads sync writes META only.
 enum AdPlatform {
   META
+  GOOGLE
+}
+
+/// A brand's monthly ad budget per platform (server/data/budgets.ts), in the currency chosen when it was entered.
+/// Pacing compares it with AdDay spend converted through FxRate. Amount 0 deletes the row.
+model AdBudget {
+  id              String     @id @default(cuid())
+  workspaceId     String
+  brandId         String
+  platform        AdPlatform
+  /// first day of the month
+  month           DateTime   @db.Date
+  amount          Decimal    @db.Decimal(14, 2)
+  /// in ECB_CURRENCIES or EUR
+  currency        String
+  updatedByUserId String
+  updatedAt       DateTime   @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([brandId, platform, month])
 }
 
 /// One ad campaign's numbers for one day of its ad account (the account's own zone), filled by the META_ADS data sync
