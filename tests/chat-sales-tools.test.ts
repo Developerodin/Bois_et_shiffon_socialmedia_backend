@@ -173,6 +173,20 @@ describe("salesBreakdown", () => {
   });
 });
 
+describe("incomplete-orders count", () => {
+  it("is read once per period in a message, even by calls made in parallel", async () => {
+    const t = chatTools(scope);
+    const october = { ...range, from: "2026-10-01" };
+    await Promise.all([run(t.topProducts, range), run(t.stockRisk, range), run(t.productSales, october)]);
+    expect(data.truncatedOrders).toHaveBeenCalledTimes(2);
+    expect(data.truncatedOrders).toHaveBeenCalledWith(scope, range);
+    expect(data.truncatedOrders).toHaveBeenCalledWith(scope, october);
+    // The next message reads it afresh.
+    await run(chatTools(scope).topProducts, range);
+    expect(data.truncatedOrders).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("topProducts", () => {
   it("ranks by the input's rankBy and returns cleaned columns + rows", async () => {
     data.topProducts.mockResolvedValue({ rows: [[`Oak${BIDI}table`, "EUR", 3, "90.50", 2]], moreGroups: 0 });
