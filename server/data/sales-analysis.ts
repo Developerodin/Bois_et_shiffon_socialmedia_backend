@@ -110,7 +110,8 @@ const ORDER_KEYS: Partial<Record<Breakdown, Prisma.Sql>> = {
   channel: Prisma.sql`COALESCE(o."sourceName", '(unknown)')`,
   fulfillmentStatus: Prisma.sql`COALESCE(o."fulfillmentStatus", '(not sent)')`,
   financialStatus: Prisma.sql`COALESCE(o."financialStatus", '(not sent)')`,
-  // A code on fewer than 2 counted orders can be personal (a one-time code made for one customer): never shown.
+  // A code on fewer than 2 counted orders can be personal (a one-time code made for one customer): never shown. It
+  // counts orders, not customers, so one customer's personal code used on two orders is shown (the owner's choice).
   discountCode: Prisma.sql`CASE WHEN dc.code IS NULL THEN '(none)' WHEN cn.n >= 2 THEN dc.code ELSE ${OTHER_CODES} END`,
 };
 const DISCOUNT_JOIN = Prisma.sql`
