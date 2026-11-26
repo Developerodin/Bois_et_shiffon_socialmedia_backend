@@ -3,10 +3,11 @@ import { z } from "zod";
 import type { AdAlertKind, PacingDto } from "@/shared";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
-import { listBudgets } from "@/server/data/budgets";
+import { D } from "@/server/data/ads-read";
+import { currentMonth, listBudgets } from "@/server/data/budgets";
 import { rateTable, type Converted } from "@/server/data/fx";
 import type { AdSettings } from "@/server/data/meta-ads-sync";
-import { addDays, dayDate, dayOf, type SyncOutcome } from "@/server/data/sources";
+import { addDays, dayDate, dayOf, utcToday, type SyncOutcome } from "@/server/data/sources";
 import { adAlertRecipients, notifyAdAlert } from "@/server/notifications/ads";
 import { cleanTitle } from "@/server/text";
 
@@ -47,8 +48,8 @@ export const PACE_MIN_DAYS = 3;
 /** An alert is open while its lastDay is at most this many days before today (UTC). OVER_PACE: its month is this month. */
 export const OPEN_DAYS: Record<Exclude<AdAlertKind, "OVER_PACE">, number> = { SPEND_UP: 2, ROAS_DOWN: 5, NO_PURCHASES: 5 };
 const CONVERSION_KINDS: AdAlertKind[] = ["ROAS_DOWN", "NO_PURCHASES"];
-
-const D = (v: Prisma.Decimal.Value) => new Prisma.Decimal(v);
+/** Days before S the job reads: the start of NO_PURCHASES' lookback (its window ends at S − CONV_LAG_DAYS). */
+const READ_BACK_DAYS = CONV_LAG_DAYS + NO_PURCHASE_DAYS - 1 + NO_PURCHASE_LOOKBACK;
 
 /** One campaign's figures for one account day. */
 export type AlertDayRow = { campaignId: string; campaignName: string; day: string; spend: Prisma.Decimal; purchases: number; purchaseValue: Prisma.Decimal };
@@ -76,7 +77,7 @@ export type AccountContext = {
 };
 
 /**
- * The account rules over its AdDay rows (S − 33 .. S). Returns the alerts raised and, when the account currency had
+ * The account rules over its AdDay rows (S − READ_BACK_DAYS .. S). Returns the alerts raised and, when the account currency had
  * no rate for a floor, `noRate` (those rules are skipped, never guessed).
  */
 export function evaluateAccount(rows: AlertDayRow[], ctx: AccountContext): { candidates: Candidate[]; noRate: boolean } {
@@ -244,7 +245,7 @@ export function isOpen(kind: AdAlertKind, lastDay: string, today: string) {
 }
 
 type AlertRow = AlertFields & { id: string; firstDay: Date; lastDay: Date };
-export function alertView(a: AlertRow, today = new Date().toISOString().slice(0, 10)): AdAlertView {
+export function alertView(a: AlertRow, today = utcToday()): AdAlertView {
   const lastDay = dayOf(a.lastDay);
   return {
     id: a.id,
@@ -318,8 +319,9 @@ const Payload = z.object({ workspaceId: z.string(), brandId: z.string(), dataSou
 
 /**
  * Job handler. Re-reads the source by id AND the payload's workspace and brand, kind META_ADS and not OFF, so a
- * payload naming another brand's source finds nothing. Reads the account's AdDay rows from S − 33 (the start of the
- * NO_PURCHASES lookback) to S, the EUR rates for the floors and the month's pacing, then stores each alert. The bell's
+ * payload naming another brand's source finds nothing. Reads the account's AdDay rows from S − READ_BACK_DAYS (the
+ * start of the NO_PURCHASES lookback) to S, the EUR rates for the floors and, while S is in the current UTC month, the
+ * month's pacing, then stores each alert. The bell's
  * recipients are read once, before the writes, and only when something was found.
  */
 export async function runAdAlerts(payload: unknown) {
@@ -333,7 +335,7 @@ export async function runAdAlerts(payload: unknown) {
   const scope = { workspaceId: source.workspaceId, brandId: source.brandId };
   const dConv = addDays(p.day, -CONV_LAG_DAYS);
   const rows = await prisma.adDay.findMany({
-    where: { ...scope, platform: "META", accountId: source.externalId, day: { gte: dayDate(addDays(p.day, -33)), lte: dayDate(p.day) } },
+    where: { ...scope, platform: "META", accountId: source.externalId, day: { gte: dayDate(addDays(p.day, -READ_BACK_DAYS)), lte: dayDate(p.day) } },
     select: { campaignId: true, campaignName: true, day: true, spend: true, purchases: true, purchaseValue: true },
   });
   const rates = settings.currency === "EUR" ? null : await rateTable(["EUR", settings.currency], addDays(dConv, -2), p.day);
@@ -346,16 +348,19 @@ export async function runAdAlerts(payload: unknown) {
     rates,
   });
   if (noRate) console.warn("[ads] no exchange rate: money-floored alerts skipped", source.brandId, source.id, settings.currency);
-  const pace = evaluatePacing((await listBudgets(scope, p.day.slice(0, 7))).pacing.find((x) => x.platform === "META"), source.brandId);
-  if (pace) candidates.push(pace);
+  // A month's last day is evaluated on the 1st of the next: an OVER_PACE raised then would already be closed (isOpen).
+  if (p.day.slice(0, 7) === currentMonth()) {
+    const pace = evaluatePacing((await listBudgets(scope, p.day.slice(0, 7))).pacing.find((x) => x.platform === "META"), source.brandId);
+    if (pace) candidates.push(pace);
+  }
   if (!candidates.length) return;
   const recipients = await adAlertRecipients(scope);
   for (const c of candidates) await recordAlert(scope, c, recipients);
 }
 
 /**
- * Stores one alert, in its own transaction. The episode's row (same subject, lastDay ≥ day − 1; OVER_PACE: the same
- * month, which its subjectKey holds) is locked and moved on, with no new notice. Otherwise a new row; ON CONFLICT DO
+ * Stores one alert, in its own transaction. The episode's row (same subject, lastDay ≥ day − 1 and firstDay ≤ day + 1,
+ * so a rerun of an older day never joins a later episode; OVER_PACE: the same month, which its subjectKey holds) is locked and moved on, with no new notice. Otherwise a new row; ON CONFLICT DO
  * NOTHING on dedupeKey makes a rerun, or two accounts' jobs racing on OVER_PACE, insert it once; only the inserted row
  * notifies, so an episode never sends a second notice.
  */
@@ -365,7 +370,7 @@ async function recordAlert(scope: { workspaceId: string; brandId: string }, c: C
     const [found] = await tx.$queryRaw<{ id: string }[]>`
       SELECT id FROM "AdAlert"
       WHERE "workspaceId" = ${scope.workspaceId} AND "brandId" = ${scope.brandId} AND "subjectKey" = ${c.subjectKey}
-        AND (${month} OR "lastDay" >= ${dayDate(addDays(c.day, -1))}::date)
+        AND (${month} OR ("lastDay" >= ${dayDate(addDays(c.day, -1))}::date AND "firstDay" <= ${dayDate(addDays(c.day, 1))}::date))
       ORDER BY "lastDay" DESC LIMIT 1
       FOR UPDATE`;
     if (found) {

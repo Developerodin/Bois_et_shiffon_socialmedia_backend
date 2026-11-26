@@ -127,6 +127,8 @@ export async function runSync(kind: DataSourceKind, ctx: SyncContext): Promise<S
 
 // ---- day helpers -------------------------------------------------------------------------------------------------
 
+/** Today's date in UTC, "YYYY-MM-DD". */
+export const utcToday = (now = new Date()) => now.toISOString().slice(0, 10);
 /** Today's date in `zone`, "YYYY-MM-DD". */
 export const zoneToday = (zone: string, now = new Date()) => new Intl.DateTimeFormat("en-CA", { timeZone: zone }).format(now);
 export const addDays = (day: string, n: number) => new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
@@ -554,6 +556,7 @@ async function syncRuns(scope: { workspaceId: string; brandId: string }) {
  * sync, as a lagging one's missing days would read as a drop), and how many are switched off. One query; budgets'
  * pacing and spend and the chat's default ranges read it. The digest's `synced()` keeps its own, wider rule.
  */
+export type LiveSources = Awaited<ReturnType<typeof liveSources>>;
 export async function liveSources(scope: { workspaceId: string; brandId: string }, kind: DataSourceKind) {
   const all = await prisma.dataSource.findMany({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind },

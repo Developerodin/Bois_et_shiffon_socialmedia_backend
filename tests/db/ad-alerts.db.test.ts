@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DataSource } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
@@ -58,6 +58,9 @@ beforeEach(async () => {
   await prisma.dataSource.deleteMany({});
   await prisma.job.deleteMany({});
 });
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("enqueueAdAlerts", () => {
   it("queues once per source and day, and only when the run reached its own window's end", async () => {
@@ -114,7 +117,30 @@ describe("runAdAlerts", () => {
     ]);
   });
 
+  it("a late run of an earlier day → its own alert, not folded into a later episode", async () => {
+    const s = await adSource(A, "act_1", "2026-11-27");
+    await spend(A, "act_1", { ...flat("2026-11-17", "2026-11-23", 40), "2026-11-24": 70, [S]: 40, "2026-11-26": 40, "2026-11-27": 200 });
+    await run(s, "2026-11-27");
+    await run(s, "2026-11-24");
+    expect((await alerts()).map((a) => [a.kind, ymd(a.firstDay), ymd(a.lastDay)])).toEqual([
+      ["SPEND_UP", "2026-11-24", "2026-11-24"],
+      ["SPEND_UP", "2026-11-27", "2026-11-27"],
+    ]);
+  });
+
+  it("a month's last day, evaluated on the 1st of the next → no OVER_PACE (it would be closed already)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-12-01T06:00:00Z"));
+    const s = await adSource(A, "act_1", "2026-11-30");
+    await spend(A, "act_1", flat("2026-11-01", "2026-11-30", 30));
+    await prisma.adBudget.create({ data: { workspaceId: ws, brandId: A, platform: "META", month: new Date("2026-11-01"), amount: "600", currency: "EUR", updatedByUserId: "u1" } });
+    await run(s, "2026-11-30");
+    expect((await alerts()).filter((a) => a.kind === "OVER_PACE")).toEqual([]);
+  });
+
   it("two accounts' jobs at once → one OVER_PACE for the month", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T06:00:00Z"));
     const one = await adSource(A, "act_1");
     const two = await adSource(A, "act_2");
     await spend(A, "act_1", flat("2026-11-01", S, 30));
