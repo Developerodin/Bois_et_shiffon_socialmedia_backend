@@ -137,10 +137,15 @@ describe("adsSummary", () => {
     expect(data.adsDays).toHaveBeenNthCalledWith(1, scope, { from: "2026-10-22", to: "2026-11-20" }, ["act_1", "act_2"]);
   });
 
-  it("says Meta Ads isn't connected when no account has synced", async () => {
+  it("says Meta Ads isn't connected when no account has synced, also for a period given", async () => {
     data.liveSources.mockResolvedValue({ externalIds: [], syncedThrough: null, offCount: 0 });
-    expect(await run(chatTools(scope).adsSummary, {})).toEqual({ note: "Meta Ads isn't connected or hasn't finished its first sync." });
-    expect(data.adsDays).not.toHaveBeenCalled();
+    perms.set = new Set(["ads.read", "crm.read"]);
+    const t = chatTools(scope);
+    for (const name of ["adsSummary", "adCampaigns", "revenuePerAdSpend"] as const) {
+      expect(await run(t[name], {})).toEqual({ note: "Meta Ads isn't connected or hasn't finished its first sync." });
+      expect(await run(t[name], range)).toEqual({ note: "Meta Ads isn't connected or hasn't finished its first sync." });
+    }
+    expect(reads()).toBe(false);
   });
 
   it("lists days only up to 31 days", async () => {

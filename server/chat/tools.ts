@@ -12,7 +12,7 @@ import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
 import { addDays, badRangeDetail, brandTimeZone, liveSources, previousRange, rangeDays, zoneToday } from "@/server/data/sources";
 import { ADS_MAX_DAYS, adsCampaigns, adsDays, D, shopRevenueOverSpend, totalsOf, type AdsDayRow } from "@/server/data/ads-read";
 import { currentMonth, listBudgets, MonthSchema } from "@/server/data/budgets";
-import { POSTS_MAX_DAYS, postsWithMetrics } from "@/server/data/post-metrics-read";
+import { MAX_POSTS, POSTS_MAX_DAYS, postsWithMetrics } from "@/server/data/post-metrics-read";
 import { searchPages, searchSummary } from "@/server/data/search-read";
 import { CHAT_DATA_TOOLS, hiddenFor, MAX_DATA_CALLS, MAX_GROUP_CALLS, type ToolGroup } from "@/server/chat/turn";
 import { AGENTS } from "@/server/agents/registry";
@@ -69,8 +69,6 @@ const POST_NOTES = [
   "Story reach is the highest frame's reach.",
   "Unread: the platform hasn't been read yet or the account lacks insights permission.",
 ];
-/** postsWithMetrics' cap (MAX_POSTS there): a full page means the period had more. */
-const POSTS_READ_CAP = 500;
 const SEARCH_NOTES = [
   "Days are Google's (Pacific time) and lag 2–3 days.",
   "Only site totals and the top pages per day are stored; search queries (keywords) aren't synced, so they can't be answered here.",
@@ -170,8 +168,11 @@ export function chatTools(scope: ChatScope) {
   let ads: ReturnType<typeof liveSources> | undefined;
   const adSources = () => (ads ??= liveSources(scope, "META_ADS"));
   // The ads tools' period: both days given, or the 30 days ending at the last day every live account has synced.
-  const adsRange = (input: { from?: string; to?: string }) =>
-    rangeOf(input, ADS_MAX_DAYS, async () => (await adSources()).syncedThrough ?? NO_ADS);
+  // Either way, no live account that has finished its first sync gives the not-connected note, not empty figures.
+  const adsRange = async (input: { from?: string; to?: string }) => {
+    const range = await rangeOf(input, ADS_MAX_DAYS, async () => (await adSources()).syncedThrough ?? NO_ADS);
+    return "from" in range && (await adSources()).syncedThrough === null ? NO_ADS : range;
+  };
   // Per-product numbers miss lines of orders AskCart sent incomplete (re-read by the sync within a day). Counted once
   // per period in a message: a report makes several sales calls over one period, often in parallel, so the promise is
   // kept and shared. A failed count is dropped, so a later call can try again.
@@ -710,7 +711,7 @@ export function chatTools(scope: ChatScope) {
             rows: stories.slice(0, limit).map((p) => [title(p), p.publishedAt, p.metrics?.reach ?? null, p.metrics?.views ?? null, p.metrics?.comments ?? null, p.metrics?.shares ?? null, p.metrics?.navigation ?? null]),
           },
           ...(stories.length > limit && { moreStories: stories.length - limit }),
-          notes: [...POST_NOTES, ...(read.length >= POSTS_READ_CAP ? ["Only the top 500 posts by reach in this period were read."] : [])],
+          notes: [...POST_NOTES, ...(read.length >= MAX_POSTS ? [`Only the top ${MAX_POSTS} posts by reach in this period were read.`] : [])],
         };
       },
     }),

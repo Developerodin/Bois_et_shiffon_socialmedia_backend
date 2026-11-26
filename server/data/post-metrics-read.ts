@@ -4,7 +4,7 @@ import { prisma } from "@/server/db/prisma";
 /** The longest `?from&to` insights/posts accepts. */
 export const POSTS_MAX_DAYS = 90;
 /** ponytail: posts returned per request; a brand publishing more than this in 90 days sees its top ones by reach. */
-const MAX_POSTS = 500;
+export const MAX_POSTS = 500;
 type Row = {
   attemptId: string; contentItemId: string; title: string; channel: PostChannel; publishedAt: Date; final: boolean;
   readAt: Date | null; views: number | null; reach: number | null; likes: number | null; comments: number | null;
