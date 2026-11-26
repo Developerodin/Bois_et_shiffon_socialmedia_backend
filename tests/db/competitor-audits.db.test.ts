@@ -83,3 +83,34 @@ describe("audit all", () => {
     expect(await prisma.agentRun.count({ where: { workspaceId: ws2, status: "QUEUED", NOT: { input: { path: ["domain"], equals: "aa-running.test" } } } })).toBe(2);
   });
 });
+
+describe("audit all on a brand with site audits turned off", () => {
+  let ws3: string;
+  beforeAll(async () => {
+    ws3 = (await prisma.workspace.create({ data: { name: "W3", slug: "w-competitor-audit-off" } })).id;
+    await prisma.brand.create({ data: { id: "off-b", workspaceId: ws3, slug: "off-b", displayName: "B" } });
+    await prisma.brandAgentConfig.create({ data: { workspaceId: ws3, brandId: "off-b", agentKey: "site-audit", enabled: false } });
+    await prisma.competitor.createMany({
+      data: ["off-1", "off-2", "off-3"].map((id) => ({ id, workspaceId: ws3, brandId: "off-b", name: id, domain: `${id}.test`, source: "manual" })),
+    });
+  });
+
+  it("stops at the first refusal instead of charging and refunding for every site", async () => {
+    const r = await auditAllCompetitors({ workspaceId: ws3, brandId: "off-b", userId, competitorIds: ["off-1", "off-2", "off-3"] });
+    expect(r.started).toEqual([]);
+    expect(r.skipped).toEqual(["off-1", "off-2", "off-3"].map((id) => ({ id, reason: "disabled" })));
+    // One charge and its refund (the first site), nothing for the rest.
+    expect(await prisma.creditEntry.count({ where: { workspaceId: ws3, reason: { in: ["site-audit", "refund"] } } })).toBe(2);
+    expect(await creditBalance(ws3)).toBe(20);
+  });
+
+  it("says when the workspace is never charged, so the page doesn't cap audits at the balance", async () => {
+    expect((await listCompetitors(ws3, "off-b")).credits.unlimited).toBe(false);
+    process.env.UNLIMITED_CREDIT_WORKSPACES = ws3;
+    try {
+      expect((await listCompetitors(ws3, "off-b")).credits.unlimited).toBe(true);
+    } finally {
+      delete process.env.UNLIMITED_CREDIT_WORKSPACES;
+    }
+  });
+});
