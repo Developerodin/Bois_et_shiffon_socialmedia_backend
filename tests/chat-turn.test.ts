@@ -79,10 +79,12 @@ describe("web search guard", () => {
     "Search the web for competitor prices",
     "search the web for CTR benchmarks",
     "look it up online",
-    "web search",
+    "do a web search on competitor pricing",
+    "use web search for this",
     "google it",
     "recherche sur internet",
     "cherche en ligne",
+    "Cherchez sur le web les tendances",
     "fais une recherche web",
   ])("counts %j as asking for a web search", (text) => {
     expect(askedToSearch(msg(text))).toBe(true);
@@ -99,6 +101,19 @@ describe("web search guard", () => {
     "Peux-tu rechercher les prix ?",
     "What's on my website?",
     "Analyse my pricing",
+    // A search named without a verb, or followed by shop or sales words.
+    "web search",
+    "websearch",
+    "How did web search impressions do?",
+    "recherche web",
+    "Comment vont mes recherches en ligne ?",
+    "search the web shop's pages",
+    "search the web store",
+    "search online sales",
+    "look up online sales",
+    "look online orders",
+    "cherche en ligne ventes",
+    "recherche sur le web boutique",
   ])("doesn't count %j as asking for a web search", (text) => {
     expect(askedToSearch(msg(text))).toBe(false);
   });

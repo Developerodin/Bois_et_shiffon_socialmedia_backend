@@ -128,26 +128,31 @@ export function activeTools<T extends string>(all: T[], turn: { history: UIMessa
   return active.length === all.length ? undefined : active;
 }
 
+/** After "web", "internet", "online", "le web" or "en ligne": no word naming shop or sales data follows. */
+const NOT_SHOP = "(?![\\s'’-]*(?:shop|store|sales?|orders?|ventes?|boutique|commandes?)\\b)";
+
 /**
- * Explicit requests to search the web, in English and French: a short list of phrases, not "a search word near a web
- * word" (which would pass "Search Console clicks for my web shop"). Words that merely name the data never count:
- * "Google Ads", "Google search clicks", "Search Console", "search results", "search terms", "online sales", "web shop",
- * "rechercher les prix". They are the very words of a turn that reads ads or search data, so planted text in a
- * campaign name or page URL could otherwise steer a search that carries figures out.
+ * Explicit requests to search the web, in English and French: a short list of phrases, each led by a verb, not "a
+ * search word near a web word" (which would pass "Search Console clicks for my web shop"). Words that merely name the
+ * data never count: "Google Ads", "Google search clicks", "Search Console", "search results", "search terms", a bare
+ * "web search" or "websearch" (a Search Console data type), "online sales", "web shop", the French noun "recherches",
+ * "rechercher les prix". Nothing after "web", "internet" or "online" may name shop or sales data ("search the web
+ * shop's pages", "search online sales"). They are the very words of a turn that reads ads or search data, so planted
+ * text in a campaign name or page URL could otherwise steer a search that carries figures out.
  * Ceiling: a request worded outside the list ("could you check the internet") doesn't count; the model says web search
  * is off and the person can rephrase. Add phrases here as they turn up.
  */
 const SEARCH_ASKS = new RegExp(
   "\\b(?:" +
     [
-      "search(?:ing)? (?:on )?(?:the )?(?:web|internet)",
-      "search(?:ing)? online",
-      "web ?search",
-      "look (?:it |that |this )?up online",
-      "look online",
+      `search(?:ing)? (?:on )?(?:the )?(?:web|internet)${NOT_SHOP}`,
+      `search(?:ing)? online${NOT_SHOP}`,
+      "(?:do|run|use|try|doing|running|using) (?:a |an )?(?:quick )?web ?search",
+      `look (?:it |that |this )?up online${NOT_SHOP}`,
+      `look online${NOT_SHOP}`,
       "google (?:it|that)",
-      "(?:re)?cherch(?:e|er|es|ez)? (?:sur (?:le web|internet)|en ligne)",
-      "recherche web",
+      `(?:re)?cherch(?:e|er|ez) (?:sur (?:le web|internet)|en ligne)${NOT_SHOP}`,
+      `(?:fais|faire|faites|lance|lancer|lancez) une recherche (?:web|sur (?:le web|internet)|en ligne)${NOT_SHOP}`,
     ].join("|") +
     ")\\b",
   "i",
