@@ -3,6 +3,12 @@ import { startAgentRun } from "@/server/agents/engine";
 import { prisma } from "@/server/db/prisma";
 import { AUDIT_FRESH_DAYS, creditBalance, CREDIT_COSTS, InsufficientCreditsError, refundCharge, spendCredits } from "@/server/services/credits";
 
+/**
+ * How long a "this site blocks automated readers" failure hides the Audit button. Not forever: a site may relax its bot
+ * protection, so after this the customer can try again (and is refunded again if it still blocks us).
+ */
+export const AUDIT_BLOCK_DAYS = 7;
+
 /** Public fields of a shared audit: never who requested it. */
 const PUBLIC_AUDIT = {
   id: true,
@@ -55,6 +61,11 @@ export async function listCompetitors(workspaceId: string, brandId: string) {
       const fail = failed.find((r) => (r.input as { domain?: string } | null)?.domain === c.domain);
       const failedAt = fail && (fail.finishedAt ?? fail.createdAt);
       const showFailure = !!failedAt && (!audit || failedAt > audit.createdAt);
+      // The latest failure was the site refusing automated readers, so another audit would fail the same way, until a
+      // newer audit of this domain lands (from any workspace) or AUDIT_BLOCK_DAYS pass.
+      const blockedUntil =
+        showFailure && failedAt && fail.error === blockedAuditError(c.domain) ? new Date(failedAt.getTime() + AUDIT_BLOCK_DAYS * 86_400_000) : null;
+      const activeBlock = blockedUntil && blockedUntil.getTime() > Date.now() ? blockedUntil : null;
       // A partial audit (the site blocked our crawler) keeps its marker in the approach JSON; surface it as fields.
       const marker = (audit?.approach ?? null) as { partial?: boolean; blockedReason?: string } | null;
       return {
@@ -65,9 +76,8 @@ export async function listCompetitors(workspaceId: string, brandId: string) {
         aiMentions: mentions.get(c.name.toLowerCase()) ?? null,
         auditRunning: runningDomains.has(c.domain),
         auditError: showFailure ? (fail?.error ?? "The audit failed.") : null,
-        // The latest failure was the site refusing automated readers, so another audit would fail the same way. Clears
-        // like auditError: once an audit of this domain (from any workspace) is newer than that failure.
-        auditBlocked: showFailure && fail?.error === blockedAuditError(c.domain),
+        auditBlocked: !!activeBlock,
+        auditBlockedUntil: activeBlock?.toISOString() ?? null,
         audit: audit && {
           ...audit,
           createdAt: audit.createdAt.toISOString(),

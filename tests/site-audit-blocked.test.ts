@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const m = vi.hoisted(() => ({
   facts: vi.fn(),
@@ -22,7 +22,7 @@ vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()
 import { BLOCKED_REASON, blockedAuditError, SiteBlockedError, siteAuditAgent } from "@/server/agents/definitions/site-audit";
 import type { AgentContext } from "@/server/agents/types";
 import { siteRefusedUs } from "@/server/seo/site-facts";
-import { listCompetitors } from "@/server/services/competitor-audits";
+import { AUDIT_BLOCK_DAYS, listCompetitors } from "@/server/services/competitor-audits";
 
 const PS = { performance: 41, seo: 88, accessibility: 77, bestPractices: 92, lcpMs: 5200, cls: 0.02 };
 const noPages = (failures: Array<{ url: string; error: string }>) => ({
@@ -118,6 +118,12 @@ describe("competitors list: auditBlocked", () => {
   const competitor = (domain: string) => ({ id: domain, name: domain, domain, source: "manual", createdAt: at(1) });
   const failure = (domain: string, error: string, finishedAt: Date) => ({ input: { domain }, error, createdAt: finishedAt, finishedAt });
   const audit = (domain: string, createdAt: Date, approach: object = {}) => ({ id: `a-${domain}`, domain, url: `https://${domain}`, scores: {}, findings: [], aiCrawlers: [], approach, socials: [], sources: [], pagesRead: 0, createdAt });
+  // Only Date is faked, so the mocked promises still resolve; "now" is the 8th, three days after the failures below.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at(8));
+  });
+  afterEach(() => vi.useRealTimers());
 
   it("is true only while the latest blocked failure is newer than any audit", async () => {
     m.competitors.mockResolvedValue([competitor("blocked.com"), competitor("down.com"), competitor("fixed.com")]);
@@ -128,10 +134,23 @@ describe("competitors list: auditBlocked", () => {
         : []);
     const { competitors } = await listCompetitors("w1", "b1");
     const by = Object.fromEntries(competitors.map((c) => [c.domain, c]));
-    expect(by["blocked.com"]).toMatchObject({ auditBlocked: true, auditError: blockedAuditError("blocked.com") });
+    expect(by["blocked.com"]).toMatchObject({ auditBlocked: true, auditBlockedUntil: at(5 + AUDIT_BLOCK_DAYS).toISOString(), auditError: blockedAuditError("blocked.com") });
     expect(by["down.com"]).toMatchObject({ auditBlocked: false, auditError: "Could not read down.com" });
     // A newer audit (here from another workspace's later attempt) clears both, so the site can be audited again.
     expect(by["fixed.com"]).toMatchObject({ auditBlocked: false, auditError: null });
+  });
+
+  it("expires after AUDIT_BLOCK_DAYS so the site can be tried again, keeping the failure text", async () => {
+    m.competitors.mockResolvedValue([competitor("blocked.com")]);
+    m.audits.mockResolvedValue([]);
+    m.runs.mockImplementation(async (q: { where: { status: unknown } }) => (q.where.status === "FAILED" ? [failure("blocked.com", blockedAuditError("blocked.com"), at(5))] : []));
+    const until = at(5 + AUDIT_BLOCK_DAYS);
+
+    vi.setSystemTime(until.getTime() - 1);
+    expect((await listCompetitors("w1", "b1")).competitors[0]).toMatchObject({ auditBlocked: true, auditBlockedUntil: until.toISOString() });
+
+    vi.setSystemTime(until);
+    expect((await listCompetitors("w1", "b1")).competitors[0]).toMatchObject({ auditBlocked: false, auditBlockedUntil: null, auditError: blockedAuditError("blocked.com") });
   });
 
   it("marks a partial audit with its reason", async () => {
