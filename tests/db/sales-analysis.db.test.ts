@@ -12,6 +12,7 @@ import { productSales, salesBreakdown, stockRisk, topProducts, truncatedOrders }
 import { salesSummary } from "@/server/data/sales-read";
 import { saveRows, shopifyRows } from "@/server/catalog/sync";
 import { askCartVariants } from "@/server/shopify/askcart";
+import { addDays, DATA_SYNC_JOB, runDataSync } from "@/server/data/sources";
 
 /**
  * The chat's sales analysis, the AskCart cursor hold and the catalogue's AskCart extras against Postgres: brand-local
@@ -202,6 +203,98 @@ describe("net sales without VAT (Task 2)", () => {
     expect((await eur()).exVatFrom).toBe("2026-11-06");
     await upsertOrders(scope(), [incl("v1", "2026-11-05T10:00:00Z")]);
     expect(await eur()).toMatchObject({ netExVat: "100.00", exVatFrom: null });
+  });
+});
+
+describe("order history past 60 days, end to end (Task 6)", () => {
+  type Read = Date | { createdFrom: string; createdTo: string };
+  let conn: IntegrationConnection;
+  const lease = { jobId: "no-job", leasedBy: null };
+  const today = new Date().toISOString().slice(0, 10);
+  const recent = (id: string) => order(id, new Date().toISOString(), { processedAt: new Date().toISOString() });
+  const created = (id: string, day: string) => order(id, `${day}T12:00:00Z`, { processedAt: `${day}T10:00:00Z`, createdAt: `${day}T10:00:00Z` });
+  const backfills = () => prisma.job.findMany({ where: { type: DATA_SYNC_JOB, status: "PENDING", payload: { path: ["mode"], equals: "backfill" } }, orderBy: { createdAt: "asc" } });
+  const source = () => prisma.dataSource.findFirstOrThrow({ where: { brandId: B, kind: "SHOPIFY_ORDERS" } });
+  const daily = async () => runDataSync({ dataSourceId: (await source()).id, workspaceId: ws, brandId: B, kind: "SHOPIFY_ORDERS", mode: "daily" }, lease);
+  /** Runs queued history windows one by one (ignoring their runAt), at most `max`. */
+  async function walk(max = 200) {
+    let n = 0;
+    for (let jobs = await backfills(); jobs.length && n < max; jobs = await backfills(), n++) {
+      await prisma.job.update({ where: { id: jobs[0].id }, data: { status: "COMPLETED" } });
+      await runDataSync(jobs[0].payload, lease);
+    }
+    return n;
+  }
+  let pendingFrom: string | null;
+  beforeEach(async () => {
+    await prisma.job.deleteMany({});
+    await prisma.dataSource.deleteMany({});
+    await prisma.integrationConnection.deleteMany({});
+    conn = await prisma.integrationConnection.create({
+      data: { workspaceId: ws, brandId: B, provider: "SHOPIFY", externalAccountId: "askcart", displayName: "B&C", scopes: ["askcart"], credentialKeyVersion: 1, encryptedCredentials: "x", connectedByUserId: "u1" },
+    });
+    await prisma.dataSource.create({ data: { workspaceId: ws, brandId: B, kind: "SHOPIFY_ORDERS", externalId: "askcart", connectionId: conn.id, settings: { reportsIn: "Europe/Paris" } } });
+    pendingFrom = null;
+    // Daily reads see one recent order (and "o-dup", also created in the first history window); history windows one
+    // order per window, created on its first day. A window at or after pendingFrom answers AskCart's 403 pending.
+    read.fetchAskCartOrders.mockReset();
+    read.fetchAskCartOrders.mockImplementation(async (_bearer: string, r: Read) => {
+      if (r instanceof Date) return { orders: [recent("o-new"), created("o-dup", addDays(today, -700))], cursorEnd: new Date(), allOrders: grant.allOrders };
+      if (pendingFrom && r.createdFrom >= pendingFrom) return { orders: [], cursorEnd: new Date(0), historyPending: true, visibleSince: "2026-09-25T00:00:00Z" };
+      return { orders: [created(`h-${r.createdFrom}`, r.createdFrom)], cursorEnd: new Date(0) };
+    });
+  });
+  const grant = { allOrders: true as boolean | undefined };
+
+  it("walks to 24 months and stops; an order seen by both syncs is one row; the daily cursor is never moved by history", async () => {
+    grant.allOrders = true;
+    await daily();
+    const planned = await source();
+    expect(planned.settings).toMatchObject({ reportsIn: "Europe/Paris", allOrders: true, backfill: { start: addDays(today, -730), end: addDays(today, -1), days: 14 } });
+    const cursor = planned.cursor;
+    const windows = await walk();
+    expect(windows).toBe(Math.ceil(730 / 14));
+    const done = await source();
+    expect(done.syncedThrough?.toISOString().slice(0, 10)).toBe(addDays(today, -1));
+    expect(done.cursor).toBe(cursor);
+    expect(await backfills()).toHaveLength(0);
+    // o-dup came from the daily read and again from the first window: one row.
+    expect(await prisma.shopOrder.count({ where: { brandId: B, shopifyId: "gid://shopify/Order/o-dup" } })).toBe(1);
+    expect(await prisma.shopOrder.count({ where: { brandId: B, shopifyId: { startsWith: "gid://shopify/Order/h-" } } })).toBe(windows);
+    // A later daily run with the history done plans nothing new.
+    await daily();
+    expect(await backfills()).toHaveLength(0);
+  });
+
+  it("partial history → pending → re-granted later → resumes at syncedThrough + 1 and finishes", async () => {
+    grant.allOrders = true;
+    await daily();
+    pendingFrom = addDays(today, -700);
+    await walk();
+    let s = await source();
+    // Stopped quietly: plan cleared, still ACTIVE, the history held so far kept, nothing queued.
+    expect(s.status).toBe("ACTIVE");
+    expect(s.settings).not.toHaveProperty("backfill");
+    expect(s.settings).toMatchObject({ allOrders: false, visibleSince: "2026-09-25T00:00:00Z", reportsIn: "Europe/Paris" });
+    const held = s.syncedThrough!.toISOString().slice(0, 10);
+    expect(held).toBe(addDays(today, -689)); // three 14-day windows from today − 730; the fourth answered pending
+    expect(await backfills()).toHaveLength(0);
+
+    // Still pending on the daily read: nothing planned.
+    grant.allOrders = false;
+    await daily();
+    expect(await backfills()).toHaveLength(0);
+
+    // Granted again much later: what's held is older than the new plan's start, so the plan starts right after it.
+    await prisma.dataSource.update({ where: { id: s.id }, data: { syncedThrough: new Date(`${addDays(today, -800)}T00:00:00Z`) } });
+    pendingFrom = null;
+    grant.allOrders = true;
+    await daily();
+    s = await source();
+    expect(s.settings).toMatchObject({ allOrders: true, backfill: { start: addDays(today, -799), end: addDays(today, -1) } });
+    expect((await backfills())[0].payload).toMatchObject({ from: addDays(today, -799) });
+    await walk();
+    expect((await source()).syncedThrough?.toISOString().slice(0, 10)).toBe(addDays(today, -1));
   });
 });
 

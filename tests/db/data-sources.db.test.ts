@@ -42,6 +42,8 @@ const dataJobs = (sourceId: string) => prisma.job.findMany({ where: { type: DATA
 const calls: SyncContext[] = [];
 let next: (ctx: SyncContext) => Promise<SyncOutcome> = async () => ({ count: 0 });
 registerSync("SEARCH_CONSOLE", async (ctx) => (calls.push(ctx), next(ctx)));
+// Shopify orders' runner stands in for any kind that opts into halving.
+registerSync("SHOPIFY_ORDERS", async (ctx) => (calls.push(ctx), next(ctx)), { halveOnCap: true });
 
 beforeAll(async () => {
   ws = (await prisma.workspace.create({ data: { name: "W", slug: "w-data-sources" } })).id;
@@ -84,6 +86,8 @@ describe("enqueueDailyDataSyncs", () => {
     const restarted = (await dataJobs(dead.id)).filter((j) => (j.payload as { mode: string }).mode === "backfill");
     expect(restarted).toHaveLength(1);
     expect(restarted[0].payload).toMatchObject({ from: "2026-08-31", to: "2026-09-29", end: "2026-10-29" });
+    // After the daily spread, like a chain's first window.
+    expect(restarted[0].runAt.getTime()).toBeGreaterThanOrEqual(Date.now() + 115 * 60_000);
     expect((await dataJobs(done.id)).map((j) => (j.payload as { mode: string }).mode)).toEqual(["daily"]);
     expect((await dataJobs(alive.id)).filter((j) => (j.payload as { mode: string }).mode === "backfill")).toHaveLength(1);
   });
@@ -117,7 +121,7 @@ describe("runDataSync", () => {
   });
 
   it("a kind with no registered runner throws and records failed", async () => {
-    const s = await source("ds-a", "SHOPIFY_ORDERS");
+    const s = await source("ds-a", "META_ADS");
     vi.spyOn(console, "warn").mockImplementation(() => {});
     await expect(runDataSync(payload(s), lease)).rejects.toThrow("no data sync registered");
     expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } })).lastResult).toMatchObject({ reason: "failed" });
@@ -222,6 +226,84 @@ describe("runDataSync", () => {
     expect(await dataJobs(s.id)).toHaveLength(0);
   });
 
+  it("settings patch is merged (reportsIn and backfill kept); a plan it sets gets its first window at now + 2 h + spread", async () => {
+    const s = await source("ds-a", "SHOPIFY_ORDERS", { settings: { reportsIn: "Europe/Paris", visibleSince: "2026-09-25", other: 1 } });
+    const plan = { start: "2024-11-27", end: "2026-11-25", days: 14 };
+    next = async () => ({ count: 2, cursor: "2026-11-25T00:00:00.000Z", settings: { set: { allOrders: true, backfill: plan }, unset: ["visibleSince"] } });
+    const before = Date.now();
+    await runDataSync(payload(s), lease);
+    const row = await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } });
+    expect(row.settings).toEqual({ reportsIn: "Europe/Paris", other: 1, allOrders: true, backfill: plan });
+    const [first] = (await dataJobs(s.id)).filter((j) => (j.payload as { mode: string }).mode === "backfill");
+    expect(first!.payload).toMatchObject({ from: "2024-11-27", to: "2024-12-10", end: "2026-11-25" });
+    expect(first!.runAt.getTime()).toBeGreaterThanOrEqual(before + (7200 + spreadSecs(s.id)) * 1000);
+    expect(first!.runAt.getTime()).toBeLessThanOrEqual(Date.now() + (7200 + spreadSecs(s.id)) * 1000);
+
+    // A later patch without backfill keeps the plan (and queues nothing more).
+    next = async () => ({ count: 0, cursor: "2026-11-25T00:00:00.000Z", settings: { set: { allOrders: true } } });
+    await runDataSync(payload(s), lease);
+    expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } })).settings).toMatchObject({ reportsIn: "Europe/Paris", backfill: plan });
+    expect((await dataJobs(s.id)).filter((j) => (j.payload as { mode: string }).mode === "backfill")).toHaveLength(1);
+  });
+
+  it("a stopped chain (stopChain): plan cleared, not ERROR, okAt unchanged, no retry or next window, no follow-up", async () => {
+    const okAt = "2026-11-20T00:00:00.000Z";
+    const plan = { start: "2024-11-27", end: "2026-11-25", days: 14 };
+    const s = await source("ds-a", "SHOPIFY_ORDERS", {
+      settings: { reportsIn: "Europe/Paris", backfill: plan }, syncedThrough: new Date("2025-03-01"),
+      lastResult: { at: okAt, okAt, reason: null, count: 3, error: null },
+    });
+    next = async () => ({ count: 0, reason: null, stopChain: true, settings: { set: { allOrders: false }, unset: ["backfill"] } });
+    await runDataSync(payload(s, { mode: "backfill", from: "2025-03-02", to: "2025-03-15", end: plan.end }), lease);
+    const row = await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } });
+    expect(row.status).toBe("ACTIVE");
+    expect(row.settings).toEqual({ reportsIn: "Europe/Paris", allOrders: false });
+    expect(row.syncedThrough?.toISOString().slice(0, 10)).toBe("2025-03-01");
+    expect(row.lastResult).toMatchObject({ okAt, reason: null, error: null });
+    expect(await dataJobs(s.id)).toHaveLength(0);
+    // With the plan gone, the sweep doesn't restart it.
+    await enqueueDailyDataSyncs();
+    expect((await dataJobs(s.id)).map((j) => (j.payload as { mode: string }).mode)).toEqual(["daily"]);
+  });
+
+  it("capped after retries → window halved with an :h key, backfill.days saved; rate-limited never halved", async () => {
+    const plan = { start: "2025-01-01", end: "2025-12-31", days: 14 };
+    const s = await source("ds-a", "SHOPIFY_ORDERS", { settings: { reportsIn: "x", backfill: plan }, syncedThrough: new Date("2025-02-28") });
+    next = async () => ({ count: 10, reason: "partial", complete: false });
+    await runDataSync(payload(s, { mode: "backfill", from: "2025-03-01", to: "2025-03-14", end: plan.end, retry: 3 }), lease);
+    const [half] = await dataJobs(s.id);
+    expect(half!.payload).toMatchObject({ mode: "backfill", from: "2025-03-01", to: "2025-03-07", end: plan.end });
+    expect(half!.payload).not.toHaveProperty("retry");
+    expect(half!.idempotencyKey).toBe(`data:${s.id}:backfill:${s.updatedAt.getTime()}:2025-03-01:h7`);
+    expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } })).settings).toEqual({ reportsIn: "x", backfill: { ...plan, days: 7 } });
+
+    // The halved window completes: the next window keeps the halved length.
+    await prisma.job.deleteMany({});
+    next = async () => ({ count: 5, complete: true });
+    await runDataSync(half!.payload, lease);
+    expect((await dataJobs(s.id))[0]!.payload).toMatchObject({ from: "2025-03-08", to: "2025-03-14" });
+
+    await prisma.job.deleteMany({});
+    next = async () => ({ count: 0, reason: "rate_limited", complete: false });
+    await runDataSync(payload(s, { mode: "backfill", from: "2025-03-08", to: "2025-03-14", end: plan.end, retry: 3 }), lease);
+    expect(await dataJobs(s.id)).toHaveLength(0);
+
+    // A 1-day window that still caps stops as today.
+    next = async () => ({ count: 0, reason: "partial", complete: false });
+    await runDataSync(payload(s, { mode: "backfill", from: "2025-03-08", to: "2025-03-08", end: plan.end, retry: 3 }), lease);
+    expect(await dataJobs(s.id)).toHaveLength(0);
+  });
+
+  it("other kinds: a partial window is retried as today and never halved", async () => {
+    const s = await source("ds-a", "SEARCH_CONSOLE", { settings: { backfill: { start: "2025-01-01", end: "2025-12-31", days: 30 } } });
+    next = async () => ({ count: 0, reason: "partial" });
+    await runDataSync(payload(s, { mode: "backfill", from: "2025-01-01", to: "2025-01-30", end: "2025-12-31", retry: 2 }), lease);
+    expect((await dataJobs(s.id)).map((j) => j.payload)).toEqual([expect.objectContaining({ from: "2025-01-01", to: "2025-01-30", retry: 3 })]);
+    await prisma.job.deleteMany({});
+    await runDataSync(payload(s, { mode: "backfill", from: "2025-01-01", to: "2025-01-30", end: "2025-12-31", retry: 3 }), lease);
+    expect(await dataJobs(s.id)).toHaveLength(0);
+  });
+
   it("a daily run waits five minutes behind a running backfill of the same source", async () => {
     const s = await source("ds-a", "SEARCH_CONSOLE");
     const backfill = await enqueueSourceSync(s, "backfill", { window: { from: "2026-01-01", to: "2026-01-30", end: "2026-01-30" } });
@@ -303,6 +385,27 @@ describe("GET data-sources", () => {
     const last = s!.lastResult as { startedAt: string; at: string };
     expect(Date.parse(last.startedAt)).toBeLessThanOrEqual(Date.parse(last.at));
     expect(s!.lastResult).not.toHaveProperty("runningSince");
+  });
+
+  it("says whether a run is a backfill, and the orders' history: loading, through, not allowed, done", async () => {
+    auth.perms = new Set(["brand.read", "crm.read"]);
+    const plan = { start: "2024-11-27", end: "2026-11-25", days: 14 };
+    const orders = await source("ds-a", "SHOPIFY_ORDERS", { settings: { allOrders: true, backfill: plan }, syncedThrough: new Date("2025-05-01") });
+    await enqueueSourceSync(orders, "backfill", { window: { from: "2025-05-02", to: "2025-05-15", end: plan.end } });
+    let [o] = await get();
+    expect(o!.sync).toMatchObject({ state: "queued", backfill: true });
+    expect(o!.history).toEqual({ allOrders: true, visibleSince: null, through: "2025-05-01", loading: true });
+
+    await prisma.dataSource.update({ where: { id: orders.id }, data: { settings: { allOrders: false, visibleSince: "2026-09-25T00:00:00Z" }, syncedThrough: null } });
+    [o] = await get();
+    expect(o!.history).toEqual({ allOrders: false, visibleSince: "2026-09-25T00:00:00Z", through: null, loading: false });
+
+    await prisma.dataSource.update({ where: { id: orders.id }, data: { settings: { allOrders: true, backfill: plan }, syncedThrough: new Date("2026-11-25") } });
+    await prisma.job.deleteMany({});
+    await enqueueSourceSync(orders, "manual");
+    [o] = await get();
+    expect(o!.sync).toMatchObject({ backfill: false });
+    expect(o!.history).toEqual({ allOrders: true, visibleSince: null, through: null, loading: false });
   });
 });
 

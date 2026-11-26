@@ -86,11 +86,32 @@ export type SyncOutcome = {
   window?: DayWindow;
   /** Shopify's updated_at high-water mark, saved as DataSource.cursor */
   cursor?: string;
+  /**
+   * Keys to set in, or remove from, DataSource.settings. recordSync merges them (one jsonb statement), so keys not
+   * named here (reportsIn, backfill, currency) are never clobbered. A patch that sets `backfill` starts that plan:
+   * runDataSync queues its first window after today's daily spread.
+   */
+  settings?: { set?: Record<string, unknown>; unset?: string[] };
+  /**
+   * The provider said this backfill can't go on for now (Shopify orders: AskCart's read_all_orders_pending): not a
+   * failure. okAt and the status stay as they were, and nothing more is queued (no retry, no next window).
+   */
+  stopChain?: true;
 };
 export type SyncRunner = (ctx: SyncContext) => Promise<SyncOutcome>;
+/**
+ * halveOnCap: a backfill window still stopped by the time cap after its retries is read again at half its length
+ * (down to 1 day) instead of waiting for the sweep's daily restart. Opt-in (Shopify orders): other kinds keep today's
+ * retries.
+ */
+type SyncOptions = { halveOnCap?: boolean };
 
 const RUNNERS: Partial<Record<DataSourceKind, SyncRunner>> = {};
-export const registerSync = (kind: DataSourceKind, runner: SyncRunner) => void (RUNNERS[kind] = runner);
+const OPTIONS: Partial<Record<DataSourceKind, SyncOptions>> = {};
+export const registerSync = (kind: DataSourceKind, runner: SyncRunner, options: SyncOptions = {}) => {
+  RUNNERS[kind] = runner;
+  OPTIONS[kind] = options;
+};
 
 export async function runSync(kind: DataSourceKind, ctx: SyncContext): Promise<SyncOutcome> {
   const runner = RUNNERS[kind];
@@ -161,6 +182,12 @@ const SPREAD_SECS = 120 * 60;
 
 /** Spreads a source's daily run over two hours after the sweep, from its id. */
 export const spreadSecs = (id: string) => [...id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 0) % SPREAD_SECS;
+/**
+ * When a backfill chain the runner or the sweep starts gets its first window: after the daily runs' two-hour spread,
+ * so a long chain doesn't hold one of the two data-job slots in the busy hours, and never within WAIT_MS of the run
+ * that planned it (same token).
+ */
+export const chainStart = (id: string, now = Date.now()) => new Date(now + (SPREAD_SECS + spreadSecs(id)) * 1000);
 
 /**
  * Queue one run. Keys: daily `data:<id>:<UTC day>` (a double sweep queues one); backfill
@@ -170,12 +197,14 @@ export const spreadSecs = (id: string) => [...id].reduce((h, c) => (h * 31 + c.c
 export function enqueueSourceSync(
   source: SourceRef,
   mode: SyncMode,
-  opts: { runAt?: Date; window?: DayWindow & { end: string }; retry?: number; follow?: number; key?: string } = {},
+  opts: { runAt?: Date; window?: DayWindow & { end: string }; retry?: number; follow?: number; key?: string; halved?: number } = {},
 ) {
   const day = new Date().toISOString().slice(0, 10);
   const key = opts.key
     ?? (mode === "daily" ? `data:${source.id}:${day}`
-      : mode === "backfill" && opts.window ? `data:${source.id}:backfill:${source.updatedAt.getTime()}:${opts.window.from}${opts.retry ? `:r${opts.retry}` : ""}`
+      : mode === "backfill" && opts.window
+        // :h<days> on a halved window: the same start day, so without it the upsert-on-key would swallow the re-read.
+        ? `data:${source.id}:backfill:${source.updatedAt.getTime()}:${opts.window.from}${opts.halved ? `:h${opts.halved}` : ""}${opts.retry ? `:r${opts.retry}` : ""}`
       : undefined);
   return enqueueJob({
     type: DATA_SYNC_JOB,
@@ -203,9 +232,9 @@ export function backfillPlan(today: string, total: number, windowDays: number): 
 const planOf = (settings: unknown) => (settings as { backfill?: BackfillPlan } | null)?.backfill;
 
 /** Queues the next window of a source's backfill (the first, when nothing is held yet); null once it's done. */
-export function enqueueBackfill(source: SourceRef & { syncedThrough: Date | null }, plan: BackfillPlan, opts: { key?: string } = {}) {
+export function enqueueBackfill(source: SourceRef & { syncedThrough: Date | null }, plan: BackfillPlan, opts: { key?: string; runAt?: Date } = {}) {
   const next = nextBackfillWindow(dayOf(source.syncedThrough), plan.start, plan.end, plan.days);
-  return next ? enqueueSourceSync(source, "backfill", { window: { ...next, end: plan.end }, key: opts.key }) : null;
+  return next ? enqueueSourceSync(source, "backfill", { window: { ...next, end: plan.end }, key: opts.key, runAt: opts.runAt }) : null;
 }
 
 /**
@@ -231,22 +260,40 @@ export async function enqueueDailyDataSyncs(now = new Date()) {
       where: { type: DATA_SYNC_JOB, status: { in: ["PENDING", "RUNNING"] }, idempotencyKey: { startsWith: `data:${s.id}:backfill:` } },
       select: { id: true },
     });
-    // Keyed by the sweep's day: a double sweep restarts it once.
-    if (!alive) await enqueueBackfill(s, plan, { key: `data:${s.id}:backfill:restart:${day}` });
+    // Keyed by the sweep's day: a double sweep restarts it once. After the daily spread, like a chain's first window.
+    if (!alive) await enqueueBackfill(s, plan, { key: `data:${s.id}:backfill:restart:${day}`, runAt: chainStart(s.id, now.getTime()) });
   }
   return sources.length;
 }
 
-/** Saves the run's result. Only fixed strings reach `error`; `okAt` moves on a run with no reason. */
-async function recordSync(source: DataSource, reason: DataSyncReason | null, count: number, data: Prisma.DataSourceUpdateManyMutationInput = {}, startedAt: string | null = null) {
+/**
+ * Saves the run's result. Only fixed strings reach `error`; `okAt` moves on a run with no reason, unless the run
+ * stopped its chain (`quiet`: not a success, not a failure). `settings` is merged in by one jsonb statement in the
+ * same transaction: `- unset` then `|| set`, top-level keys only, so keys it doesn't name are kept.
+ */
+async function recordSync(
+  source: DataSource,
+  reason: DataSyncReason | null,
+  count: number,
+  data: Prisma.DataSourceUpdateManyMutationInput = {},
+  startedAt: string | null = null,
+  opts: { quiet?: boolean; settings?: SyncOutcome["settings"] } = {},
+) {
   const at = new Date().toISOString();
   const prev = source.lastResult as StoredSyncResult | null;
-  const lastResult: DataSyncResult = { at, startedAt, okAt: reason ? (prev?.okAt ?? null) : at, reason, count, error: reason ? DATA_SYNC_ERRORS[reason] : null };
-  await prisma.dataSource.updateMany({
-    where: { id: source.id, workspaceId: source.workspaceId, brandId: source.brandId },
-    // A permission or rate stop isn't the connection's fault; the source stays on and tries again tomorrow.
-    data: { ...data, lastResult, status: reason === "reconnect" || reason === "permission" ? "ERROR" : "ACTIVE" },
-  });
+  const okAt = reason || opts.quiet ? (prev?.okAt ?? null) : at;
+  const lastResult: DataSyncResult = { at, startedAt, okAt, reason, count, error: reason ? DATA_SYNC_ERRORS[reason] : null };
+  const where = { id: source.id, workspaceId: source.workspaceId, brandId: source.brandId };
+  // A permission or rate stop isn't the connection's fault; the source stays on and tries again tomorrow.
+  const write = prisma.dataSource.updateMany({ where, data: { ...data, lastResult, status: reason === "reconnect" || reason === "permission" ? "ERROR" : "ACTIVE" } });
+  const patch = opts.settings;
+  if (!patch || (!patch.unset?.length && !Object.keys(patch.set ?? {}).length)) return void (await write);
+  await prisma.$transaction([
+    write,
+    prisma.$executeRaw`
+      UPDATE "DataSource" SET "settings" = (COALESCE("settings", '{}'::jsonb) - ${patch.unset ?? []}::text[]) || ${JSON.stringify(patch.set ?? {})}::jsonb
+      WHERE "id" = ${source.id} AND "workspaceId" = ${source.workspaceId} AND "brandId" = ${source.brandId}`,
+  ]);
 }
 
 /** A backfill job of this source is running now (another than `jobId`). */
@@ -298,10 +345,27 @@ export async function runDataSync(payload: unknown, lease: Lease) {
   const held = dayOf(source.syncedThrough);
   const read = window ?? (held !== null ? outcome.window : undefined);
   const syncedThrough = read ? advanceSyncedThrough(held, read, !!outcome.complete) : held;
+  const windowDays = window ? (Date.parse(window.to) - Date.parse(window.from)) / 86_400_000 + 1 : 0;
+  // A window still capped after its retries is read again at half its length (opt-in kinds); the plan keeps that
+  // length, so a sweep restart doesn't go back to windows too big for one run.
+  const plan = planOf(source.settings);
+  const halve = !!window && !!p.end && !outcome.stopChain && !outcome.complete && outcome.reason === "partial"
+    && (p.retry ?? 0) >= PARTIAL_RETRIES && windowDays > 1 && !!OPTIONS[source.kind]?.halveOnCap
+    ? Math.max(1, Math.floor(windowDays / 2)) : 0;
+  const settings = halve && plan
+    ? { ...outcome.settings, set: { ...outcome.settings?.set, backfill: { ...plan, days: halve } } }
+    : outcome.settings;
   await recordSync(source, outcome.reason ?? null, outcome.count, {
     ...(syncedThrough !== dayOf(source.syncedThrough) ? { syncedThrough: new Date(`${syncedThrough}T00:00:00Z`) } : {}),
     ...(outcome.cursor !== undefined ? { cursor: outcome.cursor } : {}),
-  }, startedAt);
+  }, startedAt, { quiet: outcome.stopChain, settings });
+
+  // The provider said "not now" (no retry, no next window, no follow-up): a later run starts the chain again.
+  if (outcome.stopChain) return;
+
+  // A plan this run started: its first window, after today's daily spread (also from a daily, manual or follow-up run).
+  const started = outcome.settings?.set?.backfill as BackfillPlan | undefined;
+  if (started) await enqueueBackfill({ ...source, syncedThrough: syncedThrough ? new Date(`${syncedThrough}T00:00:00Z`) : null }, started, { runAt: chainStart(source.id) });
 
   // A cursor kind (Shopify orders) that stopped partway and moved its cursor carries on in a minute rather than at the
   // next daily sweep. Keyed by this job's id: a duplicate delivery queues one, and each step of a chain (or a later
@@ -316,8 +380,11 @@ export async function runDataSync(payload: unknown, lease: Lease) {
   // Backfill chain: one window at a time. A complete window queues the next; one that stopped partway is tried again
   // in an hour (a few times), so an hourly quota isn't burned through retries.
   if (!window || !p.end) return;
-  const days = (Date.parse(window.to) - Date.parse(window.from)) / 86_400_000 + 1;
-  if (outcome.complete) {
+  const days = windowDays;
+  if (halve) {
+    const half = { from: window.from, to: addDays(window.from, halve - 1), end: p.end };
+    await enqueueSourceSync(source, "backfill", { window: half, halved: halve, runAt: new Date(Date.now() + PARTIAL_RETRY_MS) });
+  } else if (outcome.complete) {
     // From the day after this window: if syncedThrough couldn't move (a gap before it), this window isn't re-queued.
     const next = nextBackfillWindow(syncedThrough, addDays(window.to, 1), p.end, days);
     if (next) await enqueueSourceSync(source, "backfill", { window: { ...next, end: p.end } });
@@ -392,11 +459,31 @@ export async function listDataSources(scope: { workspaceId: string; brandId: str
       status: r.status,
       // No `at` yet (a first run's start stamp alone): no result to show.
       lastResult: last?.at ? { at: last.at, startedAt: last.startedAt ?? null, okAt: last.okAt ?? null, reason: last.reason ?? null, count: last.count ?? 0, error: last.reason ? (DATA_SYNC_ERRORS[last.reason] ?? null) : null } : null,
-      sync: job ? { state: job.state, since: job.state === "running" ? (last?.runningSince ?? null) : job.runAt.toISOString() } : null,
+      sync: job ? { state: job.state, since: job.state === "running" ? (last?.runningSince ?? null) : job.runAt.toISOString(), backfill: job.backfill } : null,
       syncedThrough: dayOf(r.syncedThrough),
       reportsInZone: typeof zone === "string" ? zone : null,
+      ...(r.kind === "SHOPIFY_ORDERS" ? { history: orderHistory(r) } : {}),
     };
   });
+}
+
+/**
+ * Shopify orders' history past 60 days, for the Sales tab's note: whether the store lets us read all orders (null:
+ * not known yet), since when orders are visible while it doesn't, and how far a running history has come.
+ */
+function orderHistory(r: DataSource): DataSourceDto["history"] {
+  const settings = (r.settings ?? {}) as { allOrders?: unknown; visibleSince?: unknown };
+  const allOrders = typeof settings.allOrders === "boolean" ? settings.allOrders : null;
+  const plan = planOf(r.settings);
+  const held = dayOf(r.syncedThrough);
+  const loading = !!plan && (held === null || held < plan.end);
+  if (allOrders === null && !loading) return null;
+  return {
+    allOrders,
+    visibleSince: allOrders === false && typeof settings.visibleSince === "string" ? settings.visibleSince : null,
+    through: loading ? held : null,
+    loading,
+  };
 }
 
 /** How far ahead a queued run still counts as "queued" on screen: the follow-up's minute, not the sweep's two hours. */
@@ -415,12 +502,13 @@ async function syncRuns(scope: { workspaceId: string; brandId: string }) {
     select: { status: true, runAt: true, payload: true },
     orderBy: { runAt: "asc" },
   });
-  const runs = new Map<string, { state: "queued" | "running"; runAt: Date }>();
+  const runs = new Map<string, { state: "queued" | "running"; runAt: Date; backfill: boolean }>();
   for (const j of jobs) {
-    const id = (j.payload as { dataSourceId?: unknown }).dataSourceId;
+    const payload = j.payload as { dataSourceId?: unknown; mode?: unknown };
+    const id = payload.dataSourceId;
     if (typeof id !== "string") continue;
     const state = j.status === "RUNNING" ? "running" : "queued";
-    if (!runs.has(id) || state === "running") runs.set(id, { state, runAt: j.runAt });
+    if (!runs.has(id) || state === "running") runs.set(id, { state, runAt: j.runAt, backfill: payload.mode === "backfill" });
   }
   return runs;
 }

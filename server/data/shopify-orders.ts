@@ -41,8 +41,9 @@ export const MAX_QUERY_COST = 800;
  */
 export const ORDERS_PAGE = Math.floor((MAX_QUERY_COST - 2) / ORDER_NODE_COST);
 
-export const ORDERS_QUERY = `query Orders($after: String, $query: String!) {
-  orders(first: ${ORDERS_PAGE}, after: $after, sortKey: UPDATED_AT, query: $query) {
+/** One query for both reads: by update time (daily, UPDATED_AT) and by creation day (history, CREATED_AT). */
+export const ORDERS_QUERY = `query Orders($after: String, $query: String!, $sortKey: OrderSortKeys!) {
+  orders(first: ${ORDERS_PAGE}, after: $after, sortKey: $sortKey, query: $query) {
     pageInfo { hasNextPage endCursor }
     nodes { ${ORDER_FIELDS} }
   }
@@ -151,7 +152,25 @@ export type FetchOrdersResult = {
   cursorEnd: Date;
   /** Set when the run stopped before the last page. */
   stoppedReason?: SyncStop;
+  /**
+   * AskCart incremental reads only: whether Shopify lets AskCart read every order (read_all_orders). false when any
+   * page carried AskCart's read_all_orders_pending warning; true when none did and at least one page reached Shopify
+   * (not rate limited, or with orders); undefined when no page said (all rate limited and empty, or none read).
+   */
+  allOrders?: boolean;
+  /** AskCart's visibleSince (an ISO date), the oldest creation time Shopify shows it, while it can't read all orders. */
+  visibleSince?: string;
+  /** AskCart history reads: AskCart answered 403 read_all_orders_pending; nothing was read. */
+  historyPending?: true;
 };
+
+/** A history read: Shopify creation days, "YYYY-MM-DD" inclusive (AskCart: the shop's zone; a token: UTC). */
+export type CreatedWindow = { createdFrom: string; createdTo: string };
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const nextDay = (day: string) => new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+/** AskCart's visibleSince, kept only when it is an ISO date (it is shown, and goes into settings). */
+export const isoDate = (v: unknown) =>
+  typeof v === "string" && /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2}))?$/.test(v) && !Number.isNaN(Date.parse(v)) ? v : undefined;
 
 const OVERLAP_MS = 3_600_000; // re-reads the last hour: covers clock skew and same-second updates at a page edge
 const MAX_PAGES = 50;
@@ -230,15 +249,25 @@ export function mapOrder(o: OrderNode): ShopOrderRow {
  * them, so the caller writes them and advances — capped is progress, not a failure.
  * `reconnect` (401/403), `missing_scope` (ACCESS_DENIED: the token lacks read_orders, the catalogue keeps working) and
  * `failed` (5xx, network, timeout, a GraphQL error) return no orders. Only bugs throw; the token never reaches a message.
- * ponytail: 50 × 100 = 5,000 orders a run; a busier store catches up over several runs from `cursorEnd`.
+ * ponytail: 50 × ORDERS_PAGE orders a run; a busier store catches up over several runs from `cursorEnd`.
  * `read_orders` only reaches the last 60 days, whatever `sinceUpdatedAt` says.
+ *
+ * History (`read` a CreatedWindow): the orders created on those UTC days, oldest first, by `created_at` (needs
+ * read_all_orders past 60 days). No stoppedReason = read to the last page, so the window is complete.
  */
 export async function fetchOrders(
   conn: { shop: string; accessToken: string },
-  sinceUpdatedAt: Date,
+  read: Date | CreatedWindow,
   signal?: AbortSignal,
 ): Promise<FetchOrdersResult> {
-  const query = `updated_at:>='${new Date(sinceUpdatedAt.getTime() - OVERLAP_MS).toISOString()}'`;
+  const history = !(read instanceof Date);
+  if (history && (!DAY.test(read.createdFrom) || !DAY.test(read.createdTo))) throw new Error("fetchOrders: bad window");
+  // Bounds formatted here from validated days only: nothing else reaches the search string.
+  const query = history
+    ? `created_at:>='${read.createdFrom}T00:00:00Z' AND created_at:<'${nextDay(read.createdTo)}T00:00:00Z'`
+    : `updated_at:>='${new Date(read.getTime() - OVERLAP_MS).toISOString()}'`;
+  const sortKey = history ? "CREATED_AT" : "UPDATED_AT";
+  const sinceUpdatedAt = history ? new Date(0) : read;
   const started = Date.now();
   const orders: ShopOrderRow[] = [];
   let after: string | null = null;
@@ -253,7 +282,7 @@ export async function fetchOrders(
     type Page = { orders: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: OrderNode[] } };
     let data: Page;
     try {
-      ({ data } = await shopifyQuery<Page>(conn.shop, conn.accessToken, ORDERS_QUERY, { after, query }, signal));
+      ({ data } = await shopifyQuery<Page>(conn.shop, conn.accessToken, ORDERS_QUERY, { after, query, sortKey }, signal));
     } catch (err) {
       const none = (stoppedReason: SyncStop): FetchOrdersResult => ({ orders: [], cursorEnd: sinceUpdatedAt, stoppedReason });
       // ACCESS_DENIED is a missing scope (read_orders), not a dead token: the connection must not be marked for reconnect.
@@ -388,22 +417,37 @@ export function mapAskCartOrder(o: AskCartOrder): ShopOrderRow | null {
  * nextCursor (the same cursor when the page was empty). Only when that wait is over 30 s, or would pass the time cap,
  * does it stop as `rate_limited` with the pages so far (a sorted prefix); so does a 429 after the client's retries. 401 / store not connected throw ReconnectNeeded; 403 access_denied →
  * `missing_scope`; anything else → `failed`. Orders seen twice (same updatedAt at a page edge) keep their last read.
- * AskCart's read_all_orders_pending warning (orders created before visibleSince left out) is logged only: the
- * pasted-token path has the same 60-day reach.
+ * Incremental reads also say whether Shopify lets AskCart read all orders (`allOrders`, from AskCart's
+ * read_all_orders_pending warning, at no extra request; see FetchOrdersResult). A failed run says nothing.
+ *
+ * History (`read` a CreatedWindow): AskCart's backfill mode, orders created on those shop days, oldest first. The
+ * window is complete only when AskCart says `complete` on the last page: a missing nextCursor alone stops as
+ * `capped`. AskCart's 403 read_all_orders_pending (scope not granted, or taken back) returns `historyPending`, caught
+ * before the generic AskCartError → `failed`, so the caller stops the history quietly instead of retrying it.
  */
-export async function fetchAskCartOrders(bearer: string, sinceUpdatedAt: Date, signal?: AbortSignal): Promise<FetchOrdersResult> {
-  const updatedSince = new Date(sinceUpdatedAt.getTime() - OVERLAP_MS);
+export async function fetchAskCartOrders(bearer: string, read: Date | CreatedWindow, signal?: AbortSignal): Promise<FetchOrdersResult> {
+  const history = !(read instanceof Date);
+  if (history && (!DAY.test(read.createdFrom) || !DAY.test(read.createdTo))) throw new Error("fetchAskCartOrders: bad window");
+  const sinceUpdatedAt = history ? new Date(0) : read;
+  const query = history ? { createdFrom: read.createdFrom, createdTo: read.createdTo } : { updatedSince: new Date(read.getTime() - OVERLAP_MS) };
   const started = Date.now();
   const byId = new Map<string, ShopOrderRow>();
   let cursor: string | null = null;
+  // The grant signal (incremental reads only): a warning on any page wins; a page that reached Shopify says granted.
+  let warned = false;
+  let reached = false;
+  let visibleSince: string | undefined;
   const done = (stoppedReason?: SyncStop): FetchOrdersResult => {
     // Oldest update first, as the sync's write loop needs (a deadline between pages saves the last written update as
     // the cursor). Map order alone isn't: an order re-read with a newer update keeps its first slot.
     const orders = [...byId.values()].sort((a, b) => a.shopifyUpdatedAt.getTime() - b.shopifyUpdatedAt.getTime());
+    const allOrders = history ? undefined : warned ? false : reached ? true : undefined;
     return {
       orders,
       cursorEnd: orders.reduce((max, o) => (o.shopifyUpdatedAt > max ? o.shopifyUpdatedAt : max), sinceUpdatedAt),
       ...(stoppedReason ? { stoppedReason } : {}),
+      ...(allOrders !== undefined ? { allOrders } : {}),
+      ...(allOrders === false && visibleSince ? { visibleSince } : {}),
     };
   };
   const none = (stoppedReason: SyncStop): FetchOrdersResult => ({ orders: [], cursorEnd: sinceUpdatedAt, stoppedReason });
@@ -412,10 +456,14 @@ export async function fetchAskCartOrders(bearer: string, sinceUpdatedAt: Date, s
     if (page > 0 && (Date.now() - started > MAX_MS || signal?.aborted)) return done("capped");
     let res: AskCartPage<AskCartOrder>;
     try {
-      res = await askCartOrders(bearer, { updatedSince }, cursor, signal);
+      res = await askCartOrders(bearer, query, cursor, signal);
     } catch (err) {
       // The caller marks the connection with AskCart's own reason (our access vs the store's install).
       if (err instanceof ReconnectNeeded) throw err;
+      if (history && err instanceof AskCartError && err.code === "read_all_orders_pending") {
+        const since = isoDate(err.visibleSince);
+        return { orders: [], cursorEnd: sinceUpdatedAt, historyPending: true, ...(since ? { visibleSince: since } : {}) };
+      }
       if (signal?.aborted) return done("capped");
       if (err instanceof AskCartError && err.rateLimited) return done("rate_limited");
       if (err instanceof AskCartError && err.code === "access_denied") return none("missing_scope");
@@ -425,7 +473,13 @@ export async function fetchAskCartOrders(bearer: string, sinceUpdatedAt: Date, s
       }
       throw err;
     }
-    if (res.warning?.code === "read_all_orders_pending" && page === 0) console.warn("[askcart-orders] orders created before", res.warning.visibleSince, "aren't visible yet");
+    if (res.warning?.code === "read_all_orders_pending") {
+      if (!warned) console.warn("[askcart-orders] orders created before", isoDate(res.warning.visibleSince) ?? "(unknown)", "aren't visible yet");
+      warned = true;
+      visibleSince ??= isoDate(res.warning.visibleSince);
+    }
+    // AskCart warns only once its walk reached Shopify: a rate-limited page without orders says nothing either way.
+    if (!res.rateLimited || (res.items ?? []).length > 0) reached = true;
     for (const o of res.items ?? []) {
       const row = mapAskCartOrder(o);
       // An order AskCart sent without its totals: the run fails cleanly (nothing written, retried), never half a page.
@@ -446,7 +500,9 @@ export async function fetchAskCartOrders(bearer: string, sinceUpdatedAt: Date, s
       cursor = res.nextCursor ?? cursor;
       continue;
     }
-    if (res.complete || !res.nextCursor) return done();
+    if (res.complete) return done();
+    // History: only `complete` ends a window; a missing cursor without it leaves the window to be read again.
+    if (!res.nextCursor) return history ? done("capped") : done();
     cursor = res.nextCursor;
   }
   return done("capped");

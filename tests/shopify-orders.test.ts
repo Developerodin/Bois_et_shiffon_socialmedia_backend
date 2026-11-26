@@ -86,8 +86,18 @@ describe("fetchOrders", () => {
     const { orders, stoppedReason } = await fetchOrders(CONN, SINCE);
     expect(stoppedReason).toBeUndefined();
     expect(orders.map((o) => o.name)).toEqual(["#1001", "#1002"]);
-    expect(sentVariables(fetchMock.mock.calls[0])).toEqual({ after: null, query: "updated_at:>='2026-11-19T23:00:00.000Z'" });
+    expect(sentVariables(fetchMock.mock.calls[0])).toEqual({ after: null, query: "updated_at:>='2026-11-19T23:00:00.000Z'", sortKey: "UPDATED_AT" });
     expect(sentVariables(fetchMock.mock.calls[1]).after).toBe("c1");
+  });
+
+  it("history: created_at window and CREATED_AT through the one ORDERS_QUERY; bad days refused", async () => {
+    const fetchMock = stubFetch({ body: page([REFUNDED], null) });
+    const r = await fetchOrders(CONN, { createdFrom: "2025-01-01", createdTo: "2025-01-30" });
+    expect(r.stoppedReason).toBeUndefined();
+    expect(sentVariables(fetchMock.mock.calls[0])).toEqual({
+      after: null, sortKey: "CREATED_AT", query: "created_at:>='2025-01-01T00:00:00Z' AND created_at:<'2025-01-31T00:00:00Z'",
+    });
+    await expect(fetchOrders(CONN, { createdFrom: "2025-01-01' OR x", createdTo: "2025-01-30" })).rejects.toThrow();
   });
 
   it("stops as partial when Shopify keeps throttling, keeping only finished pages", async () => {

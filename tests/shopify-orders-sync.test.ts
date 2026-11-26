@@ -6,7 +6,9 @@ const m = vi.hoisted(() => ({
   executeRaw: vi.fn(async () => 0),
   queryRaw: vi.fn(async (): Promise<object[]> => []),
   markReconnect: vi.fn(async () => undefined),
+  grantedScopes: vi.fn(async (): Promise<{ name: string; scopes: string[] }> => ({ name: "Shop", scopes: ["read_orders"] })),
 }));
+vi.mock("@/server/catalog/shopify", async (orig) => ({ ...(await orig<object>()), grantedScopes: m.grantedScopes }));
 vi.mock("@/server/data/shopify-orders", async (orig) => ({ ...(await orig<object>()), fetchOrders: m.fetchOrders, fetchAskCartOrders: m.fetchAskCartOrders }));
 vi.mock("@/server/shopify/askcart-token", () => ({ askCartToken: async () => "askcart_token" }));
 vi.mock("@/server/db/prisma", () => {
@@ -30,7 +32,8 @@ const order = (i: number): ShopOrderRow => ({
   netSales: "10.00", discounts: "0.00", gross: "10.00", shipping: "0.00", taxes: "0.00", taxesIncluded: true, total: "10.00",
   refunded: "0.00", sourceName: "web", shopifyUpdatedAt: now,
 });
-const ctx = (cursor: string | null) => ({ source: { workspaceId: "w", brandId: "b", cursor }, connection: conn, signal: new AbortController().signal });
+// Scopes checked today: the token path's once-a-day read_all_orders check stays out of these tests.
+const ctx = (cursor: string | null) => ({ source: { workspaceId: "w", brandId: "b", cursor, settings: { scopesCheckedAt: now.toISOString() } }, connection: conn, signal: new AbortController().signal });
 const cursorEnd = new Date("2026-11-23T11:00:00Z");
 
 beforeEach(() => vi.clearAllMocks());
@@ -228,5 +231,72 @@ describe("parseRange (sales, 366 days)", () => {
     expect(parseRange("2025-01-01", "2026-11-01", 366)).toBeNull();
     expect(parseRange(null, "2026-11-01", 366)).toBeNull();
     expect(parseRange("2026-11-01'", "2026-11-02", 366)).toBeNull();
+  });
+});
+
+describe("syncShopifyOrders: order history past 60 days", () => {
+  const askCart = { id: "c2", externalAccountId: "askcart" } as IntegrationConnection;
+  const daily = (connection: IntegrationConnection, settings: object = {}, syncedThrough: Date | null = null) =>
+    ({ source: { workspaceId: "w", brandId: "b", cursor: null, settings, syncedThrough }, connection, signal: new AbortController().signal });
+  const history = (connection: IntegrationConnection) => ({ ...daily(connection), window: { from: "2025-01-01", to: "2025-01-14" } });
+
+  it("AskCart warning → allOrders false and visibleSince saved, no plan", async () => {
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [], cursorEnd, allOrders: false, visibleSince: "2026-09-25T00:00:00Z" });
+    const out = await syncShopifyOrders(daily(askCart), now);
+    expect(out.settings).toEqual({ set: { allOrders: false, visibleSince: "2026-09-25T00:00:00Z" } });
+  });
+
+  it("no warning → allOrders true and a 24-month plan of 14-day windows; an existing plan is left alone", async () => {
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [], cursorEnd, allOrders: true });
+    expect((await syncShopifyOrders(daily(askCart), now)).settings).toEqual({
+      set: { allOrders: true, backfill: { start: "2024-11-23", end: "2026-11-22", days: 14 } }, unset: ["visibleSince"],
+    });
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [], cursorEnd, allOrders: true });
+    const plan = { start: "2024-11-23", end: "2026-11-22", days: 14 };
+    expect((await syncShopifyOrders(daily(askCart, { backfill: plan }), now)).settings).toEqual({ set: { allOrders: true }, unset: ["visibleSince"] });
+  });
+
+  it("a read that says nothing (rate limited and empty) saves nothing", async () => {
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [], cursorEnd, stoppedReason: "rate_limited" });
+    expect(await syncShopifyOrders(daily(askCart), now)).not.toHaveProperty("settings");
+  });
+
+  it("re-plan after a quiet stop: starts the day after the history already held", async () => {
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [], cursorEnd, allOrders: true });
+    const out = await syncShopifyOrders(daily(askCart, {}, new Date("2024-06-30T00:00:00Z")), now);
+    expect(out.settings?.set?.backfill).toEqual({ start: "2024-07-01", end: "2026-11-22", days: 14 });
+  });
+
+  it("token path: plan only with read_all_orders, its scopes asked once a day", async () => {
+    m.fetchOrders.mockResolvedValue({ orders: [], cursorEnd });
+    m.grantedScopes.mockResolvedValueOnce({ name: "Shop", scopes: ["read_orders"] });
+    expect((await syncShopifyOrders(daily(conn), now)).settings).toEqual({ set: { scopesCheckedAt: now.toISOString(), allOrders: false } });
+    m.grantedScopes.mockResolvedValueOnce({ name: "Shop", scopes: ["read_orders", "read_all_orders"] });
+    expect((await syncShopifyOrders(daily(conn), now)).settings).toEqual({
+      set: { scopesCheckedAt: now.toISOString(), allOrders: true, backfill: { start: "2024-11-23", end: "2026-11-22", days: 30 } },
+    });
+    m.grantedScopes.mockClear();
+    expect(await syncShopifyOrders(daily(conn, { scopesCheckedAt: new Date(now.getTime() - 3_600_000).toISOString() }), now)).not.toHaveProperty("settings");
+    expect(m.grantedScopes).not.toHaveBeenCalled();
+  });
+
+  it("history window: AskCart createdFrom/createdTo; complete only without a stop; never a cursor (no follow-up)", async () => {
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [order(1)], cursorEnd: new Date(0) });
+    expect(await syncShopifyOrders(history(askCart), now)).toEqual({ count: 1, reason: null, complete: true });
+    expect(m.fetchAskCartOrders).toHaveBeenCalledWith("askcart_token", { createdFrom: "2025-01-01", createdTo: "2025-01-14" }, expect.anything());
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [order(1)], cursorEnd: new Date(0), stoppedReason: "capped" });
+    expect(await syncShopifyOrders(history(askCart), now)).toEqual({ count: 1, reason: "partial", complete: false });
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [], cursorEnd: new Date(0), stoppedReason: "rate_limited" });
+    expect(await syncShopifyOrders(history(askCart), now)).toEqual({ count: 0, reason: "rate_limited", complete: false });
+    m.fetchOrders.mockResolvedValueOnce({ orders: [order(2)], cursorEnd: new Date(0) });
+    expect(await syncShopifyOrders(history(conn), now)).toEqual({ count: 1, reason: null, complete: true });
+    expect(m.fetchOrders).toHaveBeenLastCalledWith(expect.anything(), { createdFrom: "2025-01-01", createdTo: "2025-01-14" }, expect.anything());
+  });
+
+  it("403 read_all_orders_pending → quiet stop: plan cleared, allOrders false, no reason", async () => {
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [], cursorEnd: new Date(0), historyPending: true, visibleSince: "2026-09-25T00:00:00Z" });
+    expect(await syncShopifyOrders(history(askCart), now)).toEqual({
+      count: 0, reason: null, stopChain: true, settings: { set: { allOrders: false, visibleSince: "2026-09-25T00:00:00Z" }, unset: ["backfill"] },
+    });
   });
 });
