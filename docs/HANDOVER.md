@@ -1870,3 +1870,10 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
   coverage line, and the chat's `searchPerformance` (`topQueries`, `queryCoverage`, `queriesSince`; prompt v9).
 - Waits on Search Console verification for B&C: everything above ships tested against fixtures and stays empty until
   then. Web components weren't browser-checked on the branch (no dev server or build was run).
+
+### SEO depth: where it stopped (2026-11-26, 17:40)
+- Branch `seo-depth` in the worktrees `C:\Users\INTEL\Desktop\sma-seo\{server,web,mobile}` (not merged, not pushed). Plan: `docs/superpowers/plans/2026-11-26-seo-depth.md` (four-lens reviewed, owner answers recorded).
+- Done and committed: Task 0 (one same-page URL rule, `cleanText`), Task 1 (Search Console queries and query-page pairs, kept 400 days), Task 2 (top queries on the Search tab and in the chat).
+- In progress, uncommitted on disk: Task 3, the URL history page. Server: `server/seo/url-history.ts`, `app/api/v1/.../seo/`, `tests/db/url-history.db.test.ts`, `shared/seo-url.ts`. Web: `app/(shell)/performance/url/`, `components/performance/url-history.tsx`, `lib/seo-links.ts` and edits to the Search tab, the audit board and the task view.
+- Still to do: finish Task 3, then Task 4 (the full-site link crawl), 5 and 5b (declining-page alerts, bell included), 6 (AI briefs), then the four-lens branch review and merge.
+- The worktree's server `node_modules` is a folder of junctions plus private Prisma copies; remove the junctions with `cmd /c rmdir` before deleting the worktree. Its test DB is `sma_test_seo` in the `sma-testdb` container.
