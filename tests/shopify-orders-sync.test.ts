@@ -58,6 +58,7 @@ describe("syncShopifyOrders", () => {
     m.fetchOrders.mockResolvedValue({ orders: [order(1)], cursorEnd, stoppedReason });
     expect(await syncShopifyOrders(ctx(null), now)).toEqual({ count: 1, reason, cursor: cursorEnd.toISOString() });
     expect(m.executeRaw).toHaveBeenCalledTimes(1);
+    m.queryRaw.mockReset();
   });
 
   it("a refused token marks the connection, writes nothing and throws ReconnectNeeded", async () => {
@@ -186,6 +187,14 @@ describe("syncShopifyOrders: orders AskCart sent with incomplete lines", () => {
     expect(m.queryRaw.mock.calls[0]).toContain(since);
   });
 
+  it.each(["capped", "rate_limited"] as const)("a run that stopped %s moves the cursor on, never back to the held order", async (stoppedReason) => {
+    m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [order(1)], cursorEnd, stoppedReason });
+    m.queryRaw.mockResolvedValue([{ at: "2026-11-23T09:30:00.000Z" }]);
+    expect(await syncShopifyOrders(askCart, now)).toMatchObject({ cursor: cursorEnd.toISOString() });
+    expect(m.queryRaw).not.toHaveBeenCalled();
+    m.queryRaw.mockReset();
+  });
+
   it("looks only at this connection's orders", async () => {
     m.fetchAskCartOrders.mockResolvedValueOnce({ orders: [], cursorEnd });
     await syncShopifyOrders(askCart, now);
@@ -197,6 +206,7 @@ describe("syncShopifyOrders: orders AskCart sent with incomplete lines", () => {
     const orders = Array.from({ length: 150 }, (_, i) => ({ ...order(i), shopifyUpdatedAt: new Date(Date.parse("2026-11-20T00:00:00Z") + i * 60_000) }));
     m.fetchAskCartOrders.mockResolvedValueOnce({ orders, cursorEnd });
     m.executeRaw.mockImplementationOnce(async () => (ac.abort(), 0));
+    m.queryRaw.mockResolvedValue([{ at: "2026-11-19T09:30:00.000Z" }]); // a held order earlier than every page
     const out = await syncShopifyOrders({ ...askCart, signal: ac.signal }, now);
     expect(out).toMatchObject({ count: 100, reason: "partial", cursor: orders[99].shopifyUpdatedAt.toISOString() });
     expect(m.executeRaw).toHaveBeenCalledTimes(1);
