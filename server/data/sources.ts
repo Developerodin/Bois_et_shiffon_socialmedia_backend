@@ -32,9 +32,19 @@ import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
  * Errors: throw ReconnectNeeded for a refused token (status ERROR, not retried), anything else to retry (maxAttempts 3).
  * A missing permission, a provider rate limit or a stop mid-window is not thrown: return reason "permission",
  * "rate_limited" or "partial". Provider text may go to the log (never URLs: tokens ride in query strings), never into
- * `lastResult`, which only holds DATA_SYNC_ERRORS strings.
+ * `lastResult` (StoredSyncResult), whose `error` only holds DATA_SYNC_ERRORS strings; beside it are counts, times and
+ * a running job's `runningSince` stamp.
  */
 export const DATA_SYNC_JOB = "data.sync";
+/**
+ * `DataSource.lastResult` as stored: the shared result plus `runningSince`, stamped when a run starts and dropped when
+ * recordSync replaces the whole value. Server-only: the screens get it as `sync.since`. A source's first run stamps a
+ * NULL lastResult, so the row can hold `runningSince` alone, with no `at`.
+ */
+type StoredSyncResult = DataSyncResult & { runningSince?: string };
+/** Follow-up runs in a row after cursor runs that stopped partway, and the wait before each. */
+export const FOLLOW_UPS = 5;
+const FOLLOW_UP_MS = 60_000;
 
 /**
  * A client's stop as the job's outcome: reconnect throws ReconnectNeeded (not retried), failed throws (retried);
@@ -138,6 +148,8 @@ const Payload = z.object({
   end: z.string().optional(),
   /** Backfill: retries of a window that stopped partway. */
   retry: z.number().int().optional(),
+  /** Cursor kinds: follow-up runs queued in a row after runs that stopped partway (FOLLOW_UPS). */
+  follow: z.number().int().optional(),
 });
 type Payload = z.infer<typeof Payload>;
 
@@ -158,7 +170,7 @@ export const spreadSecs = (id: string) => [...id].reduce((h, c) => (h * 31 + c.c
 export function enqueueSourceSync(
   source: SourceRef,
   mode: SyncMode,
-  opts: { runAt?: Date; window?: DayWindow & { end: string }; retry?: number; key?: string } = {},
+  opts: { runAt?: Date; window?: DayWindow & { end: string }; retry?: number; follow?: number; key?: string } = {},
 ) {
   const day = new Date().toISOString().slice(0, 10);
   const key = opts.key
@@ -173,6 +185,7 @@ export function enqueueSourceSync(
       dataSourceId: source.id, workspaceId: source.workspaceId, brandId: source.brandId, kind: source.kind, mode,
       ...(opts.window ? { from: opts.window.from, to: opts.window.to, end: opts.window.end } : {}),
       ...(opts.retry ? { retry: opts.retry } : {}),
+      ...(opts.follow ? { follow: opts.follow } : {}),
     },
     runAt: opts.runAt,
     maxAttempts: 3,
@@ -225,10 +238,10 @@ export async function enqueueDailyDataSyncs(now = new Date()) {
 }
 
 /** Saves the run's result. Only fixed strings reach `error`; `okAt` moves on a run with no reason. */
-async function recordSync(source: DataSource, reason: DataSyncReason | null, count: number, data: Prisma.DataSourceUpdateManyMutationInput = {}) {
+async function recordSync(source: DataSource, reason: DataSyncReason | null, count: number, data: Prisma.DataSourceUpdateManyMutationInput = {}, startedAt: string | null = null) {
   const at = new Date().toISOString();
-  const prev = source.lastResult as DataSyncResult | null;
-  const lastResult: DataSyncResult = { at, okAt: reason ? (prev?.okAt ?? null) : at, reason, count, error: reason ? DATA_SYNC_ERRORS[reason] : null };
+  const prev = source.lastResult as StoredSyncResult | null;
+  const lastResult: DataSyncResult = { at, startedAt, okAt: reason ? (prev?.okAt ?? null) : at, reason, count, error: reason ? DATA_SYNC_ERRORS[reason] : null };
   await prisma.dataSource.updateMany({
     where: { id: source.id, workspaceId: source.workspaceId, brandId: source.brandId },
     // A permission or rate stop isn't the connection's fault; the source stays on and tries again tomorrow.
@@ -268,12 +281,17 @@ export async function runDataSync(payload: unknown, lease: Lease) {
   }
 
   const window = p.mode === "backfill" && p.from && p.to ? { from: p.from, to: p.to } : undefined;
+  // When this run started, for the screens ("started 12:04"): kept beside the last result until recordSync replaces it.
+  const startedAt = new Date().toISOString();
+  await prisma.$executeRaw`
+    UPDATE "DataSource" SET "lastResult" = COALESCE("lastResult", '{}'::jsonb) || jsonb_build_object('runningSince', ${startedAt}::text)
+    WHERE "id" = ${source.id} AND "workspaceId" = ${source.workspaceId} AND "brandId" = ${source.brandId}`;
   let outcome: SyncOutcome;
   try {
     outcome = await runSync(source.kind, { source, connection, mode: p.mode, window, lease, signal: AbortSignal.timeout(DEADLINE_MS) });
   } catch (error) {
     console.warn("[data] sync failed", source.brandId, source.kind, error instanceof Error ? error.message : error);
-    await recordSync(source, error instanceof ReconnectNeeded ? "reconnect" : "failed", 0);
+    await recordSync(source, error instanceof ReconnectNeeded ? "reconnect" : "failed", 0, {}, startedAt);
     throw error;
   }
   // A daily or manual run only extends a held range: it never starts one, or the backfill would skip its days.
@@ -283,7 +301,17 @@ export async function runDataSync(payload: unknown, lease: Lease) {
   await recordSync(source, outcome.reason ?? null, outcome.count, {
     ...(syncedThrough !== dayOf(source.syncedThrough) ? { syncedThrough: new Date(`${syncedThrough}T00:00:00Z`) } : {}),
     ...(outcome.cursor !== undefined ? { cursor: outcome.cursor } : {}),
-  });
+  }, startedAt);
+
+  // A cursor kind (Shopify orders) that stopped partway and moved its cursor carries on in a minute rather than at the
+  // next daily sweep. Keyed by this job's id: a duplicate delivery queues one, and each step of a chain (or a later
+  // chain that ends on a cursor an earlier one reached) gets its own key; at most FOLLOW_UPS in a row, so a store
+  // that is always rate limited waits for the sweep. A run that read to the end never queues one (even when it steps
+  // the cursor back to re-read an incomplete order), so the chain can't loop.
+  if (!window && (outcome.reason === "partial" || outcome.reason === "rate_limited") && outcome.cursor !== undefined
+    && outcome.cursor !== source.cursor && (p.follow ?? 0) < FOLLOW_UPS) {
+    await enqueueSourceSync(source, p.mode, { follow: (p.follow ?? 0) + 1, runAt: new Date(Date.now() + FOLLOW_UP_MS), key: `data:${source.id}:more:${lease.jobId}` });
+  }
 
   // Backfill chain: one window at a time. A complete window queues the next; one that stopped partway is tried again
   // in an hour (a few times), so an hourly quota isn't burned through retries.
@@ -319,7 +347,7 @@ export async function requestSourceSync(scope: Scope, kind: DataSourceKind): Pro
   let queued = false;
   let limited = false;
   for (const s of sources) {
-    const okAt = (s.lastResult as DataSyncResult | null)?.okAt;
+    const okAt = (s.lastResult as StoredSyncResult | null)?.okAt;
     if (okAt && Date.now() - Date.parse(okAt) < FRESH_MS) continue;
     const pending = await prisma.job.findFirst({
       where: { type: DATA_SYNC_JOB, workspaceId: s.workspaceId, brandId: s.brandId, payload: { path: ["dataSourceId"], equals: s.id },
@@ -352,19 +380,49 @@ export async function listDataSources(scope: { workspaceId: string; brandId: str
     orderBy: [{ kind: "asc" }, { createdAt: "asc" }],
   });
   const manage = perms.has("integrations.manage");
+  const runs = await syncRuns(scope);
   return rows.map((r) => {
-    const last = r.lastResult as DataSyncResult | null;
+    const last = r.lastResult as StoredSyncResult | null;
+    const job = runs.get(r.id);
     const zone = ((r.settings ?? {}) as { reportsIn?: unknown }).reportsIn;
     return {
       id: r.id,
       kind: r.kind,
       ...(manage ? { label: r.label } : {}),
       status: r.status,
-      lastResult: last && { at: last.at, okAt: last.okAt ?? null, reason: last.reason ?? null, count: last.count ?? 0, error: last.reason ? (DATA_SYNC_ERRORS[last.reason] ?? null) : null },
+      // No `at` yet (a first run's start stamp alone): no result to show.
+      lastResult: last?.at ? { at: last.at, startedAt: last.startedAt ?? null, okAt: last.okAt ?? null, reason: last.reason ?? null, count: last.count ?? 0, error: last.reason ? (DATA_SYNC_ERRORS[last.reason] ?? null) : null } : null,
+      sync: job ? { state: job.state, since: job.state === "running" ? (last?.runningSince ?? null) : job.runAt.toISOString() } : null,
       syncedThrough: dayOf(r.syncedThrough),
       reportsInZone: typeof zone === "string" ? zone : null,
     };
   });
+}
+
+/** How far ahead a queued run still counts as "queued" on screen: the follow-up's minute, not the sweep's two hours. */
+const SOON_MS = 2 * 60_000;
+
+/**
+ * The brand's data-sync jobs running now or due within SOON_MS, by source id; running wins over queued. Running
+ * needs a live lease: a job whose process died stays RUNNING until another worker claims it, and must not show as
+ * syncing meanwhile.
+ * ponytail: reads the brand's due data jobs (a handful); the (status, runAt) index serves it.
+ */
+async function syncRuns(scope: { workspaceId: string; brandId: string }) {
+  const jobs = await prisma.job.findMany({
+    where: { type: DATA_SYNC_JOB, workspaceId: scope.workspaceId, brandId: scope.brandId,
+      OR: [{ status: "RUNNING", leasedUntil: { gte: new Date() } }, { status: "PENDING", runAt: { lte: new Date(Date.now() + SOON_MS) } }] },
+    select: { status: true, runAt: true, payload: true },
+    orderBy: { runAt: "asc" },
+  });
+  const runs = new Map<string, { state: "queued" | "running"; runAt: Date }>();
+  for (const j of jobs) {
+    const id = (j.payload as { dataSourceId?: unknown }).dataSourceId;
+    if (typeof id !== "string") continue;
+    const state = j.status === "RUNNING" ? "running" : "queued";
+    if (!runs.has(id) || state === "running") runs.set(id, { state, runAt: j.runAt });
+  }
+  return runs;
 }
 
 /** The brand's own zone (BrandProfile.timeZone, else the default), for days we bucket ourselves. */

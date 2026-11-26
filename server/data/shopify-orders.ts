@@ -329,7 +329,9 @@ export async function fetchAskCartOrders(bearer: string, sinceUpdatedAt: Date, s
   const byId = new Map<string, ShopOrderRow>();
   let cursor: string | null = null;
   const done = (stoppedReason?: SyncStop): FetchOrdersResult => {
-    const orders = [...byId.values()];
+    // Oldest update first, as the sync's write loop needs (a deadline between pages saves the last written update as
+    // the cursor). Map order alone isn't: an order re-read with a newer update keeps its first slot.
+    const orders = [...byId.values()].sort((a, b) => a.shopifyUpdatedAt.getTime() - b.shopifyUpdatedAt.getTime());
     return {
       orders,
       cursorEnd: orders.reduce((max, o) => (o.shopifyUpdatedAt > max ? o.shopifyUpdatedAt : max), sinceUpdatedAt),

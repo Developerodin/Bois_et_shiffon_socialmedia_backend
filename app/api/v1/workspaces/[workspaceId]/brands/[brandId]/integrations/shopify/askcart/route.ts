@@ -5,7 +5,7 @@ import { shopDomain } from "@/server/catalog/shopify";
 import { enqueueCatalogSync } from "@/server/catalog/sync";
 import { kickRunner } from "@/server/jobs/runner";
 import { ReconnectNeeded, saveConnections, toConnectionDto } from "@/server/services/connections";
-import { ASKCART_ACCOUNT, ASKCART_SCOPE, askCartConfig, askCartShop, AskCartTaken, guardAskCartBrand } from "@/server/shopify/askcart";
+import { ASKCART_ACCOUNT, ASKCART_SCOPE, askCartConfig, askCartShop, AskCartTaken, guardAskCartBrand, isAskCartStoreLapsed } from "@/server/shopify/askcart";
 import { startAskCartConnect } from "@/server/shopify/askcart-connect";
 
 // Queued work runs after the response (kickRunner); give it room to finish.
@@ -44,7 +44,7 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
       ({ name } = await askCartShop(cfg.secret));
     } catch (e) {
       console.warn("[askcart] connect check failed", scope.brandId, e instanceof Error ? e.message : e);
-      return e instanceof ReconnectNeeded
+      return e instanceof ReconnectNeeded || isAskCartStoreLapsed(e)
         ? problem(422, "AskCart can't reach the store", "AskCart refused the request. Open AskCart in Shopify admin to reconnect the store, then try again.")
         : problem(502, "Couldn't reach AskCart", "Couldn't reach AskCart. Try again in a minute.");
     }

@@ -8,7 +8,7 @@ import { enqueueJob } from "@/server/jobs/queue";
 import { shopifySized } from "@/server/research/brand-assets";
 import { htmlText, safeFetch, safeFetchBytes } from "@/server/research/crawl";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
-import { AskCartError, askCartCatalog, askCartReason, isAskCart } from "@/server/shopify/askcart";
+import { ASKCART_STORE_LAPSED, AskCartError, askCartCatalog, askCartReason, isAskCart, isAskCartStoreLapsed } from "@/server/shopify/askcart";
 import { askCartToken } from "@/server/shopify/askcart-token";
 import { CatalogMcpError, catalogMcpProfileUrl, isShopifyMcp, mcpCatalog } from "@/server/shopify/catalog-mcp";
 
@@ -628,7 +628,8 @@ export async function runCatalogSync(payload: unknown) {
     // A failed run keeps the walk, so the next run carries on, unless AskCart refused the request itself (400:
     // invalid_cursor): resuming it would fail forever, so the next run starts over.
     const keepWalk = walk && !(error instanceof AskCartError && error.status === 400);
-    await record(scope, { at, source: found.source, ...kept, ...(keepWalk && { walk }) }, refused ? { ...REFUSED, error: refusal } : FAILED);
+    const note = refused ? { ...REFUSED, error: refusal } : isAskCartStoreLapsed(error) ? { ...FAILED, error: ASKCART_STORE_LAPSED } : FAILED;
+    await record(scope, { at, source: found.source, ...kept, ...(keepWalk && { walk }) }, note);
     throw error;
   }
 }

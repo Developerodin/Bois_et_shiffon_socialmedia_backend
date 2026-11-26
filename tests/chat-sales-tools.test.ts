@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The tools over a stubbed data layer: what they let through, refuse, clean and say. The SQL itself is checked against
-// a real Postgres (see the branch's handover notes), not by matching its text here.
+// a real Postgres in tests/db/sales-analysis.db.test.ts, not by matching its text here.
 const perms = vi.hoisted(() => ({ set: new Set(["crm.read"]) }));
 const data = vi.hoisted(() => ({
   salesSummary: vi.fn(),
@@ -52,7 +52,7 @@ beforeEach(() => {
   perms.set = new Set(["crm.read"]);
   data.hasOrderLines.mockResolvedValue(true);
   data.truncatedOrders.mockResolvedValue(0);
-  data.salesBreakdown.mockResolvedValue({ basis: "orders", columns: [], rows: [], moreGroups: 0 });
+  data.salesBreakdown.mockResolvedValue({ columns: [], rows: [], moreGroups: 0 });
   data.topProducts.mockResolvedValue({ rows: [], moreGroups: 0 });
   data.productSales.mockResolvedValue({ variants: [], weeks: [] });
   data.stockRisk.mockResolvedValue({ sellers: [], slow: [] });
@@ -141,7 +141,7 @@ describe("per-product tools without line items", () => {
 
   it("a line-based breakdown says so too", async () => {
     data.hasOrderLines.mockResolvedValue(false);
-    data.salesBreakdown.mockResolvedValue({ basis: "lines", columns: [], rows: [], moreGroups: 0 });
+    data.salesBreakdown.mockResolvedValue({ columns: [], rows: [], moreGroups: 0 });
     expect((await run(chatTools(scope).salesBreakdown, { ...range, by: "vendor" })).note).toMatch(/line items/);
   });
 
@@ -152,7 +152,7 @@ describe("per-product tools without line items", () => {
 
 describe("salesBreakdown", () => {
   it("passes the grouping through, cleans shop text and says how many groups are hidden", async () => {
-    data.salesBreakdown.mockResolvedValue({ basis: "orders", columns: ["channel", "currency", "orders"], rows: [[`web${BIDI}shop`, "EUR", 4]], moreGroups: 3 });
+    data.salesBreakdown.mockResolvedValue({ columns: ["channel", "currency", "orders"], rows: [[`web${BIDI}shop`, "EUR", 4]], moreGroups: 3 });
     const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "channel", limit: 1 });
     expect(data.salesBreakdown).toHaveBeenCalledWith(scope, range, "channel", 1);
     expect(out.rows).toEqual([["web shop", "EUR", 4]]);
@@ -160,16 +160,30 @@ describe("salesBreakdown", () => {
   });
 
   it("weeks: says the first and last can be partial, and time groups keep the most recent", async () => {
-    data.salesBreakdown.mockResolvedValue({ basis: "orders", columns: [], rows: [["2026-11-02", "EUR", 1]], moreGroups: 1 });
+    data.salesBreakdown.mockResolvedValue({ columns: [], rows: [["2026-11-02", "EUR", 1]], moreGroups: 1 });
     const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "week" });
     expect(out.notes).toEqual([expect.stringContaining("most recent"), expect.stringContaining("partial")]);
   });
 
   it("line-based groups say revenue is net and count incomplete orders", async () => {
     data.truncatedOrders.mockResolvedValue(2);
-    data.salesBreakdown.mockResolvedValue({ basis: "lines", columns: [], rows: [["Tables", "EUR", 1, 2, "90.00"]], moreGroups: 0 });
+    data.salesBreakdown.mockResolvedValue({ columns: [], rows: [["Tables", "EUR", 1, 2, "90.00"]], moreGroups: 0 });
     const out = await run(chatTools(scope).salesBreakdown, { ...range, by: "collection" });
     expect(out.notes).toEqual([expect.stringContaining("net of refunds"), expect.stringMatching(/^2 orders .* incomplete/)]);
+  });
+});
+
+describe("incomplete-orders count", () => {
+  it("is read once per period in a message, even by calls made in parallel", async () => {
+    const t = chatTools(scope);
+    const october = { ...range, from: "2026-10-01" };
+    await Promise.all([run(t.topProducts, range), run(t.stockRisk, range), run(t.productSales, october)]);
+    expect(data.truncatedOrders).toHaveBeenCalledTimes(2);
+    expect(data.truncatedOrders).toHaveBeenCalledWith(scope, range);
+    expect(data.truncatedOrders).toHaveBeenCalledWith(scope, october);
+    // The next message reads it afresh.
+    await run(chatTools(scope).topProducts, range);
+    expect(data.truncatedOrders).toHaveBeenCalledTimes(3);
   });
 });
 

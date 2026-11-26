@@ -14,8 +14,8 @@ import { sameRow, shopifyRows } from "@/server/catalog/sync";
 import { fetchAskCartOrders } from "@/server/data/shopify-orders";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import {
-  ASKCART_KEY_REFUSED, ASKCART_REFUSED, AskCartError, askCartCatalog, askCartConfig, askCartVariants, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
-  askCartShop, askCartTokenRequest, isAskCart,
+  ASKCART_KEY_REFUSED, ASKCART_REFUSED, ASKCART_SCOPE_MISSING, AskCartError, isAskCartStoreLapsed, askCartCatalog, askCartConfig, askCartVariants, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
+  askCartShop, askCartTokenRequest, isAskCart, PACE_MS, resetAskCartPace,
 } from "@/server/shopify/askcart";
 
 // Shapes from the AskCart repo's docs/partner-api.md (2026-11-24).
@@ -53,6 +53,7 @@ const urlOf = (call: unknown[]) => new URL(call[0] as string);
 const error = (status: number, code: string, extra: Record<string, unknown> = {}, headers?: Record<string, string>): Res => ({ status, body: { error: code, ...extra }, headers });
 
 beforeEach(() => {
+  resetAskCartPace();
   vi.stubEnv("ASKCART_URL", "https://askcart.test/");
   vi.stubEnv("ASKCART_SECRET", SECRET);
 });
@@ -61,6 +62,9 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
+
+/** The Retry-After waits, without the pacing between requests (its own test checks those). */
+const retryWaits = () => vi.mocked(sleep).mock.calls.filter((c) => c[1] !== "pace").map((c) => c[0]);
 
 /** Every error a call throws, with the secret checked absent from its message. */
 async function thrown(p: Promise<unknown>) {
@@ -90,12 +94,20 @@ describe("askCartGet", () => {
   it.each([
     [error(401, "unauthorized"), ASKCART_KEY_REFUSED],
     [error(503, "store_not_connected", {}, { "retry-after": "60" }), ASKCART_REFUSED],
-    [error(503, "store_reconnect_needed"), ASKCART_REFUSED],
+    [error(403, "insufficient_scope", { scope: "read:orders" }), ASKCART_SCOPE_MISSING],
   ])("%j → ReconnectNeeded with a readable reason", async (res, reason) => {
     stubFetch(res);
     const e = await thrown(askCartShop(SECRET));
     expect(e).toBeInstanceOf(ReconnectNeeded);
     expect(askCartReason(e)).toBe(reason);
+  });
+
+  it("503 store_reconnect_needed is temporary: an AskCartError (our token stays valid), not ReconnectNeeded, and not waited on", async () => {
+    const f = stubFetch(error(503, "store_reconnect_needed", {}, { "retry-after": "5" }));
+    const e = await thrown(askCartShop(SECRET));
+    expect(e).not.toBeInstanceOf(ReconnectNeeded);
+    expect(isAskCartStoreLapsed(e)).toBe(true);
+    expect(f).toHaveBeenCalledOnce();
   });
 
   it("429 waits Retry-After and retries, then succeeds", async () => {
@@ -175,6 +187,15 @@ describe("fetchAskCartOrders", () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
+  it("returns orders oldest update first, an order re-read with a newer update moving to its new place", async () => {
+    stubFetch(
+      { body: page([order(1, "2026-11-03T10:00:00Z"), order(2, "2026-11-04T10:00:00Z")], { complete: false, nextCursor: "c1" }) },
+      { body: page([order(1, "2026-11-05T10:00:00Z"), order(3, "2026-11-04T12:00:00Z")]) },
+    );
+    const { orders } = await fetchAskCartOrders(SECRET, SINCE);
+    expect(orders.map((o) => o.name)).toEqual(["#2", "#3", "#1"]);
+  });
+
   it("a page AskCart cut short (rateLimited) is normal: it waits the page's Retry-After and resumes from nextCursor", async () => {
     vi.mocked(sleep).mockClear();
     const f = stubFetch(
@@ -187,7 +208,7 @@ describe("fetchAskCartOrders", () => {
     expect(stoppedReason).toBeUndefined();
     expect(orders.map((o) => o.name)).toEqual(["#1", "#2"]);
     // waited exactly what each page said (the sleep is stubbed to return at once)
-    expect(vi.mocked(sleep).mock.calls.map((c) => c[0])).toEqual([5_000, 2_000]);
+    expect(retryWaits()).toEqual([5_000, 2_000]);
     expect(urlOf(f.mock.calls[1]).searchParams.get("cursor")).toBe("c1");
     expect(urlOf(f.mock.calls[2]).searchParams.get("cursor")).toBe("c1");
   });
@@ -199,7 +220,7 @@ describe("fetchAskCartOrders", () => {
       { body: page([]) },
     );
     await fetchAskCartOrders(SECRET, SINCE);
-    expect(vi.mocked(sleep).mock.calls.map((c) => c[0])).toEqual([1_000]);
+    expect(retryWaits()).toEqual([1_000]);
   });
 
   it("a Retry-After over 30 s stops as rate_limited with the orders read so far", async () => {
@@ -220,7 +241,7 @@ describe("fetchAskCartOrders", () => {
     expect(orders).toHaveLength(1);
   });
 
-  it.each([error(401, "unauthorized"), error(503, "store_reconnect_needed"), error(503, "store_not_connected")])(
+  it.each([error(401, "unauthorized"), error(403, "insufficient_scope"), error(503, "store_not_connected")])(
     "%j throws ReconnectNeeded for the caller to mark the connection",
     async (res) => {
       stubFetch({ body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1" }) }, res);
@@ -320,7 +341,7 @@ describe("askCartCatalog", () => {
   });
 
   it("a refused store throws ReconnectNeeded, as the token path does", async () => {
-    stubFetch(error(503, "store_reconnect_needed"));
+    stubFetch(error(503, "store_not_connected"));
     expect(await thrown(askCartCatalog(SECRET, null, 5000))).toBeInstanceOf(ReconnectNeeded);
   });
 
@@ -328,6 +349,16 @@ describe("askCartCatalog", () => {
     expect(isAskCart({ externalAccountId: "askcart" })).toBe(true);
     expect(isAskCart({ externalAccountId: "shop.myshopify.com" })).toBe(false);
   });
+});
+
+it("requests on one token go at least PACE_MS apart, even two at once; another token isn't held back", async () => {
+  stubFetch({ body: { name: "a" } }, { body: { name: "b" } }, { body: { name: "c" } });
+  const waits = vi.mocked(sleep);
+  waits.mockClear();
+  await Promise.all([askCartShop("pace_token_1"), askCartShop("pace_token_1"), askCartShop("pace_token_2")]);
+  const ms = waits.mock.calls.filter((c) => c[1] === "pace").map((c) => c[0] as number);
+  expect(ms).toHaveLength(1);
+  expect(ms[0]).toBeGreaterThan(PACE_MS - 50);
 });
 
 it("AskCartError's message is the status and code only", () => {

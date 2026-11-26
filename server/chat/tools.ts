@@ -8,7 +8,7 @@ import {
 } from "@/server/data/sales-analysis";
 import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
 import { addDays, badRangeDetail, brandTimeZone, rangeDays, zoneToday } from "@/server/data/sources";
-import { MAX_SALES_CALLS } from "@/server/chat/turn";
+import { MAX_SALES_CALLS, SALES_HIDDEN } from "@/server/chat/turn";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
@@ -66,7 +66,7 @@ export function chatTools(scope: ChatScope) {
   // well as by the route's activeTools, which can't stop several calls made in parallel within one step.
   let salesCalls = 0;
   const salesGate = async () => {
-    if (!(await can("crm.read"))) return denied("sales");
+    if (!(await can("crm.read"))) return SALES_HIDDEN;
     if (++salesCalls > MAX_SALES_CALLS) return SALES_LIMIT;
     return null;
   };
@@ -77,10 +77,21 @@ export function chatTools(scope: ChatScope) {
     const today = zoneToday(isTimeZone(zone) ? zone : DEFAULT_TIME_ZONE);
     return { from: addDays(today, -29), to: today };
   };
-  // Per-product numbers miss lines of orders AskCart sent incomplete (re-read by the sync within a day).
-  const truncatedNote = async (range: DateRange) => {
-    const n = await truncatedOrders(scope, range);
-    return n ? [`${n} order${n === 1 ? "" : "s"} in this period have incomplete line items, so per-product numbers may be slightly low.`] : [];
+  // Per-product numbers miss lines of orders AskCart sent incomplete (re-read by the sync within a day). Counted once
+  // per period in a message: a report makes several sales calls over one period, often in parallel, so the promise is
+  // kept and shared. A failed count is dropped, so a later call can try again.
+  const truncated = new Map<string, Promise<string[]>>();
+  const truncatedNote = (range: DateRange) => {
+    const key = `${range.from}|${range.to}`;
+    let note = truncated.get(key);
+    if (!note) {
+      note = truncatedOrders(scope, range).then((n) =>
+        n ? [`${n} order${n === 1 ? "" : "s"} in this period have incomplete line items, so per-product numbers may be slightly low.`] : [],
+      );
+      note.catch(() => truncated.delete(key));
+      truncated.set(key, note);
+    }
+    return note;
   };
   return {
     listDocuments: tool({

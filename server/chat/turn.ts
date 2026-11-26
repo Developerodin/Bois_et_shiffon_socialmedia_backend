@@ -28,6 +28,20 @@ export const MAX_SALES_CALLS = 8;
 export const readsShopData = (history: UIMessage[], tools: ReadonlySet<string> = SHOP_DATA_TOOLS) =>
   history.some((m) => m.parts.some((p) => p.type.startsWith("tool-") && tools.has(p.type.slice(5))));
 
+/** What a sales step holds for someone without crm.read: the sales tools' refusal, and a saved step's output once hidden. */
+export const SALES_HIDDEN = { error: "Your role can't see sales." };
+const isSalesOutput = (p: UIMessage["parts"][number]) => p.type.startsWith("tool-") && SALES_TOOLS.has(p.type.slice(5)) && "output" in p;
+
+/**
+ * A saved thread as a viewer without crm.read may see it: the sales tools' figures swapped for SALES_HIDDEN, the step
+ * and its input kept (the chat lists the steps it took). Someone who loses crm.read keeps their old threads, and
+ * the figures the tools returned then must not stay readable in them. For reading only: never saved back, so the
+ * figures are there again if the role regains crm.read. It hides the raw tool payloads only: figures the assistant
+ * already wrote in its own text stay visible.
+ */
+export const hideSalesOutputs = (messages: UIMessage[]): UIMessage[] =>
+  messages.map((m) => (m.parts.some(isSalesOutput) ? { ...m, parts: m.parts.map((p) => (isSalesOutput(p) ? ({ ...p, output: SALES_HIDDEN } as typeof p) : p)) } : m));
+
 /**
  * The tools a step of the turn may use (undefined: all of them). Text planted in a product title could steer a web
  * search that carries shop data out, so once shop data is in what the model sees (history, or this turn's calls), web

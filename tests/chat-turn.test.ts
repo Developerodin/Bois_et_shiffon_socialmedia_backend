@@ -1,7 +1,7 @@
 import type { UIMessage } from "ai";
 import { describe, expect, it } from "vitest";
 import { productPageWhere } from "@/server/catalog/products";
-import { activeTools, askedToSearch, historyWindow, MAX_SALES_CALLS, MODEL_HISTORY, readsShopData } from "@/server/chat/turn";
+import { activeTools, askedToSearch, hideSalesOutputs, historyWindow, MAX_SALES_CALLS, MODEL_HISTORY, readsShopData, SALES_HIDDEN } from "@/server/chat/turn";
 
 const msg = (text: string, role: "user" | "assistant" = "user"): UIMessage => ({ id: text, role, parts: [{ type: "text", text }] });
 
@@ -68,5 +68,28 @@ describe("product search text", () => {
   it("treats a typed % or _ as a character, not a wildcard", () => {
     const where = productPageWhere({ q: "50%_off", stock: "" });
     expect(where).toEqual({ AND: [{ OR: [{ title: { contains: "50\\%\\_off", mode: "insensitive" } }, { sku: { contains: "50\\%\\_off", mode: "insensitive" } }] }] });
+  });
+});
+
+describe("hideSalesOutputs", () => {
+  it("blanks saved sales figures and keeps the step, its input and every other part", () => {
+    const thread = [
+      msg("how are sales?"),
+      {
+        id: "a", role: "assistant", parts: [
+          { type: "tool-salesSummary", toolCallId: "1", state: "output-available", input: { from: "2026-11-01" }, output: { currencies: [{ total: "900.00" }] } },
+          { type: "tool-findProducts", toolCallId: "2", state: "output-available", input: {}, output: { products: ["Oak table"] } },
+          { type: "tool-topProducts", toolCallId: "3", state: "output-error", input: {}, errorText: "failed" },
+          { type: "text", text: "Sales were up." },
+        ],
+      },
+    ] as unknown as UIMessage[];
+    const before = JSON.stringify(thread);
+    const out = hideSalesOutputs(thread) as unknown as { parts: Record<string, unknown>[] }[];
+    expect(JSON.stringify(out)).not.toContain("900.00");
+    expect(out[1].parts[0]).toEqual({ type: "tool-salesSummary", toolCallId: "1", state: "output-available", input: { from: "2026-11-01" }, output: SALES_HIDDEN });
+    expect(out[1].parts.slice(1)).toEqual((thread[1].parts as unknown[]).slice(1));
+    expect(out[0]).toBe(thread[0]);
+    expect(JSON.stringify(thread)).toBe(before); // the saved thread itself is untouched
   });
 });

@@ -15,8 +15,8 @@ import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from ".
  * none yet = the last 60 days, all `read_orders` reaches) and upserts one ShopOrder row per order. Upserts are safe
  * to repeat, so a run that stopped short (capped, rate limited) still writes what it read and moves the cursor; the
  * next run carries on from there. A missing read_orders is a "permission" stop and never marks the connection.
- * AskCart only: the cursor is held at an order AskCart sent with incomplete lines (refetchFrom), so the next run reads
- * it again, for at most REFETCH_HOURS.
+ * AskCart only: a run that read to the end holds the cursor at an order AskCart sent with incomplete lines
+ * (refetchFrom), so the next run reads it again, for at most REFETCH_HOURS.
  */
 
 export const FIRST_RUN_DAYS = 60;
@@ -181,8 +181,12 @@ export async function syncShopifyOrders(
     await upsertOrders(scope, read.orders.slice(written, written + PAGE));
   }
   // An order AskCart sent with incomplete lines is read again: the cursor stays at it (the next run re-reads from an
-  // hour before it).
-  const held = isAskCart(conn) ? await refetchFrom(scope, now) : null;
+  // hour before it). Only a run that read to the end holds it; one that stopped short (capped, rate limited, deadline)
+  // saves how far it got, or a busy store's cursor could stay pinned for REFETCH_HOURS. So the cursor can step back
+  // after a stopped run: the next run that reads to the end returns it to the held order. Ceiling: a store whose
+  // orders since the held one take more than one run alternates stopped and full runs until the order completes or
+  // ages past REFETCH_HOURS; every run still moves new orders in.
+  const held = isAskCart(conn) && !reason ? await refetchFrom(scope, now) : null;
   const cursor = held && held < cursorEnd ? held : cursorEnd;
   return { count: Math.min(written, read.orders.length), reason, cursor: cursor.toISOString() };
 }

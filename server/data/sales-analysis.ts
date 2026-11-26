@@ -31,9 +31,12 @@ type Scope = { workspaceId: string; brandId: string };
 const id = (alias: string) => Prisma.raw(`"${alias}"`);
 /** Net units of the lines aliased `a`. */
 const units = (a: string) => Prisma.sql`COALESCE(${id(a)}."currentQuantity", ${id(a)}."quantity")`;
-/** Net sales of the lines aliased `a` (see the header). */
+/**
+ * Net sales of the lines aliased `a` (see the header). A line with quantity 0 and no net price has no unit price to
+ * work out; it sold nothing, so it counts 0 (a NULL would make a group's sum NULL and sort it first).
+ */
 const netSales = (a: string) =>
-  Prisma.sql`${units(a)} * COALESCE(${id(a)}."netUnitPrice", ${id(a)}."discountedTotal" / NULLIF(${id(a)}."quantity", 0))`;
+  Prisma.sql`COALESCE(${units(a)} * COALESCE(${id(a)}."netUnitPrice", ${id(a)}."discountedTotal" / NULLIF(${id(a)}."quantity", 0)), 0)`;
 /** A variant's key: its id; a deleted variant of a live product, the product; a line without a product, OTHER_ITEMS. */
 const VARIANT_KEY = Prisma.sql`COALESCE(l."variantId", 'product:' || l."productId", '(other)')`;
 const PRODUCT_KEY = Prisma.sql`COALESCE(l."productId", '(other)')`;
@@ -107,20 +110,20 @@ const ORDER_KEYS: Partial<Record<Breakdown, Prisma.Sql>> = {
   channel: Prisma.sql`COALESCE(o."sourceName", '(unknown)')`,
   fulfillmentStatus: Prisma.sql`COALESCE(o."fulfillmentStatus", '(not sent)')`,
   financialStatus: Prisma.sql`COALESCE(o."financialStatus", '(not sent)')`,
-  // A code on fewer than 2 counted orders can be personal (a one-time code made for one customer): never shown.
+  // A code on fewer than 2 counted orders can be personal (a one-time code made for one customer): never shown. It
+  // counts orders, not customers, so one customer's personal code used on two orders is shown (the owner's choice).
   discountCode: Prisma.sql`CASE WHEN dc.code IS NULL THEN '(none)' WHEN cn.n >= 2 THEN dc.code ELSE ${OTHER_CODES} END`,
 };
 const DISCOUNT_JOIN = Prisma.sql`
   LEFT JOIN LATERAL unnest(o."discountCodes") AS dc(code) ON true
   LEFT JOIN (SELECT code, count(DISTINCT x.id) AS n FROM co x, unnest(x."discountCodes") AS code GROUP BY code) cn ON cn.code = dc.code`;
 
-export type BreakdownResult = Capped & { basis: "orders" | "lines"; columns: string[] };
+export type BreakdownResult = Capped & { columns: string[] };
 
 type OrderGroupRow = {
   key: string; currency: string; total_groups: number; orders: number; gross: Prisma.Decimal; discounts: Prisma.Decimal;
   net_sales: Prisma.Decimal; total: Prisma.Decimal; refunded: Prisma.Decimal;
 };
-type LineGroupRow = { key: string; currency: string; total_groups: number; orders: number; units: number; revenue: Prisma.Decimal };
 
 /**
  * Sales per group, per currency. Time groups keep the newest (when capped) and come oldest first; the others by net
@@ -132,20 +135,9 @@ export async function salesBreakdown(scope: Scope, range: DateRange, by: Breakdo
   const cap = Math.min(limit, MAX_ANALYSIS_ROWS);
   const time = TIME_BREAKDOWNS.includes(by);
   if (by === "collection" || by === "vendor") {
-    const rows = await prisma.$queryRaw<LineGroupRow[]>`
-      WITH ${brandBounds(scope, range)}, g AS (
-        SELECT ${by === "vendor" ? VENDOR_KEY : COLLECTION_KEY} AS key, l."currency" AS currency, count(DISTINCT l."orderShopifyId")::int AS orders,
-               sum(${units("l")})::int AS units, sum(${netSales("l")}) AS revenue
-        FROM (${countedLines(scope)}) l ${by === "collection" ? COLLECTION_JOIN : Prisma.empty}
-        GROUP BY 1, 2
-      ), ${capped(Prisma.sql`revenue DESC, key`)}
-      SELECT key, currency, orders, units, revenue, total_groups FROM r WHERE ${shown(cap)} ORDER BY currency, rn`;
-    return {
-      basis: "lines",
-      columns: [by, "currency", "orders", "units", "revenue"],
-      rows: rows.map((r) => [r.key, r.currency, r.orders, r.units, money(r.revenue)]),
-      moreGroups: hidden(rows),
-    };
+    // Same groups as topProducts by revenue, its columns reordered to this tool's.
+    const { rows, moreGroups } = await topProducts(scope, range, "revenue", by, cap);
+    return { columns: [by, "currency", "orders", "units", "revenue"], rows: rows.map(([key, currency, units, revenue, orders]) => [key, currency, orders, units, revenue]), moreGroups };
   }
   // Each order once per key (DISTINCT), then summed: an order's two rare codes are one "(other codes)" order.
   const rows = await prisma.$queryRaw<OrderGroupRow[]>`
@@ -160,7 +152,6 @@ export async function salesBreakdown(scope: Scope, range: DateRange, by: Breakdo
     SELECT key, currency, orders, gross, discounts, net_sales, total, refunded, total_groups FROM r WHERE ${shown(cap)}
     ORDER BY currency, ${time ? Prisma.sql`key` : Prisma.sql`rn`}`;
   return {
-    basis: "orders",
     columns: [by, "currency", "orders", "gross", "discounts", "netSales", "total", "refunded", "avgOrderValue"],
     rows: rows.map((r) => [
       r.key, r.currency, r.orders, money(r.gross), money(r.discounts), money(r.net_sales), money(r.total), money(r.refunded),
@@ -196,6 +187,7 @@ export async function topProducts(scope: Scope, range: DateRange, rankBy: "reven
       FROM x l GROUP BY k, l."currency"
     ), ${capped(order)}
     SELECT name, currency, units, revenue, orders, total_groups FROM r WHERE ${shown(cap)} ORDER BY currency, rn`;
+  // salesBreakdown reads these rows by position (name, currency, units, revenue, orders): reorder both together.
   return { rows: rows.map((r) => [r.name, r.currency, r.units, money(r.revenue), r.orders]), moreGroups: hidden(rows) };
 }
 

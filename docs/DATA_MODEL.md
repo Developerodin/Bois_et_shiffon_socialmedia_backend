@@ -377,7 +377,8 @@ Built in Prisma (`prisma/schema.prisma`); section 5 is only a sketch.
 Migration `20261125150000_shop_order_lines`. No customer data anywhere: AskCart never sends any.
 
 - `ShopOrder` (one Shopify order's totals, upserted on `(brandId, shopifyId)`; an older read never overwrites a newer
-  one) gains the following columns. They are AskCart only; the pasted-token path leaves them at their defaults.
+  one) gains the following columns. They are AskCart only; the pasted-token path writes their defaults when it inserts an
+  order and keeps the stored values when it updates one.
   - `fulfillmentStatus String?` and `financialStatus String?` (Shopify's display enums).
   - `discountCodes String[]`: codes only. They can be personal, so the chat shows only codes used on 2 or more orders.
   - `lineItemsTruncated Boolean`: more than 100 lines, or AskCart paused mid-order. The sync re-reads the second kind
@@ -388,9 +389,12 @@ Migration `20261125150000_shop_order_lines`. No customer data anywhere: AskCart 
   - Columns: `productId`, `variantId` (null when deleted), `title` / `variantTitle` (null for lines without a product),
     `sku`, `quantity` (as ordered), `currentQuantity` (net of refunds), `unitPrice`, `discountedTotal` (includes
     refunded units), `netUnitPrice` (after every discount), `currency`.
-  - Net line sales = `currentQuantity × netUnitPrice`.
-  - Written only when the order's row is written. An order read without line items keeps its lines; lines gone from the
-    order are deleted.
+  - Net line sales = `currentQuantity × netUnitPrice`, with `quantity` when there is no `currentQuantity` and
+    `discountedTotal ÷ quantity` when there is no `netUnitPrice`. A line with neither a `netUnitPrice` nor a quantity to
+    divide by counts 0.
+  - Written only when the order's row is written, and upserted. An order read without line items keeps its lines; lines
+    gone from the order are deleted only when the order was sent whole (not flagged `lineItemsTruncated`, no line we
+    couldn't read).
 - `Product` gains `vendor String?`, `tags String[]` (sorted) and `collections Json?` (`[{ id, title, handle }]`, sorted
   by id). They are AskCart products only; the other sources never touch them. The chat matches a line to its
   catalogue row by `Product.externalId = ShopOrderLine.variantId` (source SHOPIFY).

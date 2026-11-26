@@ -15,7 +15,7 @@ vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
 import { prisma } from "@/server/db/prisma";
 import { enqueueDailyCatalogSyncs, CATALOG_SYNC_JOB } from "@/server/catalog/sync";
 import { claimNextJob, enqueueJob } from "@/server/jobs/queue";
-import { DATA_SYNC_JOB, enqueueDailyDataSyncs, enqueueSourceSync, registerSync, runDataSync, spreadSecs, type SyncContext, type SyncOutcome } from "@/server/data/sources";
+import { DATA_SYNC_JOB, FOLLOW_UPS, enqueueDailyDataSyncs, enqueueSourceSync, registerSync, runDataSync, spreadSecs, type SyncContext, type SyncOutcome } from "@/server/data/sources";
 import { ReconnectNeeded } from "@/server/services/connections";
 import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/data-sources/route";
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/data-sources/[kind]/sync/route";
@@ -192,6 +192,36 @@ describe("runDataSync", () => {
     expect(retry.runAt.getTime()).toBeGreaterThan(Date.now() + 50 * 60_000);
   });
 
+  it("a cursor run that stopped partway queues one follow-up a minute later, at most FOLLOW_UPS in a row; a full run none", async () => {
+    const s = await source("ds-a", "SEARCH_CONSOLE", { cursor: "2026-11-20T00:00:00.000Z" });
+    next = async () => ({ count: 100, reason: "partial", cursor: "2026-11-21T00:00:00.000Z" });
+    const rewind = () => prisma.dataSource.update({ where: { id: s.id }, data: { cursor: "2026-11-20T00:00:00.000Z" } });
+    await runDataSync(payload(s, { mode: "manual" }), lease);
+    await rewind(); // a duplicate delivery of the same job, as if both read the source before either saved
+    await runDataSync(payload(s, { mode: "manual" }), lease);
+    const [more, ...rest] = await dataJobs(s.id);
+    expect(rest).toHaveLength(0);
+    expect(more!.payload).toMatchObject({ mode: "manual", follow: 1 });
+    expect(more!.runAt.getTime()).toBeGreaterThan(Date.now() + 50_000);
+
+    // A later chain whose step ends on the same cursor as one that already ran still queues its own follow-up.
+    await prisma.job.update({ where: { id: more!.id }, data: { status: "COMPLETED" } });
+    await rewind();
+    await runDataSync(payload(s, { mode: "manual" }), { jobId: "a-later-job", leasedBy: null });
+    expect(await dataJobs(s.id)).toHaveLength(2);
+
+    await prisma.job.deleteMany({});
+    next = async () => ({ count: 1, reason: "rate_limited", cursor: "2026-11-22T00:00:00.000Z" });
+    await runDataSync(payload(s, { mode: "manual", follow: FOLLOW_UPS }), lease);
+    expect(await dataJobs(s.id)).toHaveLength(0);
+
+    next = async () => ({ count: 1, reason: "partial", cursor: "2026-11-22T00:00:00.000Z" }); // cursor didn't move
+    await runDataSync(payload(s, { mode: "manual" }), lease);
+    next = async () => ({ count: 5, cursor: "2026-11-19T00:00:00.000Z" }); // read to the end, stepped back
+    await runDataSync(payload(s, { mode: "manual" }), lease);
+    expect(await dataJobs(s.id)).toHaveLength(0);
+  });
+
   it("a daily run waits five minutes behind a running backfill of the same source", async () => {
     const s = await source("ds-a", "SEARCH_CONSOLE");
     const backfill = await enqueueSourceSync(s, "backfill", { window: { from: "2026-01-01", to: "2026-01-30", end: "2026-01-30" } });
@@ -243,6 +273,36 @@ describe("GET data-sources", () => {
     const manager = await get();
     expect(manager.map((s) => s.kind)).toEqual(["SEARCH_CONSOLE", "SHOPIFY_ORDERS", "META_ADS"]);
     expect(manager[1]!.label).toBe("shop.myshopify.com");
+  });
+
+  it("says a run is queued or running from the job table, with when it started; nothing for a run due later", async () => {
+    auth.perms = new Set(["brand.read", "analytics.read", "crm.read"]);
+    const search = await source("ds-a", "SEARCH_CONSOLE");
+    const orders = await source("ds-a", "SHOPIFY_ORDERS");
+    await enqueueSourceSync(search, "manual");
+    await enqueueSourceSync(orders, "daily", { runAt: new Date(Date.now() + 60 * 60_000) }); // the sweep's slot, an hour out
+    let [s, o] = await get();
+    expect(s!.sync).toMatchObject({ state: "queued" });
+    expect(o!.sync).toBeNull();
+
+    // While it runs: the job is RUNNING and the run has stamped its start.
+    let seen: unknown, seenLast: unknown;
+    next = async () => { [s] = await get(); seen = s!.sync; seenLast = s!.lastResult; return { count: 3 }; };
+    const [job] = await dataJobs(search.id);
+    await prisma.job.update({ where: { id: job!.id }, data: { status: "RUNNING", leasedUntil: new Date(Date.now() + 60_000) } });
+    await runDataSync(job!.payload, lease);
+    expect(seen).toMatchObject({ state: "running", since: expect.any(String) });
+    expect(seenLast).toBeNull(); // a first-ever run: only the start stamp is stored, no result yet
+
+    // A run whose process died: RUNNING with its lease lapsed is not "running".
+    await prisma.job.update({ where: { id: job!.id }, data: { leasedUntil: new Date(Date.now() - 1000) } });
+    expect((await get())[0]!.sync).toBeNull();
+    await prisma.job.update({ where: { id: job!.id }, data: { status: "COMPLETED" } });
+    [s] = await get();
+    expect(s!.sync).toBeNull();
+    const last = s!.lastResult as { startedAt: string; at: string };
+    expect(Date.parse(last.startedAt)).toBeLessThanOrEqual(Date.parse(last.at));
+    expect(s!.lastResult).not.toHaveProperty("runningSince");
   });
 });
 
