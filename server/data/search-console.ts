@@ -28,7 +28,8 @@ import type { SyncStop } from "@/server/data/sync-stop";
  *   and long-term (1-day chunks): "Queries are expensive when you group and/or filter by either page or query string.
  *   Queries grouped/filtered by page AND query string are the most expensive", and load grows with the date range,
  *   so every page and query call here asks for one day. Exceeding it returns "quota exceeded"; Google says wait 15
- *   minutes (the backfill chain's retry does that). A daily run makes 1 + 3 × 3 = 10 calls, a 30-day window 91.
+ *   minutes (a rate-limited backfill window is retried an hour later, PARTIAL_RETRY_MS in sources.ts; a daily run is
+ *   not retried, and the next day's run re-reads the 3 days). A daily run makes 1 + 3 × 3 = 10 calls, a 30-day window 91.
  * - https://developers.google.com/webmaster-tools/v1/searchanalytics/query : rowLimit 1–25,000 (default 1,000), paging
  *   by startRow, so 500 rows need one request. "Results are sorted by click count, in descending order, unless you
  *   group by date": the top 500 are the 500 most-clicked rows (ties arbitrary), which declines.ts's cap floor relies
@@ -37,7 +38,9 @@ import type { SyncStop } from "@/server/data/sync-stop";
  *   sorted by clicks; "Data is typically available after 2-3 days"; grouping by page and/or query "may drop some data".
  * - https://developers.google.com/search/blog/2022/10/performance-data-deep-dive : "the actual anonymized queries are
  *   always omitted from the tables", so query sums sit below the site total.
- * - Not stated anywhere read: whether IDN hosts come back as punycode or Unicode; urlKey (shared/seo-url.ts) folds both.
+ * - Not stated anywhere read: whether IDN hosts come back as punycode or Unicode. urlKey (shared/seo-url.ts) folds
+ *   both into one key, but reads match stored rows by urlVariants' exact (punycode) spellings, so a page stored with a
+ *   Unicode host or a raw non-ASCII path would match no variant (ceiling, named at urlVariants).
  */
 const API = "https://www.googleapis.com/webmasters/v3";
 export const SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly";
