@@ -28,6 +28,20 @@ export async function collectSiteFacts(startUrl: string, onPage?: (url: string, 
   return { facts, failures };
 }
 
+/**
+ * Whether the crawl failed because the site refused us (bot protection), not because it was down or slow: the home
+ * page answered 401, 403 or 429, or every page that failed answered 401 or 403. robots.txt refusals and network
+ * errors (timeouts, DNS, 5xx) are not "blocked"; they keep the ordinary "could not read" failure.
+ */
+export function siteRefusedUs(startUrl: string, failures: Array<{ url: string; error: string }>) {
+  const status = (f: { error: string }) => Number(/^HTTP (\d{3})\b/.exec(f.error)?.[1] ?? 0);
+  // The crawl records the home page as a normalised URL (trailing slash), so compare normalised forms.
+  const home = new URL(startUrl).href;
+  const sameUrl = (u: string) => URL.canParse(u) && new URL(u).href === home;
+  if (failures.some((f) => sameUrl(f.url) && [401, 403, 429].includes(status(f)))) return true;
+  return failures.length > 0 && failures.every((f) => [401, 403].includes(status(f)));
+}
+
 export type PageSpeed = {
   performance: number;
   seo: number;

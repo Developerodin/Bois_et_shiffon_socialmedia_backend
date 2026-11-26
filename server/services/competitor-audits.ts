@@ -1,3 +1,4 @@
+import { blockedAuditError } from "@/server/agents/definitions/site-audit";
 import { startAgentRun } from "@/server/agents/engine";
 import { prisma } from "@/server/db/prisma";
 import { AUDIT_FRESH_DAYS, creditBalance, CREDIT_COSTS, InsufficientCreditsError, refundCharge, spendCredits } from "@/server/services/credits";
@@ -53,6 +54,9 @@ export async function listCompetitors(workspaceId: string, brandId: string) {
       // The latest failure, unless a successful audit landed after it.
       const fail = failed.find((r) => (r.input as { domain?: string } | null)?.domain === c.domain);
       const failedAt = fail && (fail.finishedAt ?? fail.createdAt);
+      const showFailure = !!failedAt && (!audit || failedAt > audit.createdAt);
+      // A partial audit (the site blocked our crawler) keeps its marker in the approach JSON; surface it as fields.
+      const marker = (audit?.approach ?? null) as { partial?: boolean; blockedReason?: string } | null;
       return {
         id: c.id,
         name: c.name,
@@ -60,8 +64,17 @@ export async function listCompetitors(workspaceId: string, brandId: string) {
         source: c.source,
         aiMentions: mentions.get(c.name.toLowerCase()) ?? null,
         auditRunning: runningDomains.has(c.domain),
-        auditError: failedAt && (!audit || failedAt > audit.createdAt) ? (fail?.error ?? "The audit failed.") : null,
-        audit: audit && { ...audit, createdAt: audit.createdAt.toISOString(), stale: audit.createdAt.getTime() < staleBefore },
+        auditError: showFailure ? (fail?.error ?? "The audit failed.") : null,
+        // The latest failure was the site refusing automated readers, so another audit would fail the same way. Clears
+        // like auditError: once an audit of this domain (from any workspace) is newer than that failure.
+        auditBlocked: showFailure && fail?.error === blockedAuditError(c.domain),
+        audit: audit && {
+          ...audit,
+          createdAt: audit.createdAt.toISOString(),
+          stale: audit.createdAt.getTime() < staleBefore,
+          partial: marker?.partial === true,
+          blockedReason: marker?.blockedReason ?? null,
+        },
       };
     }),
   };

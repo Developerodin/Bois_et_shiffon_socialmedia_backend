@@ -8,6 +8,7 @@ import {
   startAgentRun,
 } from "@/server/agents/engine";
 import { AGENTS } from "@/server/agents/registry";
+import { SiteBlockedError } from "@/server/agents/definitions/site-audit";
 import { AiProviderError } from "@/server/ai/provider";
 import { runCatalogPages } from "@/server/catalog/page-reader";
 import { CATALOG_PAGES_JOB, CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
@@ -103,8 +104,9 @@ export async function runDueJobs({ budgetMs = 45_000, signal }: { budgetMs?: num
       await completeJob(job);
     } catch (error) {
       // A catalogue or data sync whose token was refused waits for a person to reconnect; a story render refused
-      // (stale, approved meanwhile, text or clip window) would be refused again. Retrying can't help either.
-      const refused = ((job.type === CATALOG_SYNC_JOB || job.type === DATA_SYNC_JOB) && error instanceof ReconnectNeeded) || (job.type === STORY_RENDER_JOB && error instanceof PublishingError);
+      // (stale, approved meanwhile, text or clip window) would be refused again, and so would a site audit of a site that
+      // blocks automated readers. Retrying can't help either.
+      const refused = ((job.type === CATALOG_SYNC_JOB || job.type === DATA_SYNC_JOB) && error instanceof ReconnectNeeded) || (job.type === STORY_RENDER_JOB && error instanceof PublishingError) || error instanceof SiteBlockedError;
       const retryable = error instanceof AiProviderError ? error.retryable : !(error instanceof NothingToDoError || refused);
       const exhausted = await failJob(job, error, retryable);
       // A runner that lost its lease leaves the job to whoever holds it: its failure hooks (mark failed, refund) would
