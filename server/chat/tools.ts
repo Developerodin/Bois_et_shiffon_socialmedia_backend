@@ -336,7 +336,7 @@ export function chatTools(scope: ChatScope) {
 
     salesBreakdown: tool({
       description:
-        "Shop sales split by one dimension for a period: day, week, month or weekday (trends, best days), channel (sales channel), fulfillmentStatus, financialStatus (paid, refunded…), discountCode (which codes drive orders; codes used on fewer than 2 orders are grouped as '(other codes)' because one-time codes can be personal), collection or vendor (from line items and the catalogue). Per currency: orders, gross, discounts, net sales, total, refunded, average order value (collection/vendor: orders, net units, net revenue). At most 60 rows; use week or month for long periods.",
+        "Shop sales split by one dimension for a period: day, week, month or weekday (trends, best days), channel (sales channel), fulfillmentStatus, financialStatus (paid, refunded…), discountCode (which codes drive orders; codes used on fewer than 2 orders are grouped as '(other codes)' because one-time codes can be personal), collection or vendor (from line items and the catalogue). Per currency: orders, gross, discounts, net sales, total, refunded, average order value (collection/vendor: orders, net units, net revenue). Amounts include VAT where the shop's prices do (salesSummary's netExVat doesn't). At most 60 rows; use week or month for long periods.",
       inputSchema: SalesRange.extend({
         by: z.enum(BREAKDOWNS),
         limit: z.number().int().min(1).max(MAX_ANALYSIS_ROWS).default(MAX_ANALYSIS_ROWS),
