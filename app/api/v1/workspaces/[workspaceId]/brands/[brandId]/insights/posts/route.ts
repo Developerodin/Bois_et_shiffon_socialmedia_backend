@@ -15,7 +15,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const params = new URL(request.url).searchParams;
     const range = parseDayRange(params, POSTS_MAX_DAYS);
     if (!range) return badRange(POSTS_MAX_DAYS);
-    const body: PostInsightsDto = { posts: await postsWithMetrics(scope, range) };
+    const body: PostInsightsDto = { posts: await postsWithMetrics(scope, range, new Date(), { stories: true }) };
     return Response.json(body);
   } catch (error) {
     return fromAccessError(error);

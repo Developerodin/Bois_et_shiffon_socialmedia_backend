@@ -32,10 +32,13 @@ export type PostMetrics = {
   shares: number | null;
   saves: number | null;
   interactions: number | null;
+  /** Instagram stories only (taps forward, back, exits); absent for posts. */
+  navigation?: number | null;
 };
 
 export type PostToRead = { attemptId: string; postId: string };
-export type ConnectionToRead = { connectionId: string; provider: MetricsProvider; token: string; posts: PostToRead[] };
+/** `metrics`: read these instead of the provider's post list (Instagram stories: STORY_METRICS). */
+export type ConnectionToRead = { connectionId: string; provider: MetricsProvider; token: string; posts: PostToRead[]; metrics?: readonly string[] };
 
 export type PostReason = "permission" | "not_found" | "failed";
 
@@ -61,6 +64,11 @@ const fbFields = (metrics: readonly string[]) =>
   `insights.metric(${metrics.join(",")}),reactions.summary(total_count).limit(0),comments.summary(total_count).limit(0),shares`;
 export const FB_FIELDS = fbFields(FB_METRICS);
 export const THREADS_METRICS = ["views", "likes", "replies", "reposts", "quotes", "shares"] as const;
+/**
+ * Instagram story frames (graph.instagram.com, v23, checked against the docs on 2026-11-26). `replies` is stored as
+ * comments (as Threads replies are), `navigation` (taps forward and back, exits, next story) in its own column.
+ */
+export const STORY_METRICS = ["reach", "views", "replies", "shares", "total_interactions", "navigation"] as const;
 const METRICS: Record<MetricsProvider, readonly string[]> = { INSTAGRAM: IG_METRICS, META: FB_METRICS, THREADS: THREADS_METRICS };
 
 /**
@@ -91,7 +99,11 @@ const metricsFrom: Record<MetricsProvider, (body: Record<string, unknown>) => Po
   INSTAGRAM(body) {
     const m = insights(body.data);
     const g = (k: string) => m.get(k) ?? null;
-    return { views: g("views"), reach: g("reach"), likes: g("likes"), comments: g("comments"), shares: g("shares"), saves: g("saved"), interactions: g("total_interactions") };
+    // A story answers `replies` (its comments) and `navigation`; a post answers `comments` and has no navigation.
+    return {
+      views: g("views"), reach: g("reach"), likes: g("likes"), comments: m.has("replies") ? g("replies") : g("comments"), shares: g("shares"),
+      saves: g("saved"), interactions: g("total_interactions"), ...(m.has("navigation") ? { navigation: g("navigation") } : {}),
+    };
   },
   META(body) {
     const m = insights((body.insights as { data?: unknown } | undefined)?.data);
@@ -112,11 +124,19 @@ const metricsFrom: Record<MetricsProvider, (body: Record<string, unknown>) => Po
   },
 };
 
-function classify(status: number, body: unknown): PostReason | "reconnect" | "rate_limited" | null {
+/** Every metric null: what a post or story with too few viewers for insights gets. */
+const NO_NUMBERS: PostMetrics = { views: null, reach: null, likes: null, comments: null, shares: null, saves: null, interactions: null };
+
+/**
+ * "too_few": Instagram's code 10 "Not enough viewers for the media to show insights" (subcode 2108006). A small
+ * audience, not a missing permission: the post gets null numbers and the run isn't a permission stop.
+ */
+function classify(status: number, body: unknown): PostReason | "reconnect" | "rate_limited" | "too_few" | null {
   const e = (body as { error?: GraphError } | null)?.error;
   if (status < 400 && !e) return null;
   const code = e?.code;
   if (status === 401 || code === 190 || code === 102) return "reconnect";
+  if (code === 10 && (e?.error_subcode === 2108006 || /not enough viewers/i.test(String(e?.message ?? "")))) return "too_few";
   if (status === 429 || code === 4 || code === 17 || code === 32 || code === 613 || (code !== undefined && code >= 80001 && code <= 80014)) return "rate_limited";
   if (code === 10 || (code !== undefined && code >= 200 && code <= 299) || status === 403) return "permission";
   if (code === 100 && e?.error_subcode === 33) return "not_found";
@@ -176,7 +196,7 @@ async function readChunk(f: Fetch, c: ConnectionToRead, chunk: PostToRead[], met
 
 async function readConnection(f: Fetch, c: ConnectionToRead, stop: Stop): Promise<ConnectionRead> {
   const out: ConnectionRead = { connectionId: c.connectionId, provider: c.provider, posts: [], unread: [] };
-  const metrics = [...METRICS[c.provider]];
+  const metrics = [...(c.metrics ?? METRICS[c.provider])];
   for (let i = 0; i < c.posts.length; i += BATCH_SIZE) {
     const chunk = c.posts.slice(i, i + BATCH_SIZE);
     if (stop()) {
@@ -187,7 +207,7 @@ async function readConnection(f: Fetch, c: ConnectionToRead, stop: Stop): Promis
     const answers = await readChunk(f, c, chunk, metrics, stop);
     if (!Array.isArray(answers)) {
       const r = answers.status === 0 ? "failed" : classify(answers.status, answers.body);
-      out.stoppedReason = r === "not_found" || r === null ? "failed" : r;
+      out.stoppedReason = r === "not_found" || r === "too_few" || r === null ? "failed" : r;
       out.unread = c.posts.slice(i).map((p) => p.attemptId);
       break;
     }
@@ -208,11 +228,12 @@ async function readConnection(f: Fetch, c: ConnectionToRead, stop: Stop): Promis
       if (a === null || a.status === 0) return out.posts.push({ attemptId: p.attemptId, ok: false, reason: "failed", code: null });
       const r = classify(a.status, a.body);
       if (r === null && a.body && typeof a.body === "object") return out.posts.push({ attemptId: p.attemptId, ok: true, metrics: metricsFrom[c.provider](a.body as Record<string, unknown>) });
+      if (r === "too_few") return out.posts.push({ attemptId: p.attemptId, ok: true, metrics: { ...NO_NUMBERS } });
       if (r === "reconnect" || r === "rate_limited") {
         out.stoppedReason ??= r;
         return out.unread.push(p.attemptId);
       }
-      out.posts.push({ attemptId: p.attemptId, ok: false, reason: r ?? "failed", code: codeOf(a.body) });
+      out.posts.push({ attemptId: p.attemptId, ok: false, reason: r === null ? "failed" : r, code: codeOf(a.body) });
     });
     // A GET loop stopped early: on the run's time cap, or on a network failure.
     if (!out.stoppedReason && out.unread.length) out.stoppedReason = stop() ? "capped" : "failed";

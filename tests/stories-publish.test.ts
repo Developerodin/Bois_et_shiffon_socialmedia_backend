@@ -59,6 +59,8 @@ vi.mock("@/server/services/connections", () => ({ accessToken: vi.fn(async () =>
 vi.mock("@/server/jobs/queue", () => ({ enqueueJob: vi.fn(async (job: Row) => { db.jobs.push(job); }) }));
 vi.mock("@/server/storage/media", async (orig) => ({ ...(await orig<object>()), signedMediaUrl: vi.fn(async (k: string) => `https://signed.example/${k}`) }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
+const storyRead = vi.hoisted(() => ({ enqueue: vi.fn(async () => null) }));
+vi.mock("@/server/data/story-metrics", () => ({ enqueueStoryRead: storyRead.enqueue }));
 vi.mock("@/server/agents/engine", () => ({ startAgentRun: vi.fn(async () => ({})) }));
 vi.mock("@/server/services/automations", () => ({ autoPublish: vi.fn() }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: vi.fn(async () => ({ workspaceId: "w1", brandId: "b1", userId: "u1", perms: new Set(["publish.execute"]) })) }));
@@ -217,6 +219,8 @@ describe("publishing a story", () => {
     expect(a).toMatchObject({ status: "PUBLISHED", externalId: "m0", externalUrl: "https://www.instagram.com/stories/shop/m0/" });
     expect(published(a)).toEqual([0, 1, 2, 3]);
     expect(item().status).toBe("PUBLISHED");
+    // finishStory queues the story's numbers read.
+    expect(storyRead.enqueue).toHaveBeenCalledWith("a1");
   });
 
   it("a refusal on frame 3 of 4: PARTIAL, item SCHEDULED, frames 1–2 recorded", async () => {
@@ -230,6 +234,7 @@ describe("publishing a story", () => {
       { i: 2, state: "not-posted" },
     ]);
     expect(graph.published).toEqual([0, 1]);
+    expect(storyRead.enqueue).toHaveBeenCalledWith(a.id);
   });
 
   it("daily limit room for 2 of 4: FAILED with the reason, nothing sent to the publisher", async () => {

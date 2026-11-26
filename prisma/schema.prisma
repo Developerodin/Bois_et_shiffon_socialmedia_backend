@@ -1712,6 +1712,8 @@ model PostMetric {
   shares               Int?
   saves                Int?
   interactions         Int?
+  /// Instagram stories only: taps forward, back, exits and next-story swipes, summed over the frames
+  navigation           Int?
 
   attempt PublicationAttempt @relation(fields: [publicationAttemptId], references: [id], onDelete: Cascade)
   brand   Brand              @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)

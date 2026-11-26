@@ -65,15 +65,16 @@ export function duePosts(scope: { workspaceId: string; brandId: string }, now: D
 /** One row per post per day: a second read the same day replaces the first. */
 export async function upsertMetrics(scope: { workspaceId: string; brandId: string }, day: string, readAt: Date, rows: { attemptId: string; metrics: PostMetrics }[]) {
   if (!rows.length) return 0;
-  const col = (k: keyof PostMetrics) => rows.map((r) => r.metrics[k]);
+  const col = (k: keyof PostMetrics) => rows.map((r) => r.metrics[k] ?? null);
   return prisma.$executeRaw`
-    INSERT INTO "PostMetric" (id, "workspaceId", "brandId", "publicationAttemptId", day, "readAt", reach, views, likes, comments, shares, saves, interactions)
-    SELECT u.id, ${scope.workspaceId}, ${scope.brandId}, u.aid, ${day}::date, ${utc(readAt)}, u.reach, u.views, u.likes, u.comments, u.shares, u.saves, u.interactions
+    INSERT INTO "PostMetric" (id, "workspaceId", "brandId", "publicationAttemptId", day, "readAt", reach, views, likes, comments, shares, saves, interactions, navigation)
+    SELECT u.id, ${scope.workspaceId}, ${scope.brandId}, u.aid, ${day}::date, ${utc(readAt)}, u.reach, u.views, u.likes, u.comments, u.shares, u.saves, u.interactions, u.navigation
     FROM unnest(${rows.map(() => randomUUID())}::text[], ${rows.map((r) => r.attemptId)}::text[], ${col("reach")}::int[], ${col("views")}::int[],
-      ${col("likes")}::int[], ${col("comments")}::int[], ${col("shares")}::int[], ${col("saves")}::int[], ${col("interactions")}::int[])
-      AS u(id, aid, reach, views, likes, comments, shares, saves, interactions)
+      ${col("likes")}::int[], ${col("comments")}::int[], ${col("shares")}::int[], ${col("saves")}::int[], ${col("interactions")}::int[], ${col("navigation")}::int[])
+      AS u(id, aid, reach, views, likes, comments, shares, saves, interactions, navigation)
     ON CONFLICT ("publicationAttemptId", day) DO UPDATE SET "readAt" = EXCLUDED."readAt", reach = EXCLUDED.reach, views = EXCLUDED.views,
-      likes = EXCLUDED.likes, comments = EXCLUDED.comments, shares = EXCLUDED.shares, saves = EXCLUDED.saves, interactions = EXCLUDED.interactions`;
+      likes = EXCLUDED.likes, comments = EXCLUDED.comments, shares = EXCLUDED.shares, saves = EXCLUDED.saves, interactions = EXCLUDED.interactions,
+      navigation = EXCLUDED.navigation`;
 }
 
 /**
