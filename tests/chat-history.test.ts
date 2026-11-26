@@ -74,6 +74,7 @@ describe("chat POST", () => {
     m.findUnique.mockResolvedValue({ id: "thread-1", userId: "u1", brandId: "b1", messages: [{ id: "a", role: "assistant", parts: [ads] }] });
     const { model, saved } = await send(["agents.read", "crm.read"]);
     expect(model).not.toContain("120.00");
+    expect(model).toContain("Your role can't see ads.");
     expect(saved).toContain("120.00");
   });
 

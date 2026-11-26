@@ -21,7 +21,8 @@ import type { DataSource, IntegrationConnection } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
 import { brandAccess } from "@/server/auth/access";
 import { ensureSystemRoles } from "@/server/auth/permissions";
-import { DATA_SYNC_JOB, runSync, type SyncContext } from "@/server/data/sources";
+import { DATA_SYNC_JOB, liveSources, runSync, type SyncContext } from "@/server/data/sources";
+import { adsDays } from "@/server/data/ads-read";
 import type { AdWindow, CampaignDay } from "@/server/data/meta-ads";
 import "@/server/data/meta-ads-sync";
 import { chooseMetaAdAccount } from "@/server/integrations/meta-ads";
@@ -182,6 +183,34 @@ describe("ads routes", () => {
       previous: [{ currency: "EUR", spend: "4.00", purchases: 0, purchaseValue: "8.00", roas: 2, costPerPurchase: null }],
       previousRange: { from: "2026-10-30", to: "2026-10-31" },
     });
+  });
+
+  it("adsDays: sums per currency and day, only the given accounts, other brands' rows never", async () => {
+    await seedDays();
+    const out = await adsDays({ workspaceId: ws, brandId: "ad-a" }, { from: "2026-10-30", to: "2026-11-02" }, ["act_1"]);
+    expect(out.map((r) => ({ ...r, spend: r.spend.toFixed(2), purchaseValue: r.purchaseValue.toFixed(2) }))).toEqual([
+      { currency: "EUR", day: "2026-10-30", spend: "4.00", impressions: 100, clicks: 5, purchases: 0, purchaseValue: "8.00" },
+      { currency: "EUR", day: "2026-11-01", spend: "10.00", impressions: 100, clicks: 5, purchases: 2, purchaseValue: "50.00" },
+      { currency: "EUR", day: "2026-11-02", spend: "5.50", impressions: 100, clicks: 5, purchases: 1, purchaseValue: "0.00" },
+    ]);
+    const both = await adsDays({ workspaceId: ws, brandId: "ad-a" }, { from: "2026-11-01", to: "2026-11-01" }, ["act_1", "act_9", "act_5"]);
+    expect(both.map((r) => [r.currency, r.spend.toFixed(2)])).toEqual([["EUR", "10.00"], ["INR", "0.00"]]);
+  });
+
+  it("liveSources: the slowest account's day, null while one is unsynced, switched-off accounts counted apart", async () => {
+    const scope = { workspaceId: ws, brandId: "ad-a" };
+    expect(await liveSources(scope, "META_ADS")).toEqual({ externalIds: [], syncedThrough: null, offCount: 0 });
+    const a = await adSource("ad-a", "act_1");
+    const b = await adSource("ad-a", "act_2");
+    const off = await adSource("ad-a", "act_3");
+    await prisma.dataSource.update({ where: { id: a.id }, data: { syncedThrough: new Date("2026-11-24") } });
+    await prisma.dataSource.update({ where: { id: off.id }, data: { status: "OFF", syncedThrough: new Date("2026-10-01") } });
+    expect(await liveSources(scope, "META_ADS")).toEqual({ externalIds: expect.arrayContaining(["act_1", "act_2"]), syncedThrough: null, offCount: 1 });
+    await prisma.dataSource.update({ where: { id: b.id }, data: { syncedThrough: new Date("2026-11-20") } });
+    const live = await liveSources(scope, "META_ADS");
+    expect(live).toMatchObject({ syncedThrough: "2026-11-20", offCount: 1 });
+    expect(live.externalIds.sort()).toEqual(["act_1", "act_2"]);
+    expect(await liveSources({ workspaceId: ws, brandId: "ad-b" }, "META_ADS")).toEqual({ externalIds: [], syncedThrough: null, offCount: 0 });
   });
 
   it("campaigns: per campaign and currency with the latest name, highest spend first", async () => {

@@ -7,7 +7,9 @@ import {
   BREAKDOWNS, hasOrderLines, MAX_ANALYSIS_ROWS, MAX_RISK_ROWS, PRODUCT_GROUPS, productSales, salesBreakdown, stockRisk, TIME_BREAKDOWNS, topProducts, truncatedOrders,
 } from "@/server/data/sales-analysis";
 import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
-import { addDays, badRangeDetail, brandTimeZone, rangeDays, zoneToday } from "@/server/data/sources";
+import { addDays, badRangeDetail, brandTimeZone, liveSources, previousRange, rangeDays, zoneToday } from "@/server/data/sources";
+import { ADS_MAX_DAYS, adsCampaigns, adsDays, D, shopRevenueOverSpend, totalsOf, type AdsDayRow } from "@/server/data/ads-read";
+import { currentMonth, listBudgets, MonthSchema } from "@/server/data/budgets";
 import { CHAT_DATA_TOOLS, hiddenFor, MAX_DATA_CALLS, MAX_GROUP_CALLS, type ToolGroup } from "@/server/chat/turn";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
@@ -44,6 +46,43 @@ const LINE_NOTE =
   "From order line items: units and revenue are net of refunds, revenue after every discount (order-level share included), and include VAT where the shop's prices do (unlike salesSummary's netExVat). Lines without a product (custom lines, deleted products) are 'Other / custom items'.";
 const DATA_LIMIT = { error: "Data tool limit reached for this message." };
 const GROUP_NAME: Record<ToolGroup, string> = { sales: "Sales", ads: "Ads", analytics: "Analytics" };
+const NO_ADS = { note: "Meta Ads isn't connected or hasn't finished its first sync." };
+const ADS_NOTES = {
+  currencyNote: "Amounts are per ad account currency; never add currencies together.",
+  attributionNote: "Meta keeps attributing purchases for 7 days, so the last few days can still grow.",
+};
+const OFF_NOTE = "Switched-off ad accounts are left out.";
+const RATIO_WHY: Record<string, string> = {
+  no_spend: "No Meta spend in this period, so there is no ratio.",
+  currencies: "The shop sold in several currencies in this period, so one ratio can't be given.",
+  no_revenue: "Shop net sales without VAT aren't known for this whole period, so there is no ratio.",
+  no_rate: "An exchange rate is missing to convert the ad spend, so there is no ratio.",
+  vat_missing: "Some orders' VAT couldn't be read, so revenue would read low; no ratio given.",
+};
+const PACING_NOTE: Record<string, string> = {
+  no_data: "No Meta spend synced for this month yet.",
+  no_rate: "No exchange rate yet to convert spend into the budget currency.",
+  google_later: "Google Ads spend arrives in Phase 3.",
+};
+
+/**
+ * adsDays rows folded per currency: the totals (totalsOf) plus impressions, clicks, CTR (clicks ÷ impressions) and
+ * cost per click, each null when its divisor is 0. Never adds across currencies.
+ */
+function foldAds(rows: AdsDayRow[]) {
+  const by = new Map<string, { spend: ReturnType<typeof D>; value: ReturnType<typeof D>; purchases: number; impressions: number; clicks: number }>();
+  for (const r of rows) {
+    const t = by.get(r.currency) ?? { spend: D(0), value: D(0), purchases: 0, impressions: 0, clicks: 0 };
+    by.set(r.currency, { spend: t.spend.plus(r.spend), value: t.value.plus(r.purchaseValue), purchases: t.purchases + r.purchases, impressions: t.impressions + r.impressions, clicks: t.clicks + r.clicks });
+  }
+  return [...by].sort(([a], [b]) => a.localeCompare(b)).map(([currency, t]) => ({
+    ...totalsOf(currency, t.spend, t.purchases, t.value),
+    impressions: t.impressions,
+    clicks: t.clicks,
+    ctr: t.impressions ? Math.round((t.clicks / t.impressions) * 10_000) / 10_000 : null,
+    cpc: t.clicks ? t.spend.div(t.clicks).toFixed(2) : null,
+  }));
+}
 const WEEKS_NOTE = "Weeks start on Monday and are labelled by that day; the first and last weeks can be partial.";
 /** stockRisk flags a best seller with less stock than this many days of its average sales. */
 const LOW_COVER_DAYS = 14;
@@ -95,6 +134,12 @@ export function chatTools(scope: ChatScope) {
     }
     return typeof end === "string" ? { from: addDays(end, 1 - defaultDays), to: end } : end;
   };
+  // The brand's Meta Ads accounts that are on, read once per message and shared by the ads tools (like perms).
+  let ads: ReturnType<typeof liveSources> | undefined;
+  const adSources = () => (ads ??= liveSources(scope, "META_ADS"));
+  // The ads tools' period: both days given, or the 30 days ending at the last day every live account has synced.
+  const adsRange = (input: { from?: string; to?: string }) =>
+    rangeOf(input, ADS_MAX_DAYS, async () => (await adSources()).syncedThrough ?? NO_ADS);
   // Per-product numbers miss lines of orders AskCart sent incomplete (re-read by the sync within a day). Counted once
   // per period in a message: a report makes several sales calls over one period, often in parallel, so the promise is
   // kept and shared. A failed count is dropped, so a later call can try again.
@@ -468,6 +513,120 @@ export function chatTools(scope: ChatScope) {
             ...truncated,
           ],
         };
+      },
+    }),
+
+    // Meta Ads: read-only, from our own AdDay rows and budgets; ads.read, like the Ads tab. Unlike the tab, the chat
+    // leaves switched-off ad accounts out (as pacing and the ratio do), so its figures never contradict each other.
+    adsSummary: tool({
+      description:
+        "Meta Ads totals per currency for a period (default the last 30 synced days): spend, impressions, clicks, CTR, cost per click, purchases, purchase value, ROAS, cost per purchase, with the same-length previous period; daily rows when the period is 31 days or less; and recent ads alerts. Start any ads question here.",
+      inputSchema: rangeInput("leave both out for the last 30 synced days"),
+      execute: async (input) => {
+        const refused = await gate("adsSummary");
+        if (refused) return refused;
+        const range = await adsRange(input);
+        if (!("from" in range)) return range;
+        const live = await adSources();
+        const prev = previousRange(range);
+        // adsDays, not the Ads tab's adsSummary reader: that one adds shop revenue ÷ spend, a sales figure.
+        const [now, before] = await Promise.all([adsDays(scope, range, live.externalIds), adsDays(scope, prev, live.externalIds)]);
+        const roas = (r: AdsDayRow) => (r.spend.isZero() ? null : r.purchaseValue.div(r.spend).toDecimalPlaces(2).toNumber());
+        return {
+          ...range,
+          syncedThrough: live.syncedThrough,
+          totals: foldAds(now),
+          previousRange: prev,
+          previous: foldAds(before),
+          ...(rangeDays(range) <= 31 && {
+            days: {
+              columns: ["day", "currency", "spend", "impressions", "clicks", "purchases", "roas"],
+              rows: now.map((r) => [r.day, r.currency, r.spend.toFixed(2), r.impressions, r.clicks, r.purchases, roas(r)]),
+            },
+          }),
+          alerts: [],
+          ...ADS_NOTES,
+          ...(live.offCount > 0 && { offNote: OFF_NOTE }),
+        };
+      },
+    }),
+
+    // ponytail: sorts all of a period's campaigns in memory; a year at ~100 campaigns is fine. Past ~5k campaign rows
+    // per range, rank in SQL.
+    adCampaigns: tool({
+      description:
+        "Meta Ads campaigns for a period (default the last 30 synced days), ranked by spend, purchases or ROAS: spend, impressions, clicks, purchases, ROAS and cost per purchase per campaign, in its ad account's currency. Use for which campaigns work or waste money.",
+      inputSchema: rangeInput("leave both out for the last 30 synced days").extend({
+        limit: z.number().int().min(1).max(MAX_ANALYSIS_ROWS).default(20),
+        rankBy: z.enum(["spend", "purchases", "roas"]).default("spend"),
+      }),
+      execute: async ({ limit, rankBy, ...input }) => {
+        const refused = await gate("adCampaigns");
+        if (refused) return refused;
+        const range = await adsRange(input);
+        if (!("from" in range)) return range;
+        const live = await adSources();
+        const ids = new Set(live.externalIds);
+        // The Ads tab's reader, unchanged; switched-off accounts are dropped here.
+        const all = (await adsCampaigns(scope, range)).filter((c) => ids.has(c.accountId));
+        const key = (c: (typeof all)[number]) => (rankBy === "spend" ? Number(c.spend) : rankBy === "purchases" ? c.purchases : c.roas);
+        all.sort((a, b) => (key(b) ?? -Infinity) - (key(a) ?? -Infinity));
+        const shown = all.slice(0, limit);
+        return {
+          ...range,
+          rankBy,
+          columns: ["campaign", "account", "currency", "spend", "impressions", "clicks", "purchases", "roas", "costPerPurchase"],
+          rows: shown.map((c) => [cleanTitle(c.campaignName), c.accountId, c.currency, c.spend, c.impressions, c.clicks, c.purchases, c.roas, c.costPerPurchase]),
+          ...(all.length > limit && { moreCampaigns: all.length - limit }),
+          ...ADS_NOTES,
+          ...(live.offCount > 0 && { offNote: OFF_NOTE }),
+        };
+      },
+    }),
+
+    adBudgets: tool({
+      description:
+        "The month's ad budgets per platform and Meta's pacing against them (spend so far, converted to the budget currency, vs budget × days elapsed ÷ days in the month: under, on or over). Default the current month.",
+      // The month is checked in execute, not in the schema: MonthSchema's window moves with today, and a saved
+      // thread's month must keep validating once it falls out of it.
+      inputSchema: z.object({ month: z.string().max(7).optional().describe("YYYY-MM; leave out for the current month") }),
+      execute: async ({ month = currentMonth() }) => {
+        const refused = await gate("adBudgets");
+        if (refused) return refused;
+        if (!MonthSchema.safeParse(month).success) return { error: "month must be YYYY-MM, from 24 months back to 12 ahead." };
+        const { budgets, pacing } = await listBudgets(scope, month);
+        const notes = pacing.map((p) =>
+          p.state === "ok"
+            ? p.staleRateFrom ? `Spend converted at ECB rates; uses a rate from ${p.staleRateFrom}.` : null
+            : PACING_NOTE[p.state],
+        ).filter((n): n is string => !!n);
+        return {
+          month,
+          budgets: budgets.map((b) => ({ platform: b.platform, amount: b.amount, currency: b.currency })),
+          pacing,
+          ...(!budgets.length && { note: "No ad budget set for this month." }),
+          ...(notes.length && { notes: [...new Set(notes)] }),
+        };
+      },
+    }),
+
+    revenuePerAdSpend: tool({
+      description:
+        "Shop revenue ÷ Meta ad spend for a period (default the last 30 synced days): shop net sales without VAT divided by the ad spend converted to the shop's currency. Needs sales access as well as ads.",
+      inputSchema: rangeInput("leave both out for the last 30 synced days"),
+      execute: async (input) => {
+        const refused = await gate("revenuePerAdSpend");
+        if (refused) return refused;
+        const range = await adsRange(input);
+        if (!("from" in range)) return range;
+        const { ratio, currency, why, staleRateFrom } = await shopRevenueOverSpend(scope, range);
+        const notes = [
+          ...(currency ? [`Shop net sales without VAT ÷ Meta spend converted to ${currency} at the ECB daily rates.`] : []),
+          "Shopify days and ad account days may differ by a few hours.",
+          ...(staleRateFrom ? [`Uses a rate from ${staleRateFrom}.`] : []),
+          ...(why ? [RATIO_WHY[why]] : []),
+        ];
+        return { ...range, ratio, currency, why, staleRateFrom, notes };
       },
     }),
 

@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import { dayDate, previousRange } from "./sources";
+import { dayDate, dayOf, previousRange } from "./sources";
 import type { AdsCampaignDto, AdsSummaryDto, AdsTotals, DateRange, ShopRevenueOverSpend } from "@/shared";
 import { prisma } from "@/server/db/prisma";
 import { convertedSpend } from "./budgets";
@@ -73,6 +73,32 @@ export async function shopRevenueOverSpend(scope: Scope, range: DateRange): Prom
   if (!spend) return none("no_rate", currency);
   if (spend.total.isZero()) return none("no_spend", currency);
   return { ratio: D(shop.netExVat).div(spend.total).toDecimalPlaces(2).toNumber(), currency, why: null, staleRateFrom: spend.stale };
+}
+
+/** One currency's ads sums for one day (adsDays). */
+export type AdsDayRow = { currency: string; day: string; spend: Prisma.Decimal; impressions: number; clicks: number; purchases: number; purchaseValue: Prisma.Decimal };
+
+/**
+ * The brand's Meta sums per currency and day over the range, for the given ad accounts only (the chat passes the ones
+ * switched on). The same groupBy shape as budgets' convertedSpend, with every figure summed; it reads through the
+ * (brandId, platform, accountId, day) index like totals(). Ordered by day, then currency.
+ */
+export async function adsDays(scope: Scope, range: DateRange, accountIds: string[]): Promise<AdsDayRow[]> {
+  const groups = await prisma.adDay.groupBy({
+    by: ["currency", "day"],
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, platform: "META", accountId: { in: accountIds }, day: { gte: dayDate(range.from), lte: dayDate(range.to) } },
+    _sum: { spend: true, impressions: true, clicks: true, purchases: true, purchaseValue: true },
+    orderBy: [{ day: "asc" }, { currency: "asc" }],
+  });
+  return groups.map((g) => ({
+    currency: g.currency,
+    day: dayOf(g.day),
+    spend: D(g._sum.spend),
+    impressions: g._sum.impressions ?? 0,
+    clicks: g._sum.clicks ?? 0,
+    purchases: g._sum.purchases ?? 0,
+    purchaseValue: D(g._sum.purchaseValue),
+  }));
 }
 
 type CampaignRow = {

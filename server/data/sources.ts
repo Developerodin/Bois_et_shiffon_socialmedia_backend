@@ -533,6 +533,22 @@ async function syncRuns(scope: { workspaceId: string; brandId: string }) {
   return runs;
 }
 
+/**
+ * The brand's sources of `kind` that are on: their external ids (ad accounts "act_…", the site), the last day every one
+ * of them has read in full (their minimum `syncedThrough`; null when there is none or any hasn't finished its first
+ * sync, as a lagging one's missing days would read as a drop), and how many are switched off. One query; budgets'
+ * pacing and spend and the chat's default ranges read it. The digest's `synced()` keeps its own, wider rule.
+ */
+export async function liveSources(scope: { workspaceId: string; brandId: string }, kind: DataSourceKind) {
+  const all = await prisma.dataSource.findMany({
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind },
+    select: { status: true, externalId: true, syncedThrough: true },
+  });
+  const on = all.filter((s) => s.status !== "OFF");
+  const syncedThrough = !on.length || on.some((s) => !s.syncedThrough) ? null : on.map((s) => dayOf(s.syncedThrough!)).sort()[0];
+  return { externalIds: on.map((s) => s.externalId), syncedThrough, offCount: all.length - on.length };
+}
+
 /** The brand's own zone (BrandProfile.timeZone, else the default), for days we bucket ourselves. */
 export async function brandTimeZone(scope: { workspaceId: string; brandId: string }) {
   const profile = await prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { timeZone: true } });
