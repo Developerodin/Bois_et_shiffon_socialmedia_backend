@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Prisma } from "@prisma/client";
 import type { ShopifyVariant } from "@/server/catalog/shopify";
@@ -171,13 +172,15 @@ const MAX_BYTES = 10_000_000;
  * retries below take over. Move the slots to Postgres or Redis if that shows up in the logs.
  */
 export const PACE_MS = 1100;
+/** Keyed by a hash of the bearer, so the token itself isn't kept in memory longer than its request. */
 const nextSlot = new Map<string, number>();
 /** Tests: their waits return at once, so the reserved slots would pile up from one test to the next. */
 export const resetAskCartPace = () => nextSlot.clear();
 async function pace(bearer: string, signal?: AbortSignal) {
   const now = Date.now();
-  const slot = Math.max(now, nextSlot.get(bearer) ?? 0);
-  nextSlot.set(bearer, slot + PACE_MS);
+  const key = createHash("sha256").update(bearer).digest("base64url");
+  const slot = Math.max(now, nextSlot.get(key) ?? 0);
+  nextSlot.set(key, slot + PACE_MS);
   // A slot well in the past is dead weight: forget tokens idle for a minute (keeps the map to the active ones).
   for (const [k, v] of nextSlot) if (v < now - 60_000) nextSlot.delete(k);
   if (slot > now) await sleep(slot - now, "pace", { signal }); // the value tells tests these waits apart
