@@ -12,6 +12,7 @@ import { SiteBlockedError } from "@/server/agents/definitions/site-audit";
 import { AiProviderError } from "@/server/ai/provider";
 import { runCatalogPages } from "@/server/catalog/page-reader";
 import { CATALOG_PAGES_JOB, CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
+import { ADS_ALERTS_JOB, runAdAlerts } from "@/server/ads/alerts";
 import { DATA_SYNC_JOB, enqueueDailyDataSyncs, runDataSync } from "@/server/data/sources";
 import { DIGEST_JOB, enqueueWeeklyDigests, runDigest } from "@/server/digest/job";
 import { enqueueFxSync, FX_SYNC_JOB, runFxSync } from "@/server/data/fx";
@@ -51,6 +52,7 @@ type Handler = {
 export const DAILY_SWEEP_JOB = "system.daily-sweep";
 
 const HANDLERS: Record<string, Handler> = {
+  [ADS_ALERTS_JOB]: { run: runAdAlerts },
   [AGENT_RUN_JOB]: { run: executeAgentRun, onFailure: onAgentRunFailure },
   [AUDIT_ALL_JOB]: { run: runAuditAllJob },
   [CATALOG_PAGES_JOB]: { run: runCatalogPages },

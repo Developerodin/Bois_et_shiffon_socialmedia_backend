@@ -1,4 +1,5 @@
 import type { DataSource, Prisma } from "@prisma/client";
+import { enqueueAdAlerts } from "@/server/ads/alerts";
 import { prisma } from "@/server/db/prisma";
 import { accessToken, markReconnect } from "@/server/services/connections";
 import { CHUNK_DAYS, fetchAdWindow, type AdDayResult } from "./meta-ads";
@@ -92,7 +93,7 @@ registerSync("META_ADS", async (ctx) => {
   // A permission stop (disabled account, ads_read gone) writes nothing; rate limits and the time cap keep what was read.
   if (read.currency && read.stoppedReason !== "permission") for (const chunk of chunks(read.days)) count += await replaceAdDays(source, read.currency, chunk);
   return { count, complete: !read.stoppedReason, reason, ...(ctx.window ? {} : { window }) };
-});
+}, { afterRun: enqueueAdAlerts }); // after a complete daily or manual run: the ads.alerts job (server/ads/alerts.ts)
 
 /** The account's backfill: BACKFILL_DAYS up to yesterday in its zone, CHUNK_DAYS a window (saved as settings.backfill). */
 export const adsBackfillPlan = (zone: string, now = new Date()) => backfillPlan(zoneToday(zone, now), BACKFILL_DAYS, CHUNK_DAYS);

@@ -103,8 +103,14 @@ export type SyncRunner = (ctx: SyncContext) => Promise<SyncOutcome>;
  * halveOnCap: a backfill window still stopped by the time cap after its retries is read again at half its length
  * (down to 1 day) instead of waiting for the sweep's daily restart. Opt-in (Shopify orders): other kinds keep today's
  * retries.
+ * afterRun: called after a complete daily or manual run is recorded (never a backfill, partial, permission-stopped or
+ * stopChain run, nor for a source that is OFF), with the syncedThrough the run left. Its error is logged, never
+ * rethrown, so it neither fails nor retries the sync. META_ADS queues its alerts job here.
  */
-type SyncOptions = { halveOnCap?: boolean };
+type SyncOptions = {
+  halveOnCap?: boolean;
+  afterRun?: (source: DataSource, outcome: SyncOutcome, syncedThrough: string | null) => Promise<void>;
+};
 
 const RUNNERS: Partial<Record<DataSourceKind, SyncRunner>> = {};
 const OPTIONS: Partial<Record<DataSourceKind, SyncOptions>> = {};
@@ -375,6 +381,15 @@ export async function runDataSync(payload: unknown, lease: Lease) {
 
   // The provider said "not now" (no retry, no next window, no follow-up): a later run starts the chain again.
   if (outcome.stopChain) return;
+
+  const afterRun = OPTIONS[source.kind]?.afterRun;
+  if (afterRun && p.mode !== "backfill" && outcome.complete && outcome.window) {
+    try {
+      await afterRun(source, outcome, syncedThrough);
+    } catch (error) {
+      console.warn("[data] afterRun failed", source.kind, source.brandId, error instanceof Error ? error.message : error);
+    }
+  }
 
   // A plan this run started: its first window, after today's daily spread (also from a daily, manual or follow-up run).
   const started = outcome.settings?.set?.backfill as BackfillPlan | undefined;
