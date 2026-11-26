@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Prisma } from "@prisma/client";
 import type { ShopifyVariant } from "@/server/catalog/shopify";
+import { BodyTooLarge, cappedText } from "@/server/integrations/capped-text";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 
 /**
@@ -188,23 +189,6 @@ async function pace(bearer: string, signal?: AbortSignal) {
 const RETRIES = 2;
 const MAX_RETRY_WAIT_S = 30;
 
-async function cappedText(res: Response) {
-  const reader = res.body?.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  while (reader) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > MAX_BYTES) {
-      await reader.cancel();
-      throw new AskCartError(res.status, "too_large");
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString("utf8");
-}
-
 /**
  * One call to `${ASKCART_URL}/api/partner/<path>`. `bearer` is the brand's token (or the INTERIM shared secret); the
  * token endpoint takes none. 429 and 503 shopify_throttled wait Retry-After (at most 30 s) and retry, twice; then
@@ -242,7 +226,12 @@ export async function askCartRequest<T>(
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
     });
-    const text = await cappedText(res);
+    let text: string;
+    try {
+      text = await cappedText(res, MAX_BYTES);
+    } catch (e) {
+      throw e instanceof BodyTooLarge ? new AskCartError(res.status, "too_large") : e;
+    }
     if (res.status === 204) return null as T;
     let body: unknown = null;
     try {

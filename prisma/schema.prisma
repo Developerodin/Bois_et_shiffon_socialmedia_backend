@@ -1865,6 +1865,17 @@ model AdDay {
   @@index([brandId, platform, accountId, day])
 }
 
+/// ECB euro reference rates: 1 EUR = perEur units of currency on that day (TARGET working days only). Global, not per
+/// brand. Filled by the daily fx.sync job (server/data/fx.ts); EUR itself is never stored (its rate is 1).
+/// ponytail: ~250 rows per currency per year; a few thousand rows in all.
+model FxRate {
+  currency String
+  day      DateTime @db.Date
+  perEur   Decimal  @db.Decimal(18, 6)
+
+  @@id([currency, day])
+}
+
 enum ShopifyWriteEntity {
   QUOTE
   BLOG_ARTICLE
