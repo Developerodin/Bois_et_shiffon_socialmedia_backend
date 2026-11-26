@@ -187,6 +187,7 @@ export async function topProducts(scope: Scope, range: DateRange, rankBy: "reven
       FROM x l GROUP BY k, l."currency"
     ), ${capped(order)}
     SELECT name, currency, units, revenue, orders, total_groups FROM r WHERE ${shown(cap)} ORDER BY currency, rn`;
+  // salesBreakdown reads these rows by position (name, currency, units, revenue, orders): reorder both together.
   return { rows: rows.map((r) => [r.name, r.currency, r.units, money(r.revenue), r.orders]), moreGroups: hidden(rows) };
 }
 

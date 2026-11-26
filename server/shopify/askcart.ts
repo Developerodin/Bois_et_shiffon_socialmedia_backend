@@ -210,12 +210,20 @@ async function cappedText(res: Response) {
  * token endpoint takes none. 429 and 503 shopify_throttled wait Retry-After (at most 30 s) and retry, twice; then
  * AskCartError. A bearer call answered 401, 403 insufficient_scope or (legacy secret) 503 store_not_connected throws
  * ReconnectNeeded: someone has to connect again. 503 store_reconnect_needed is an AskCartError, not retried here: our
- * token stays valid and the merchant only has to open AskCart in Shopify admin (isAskCartStoreLapsed). Everything else that isn't 2xx throws AskCartError (403 read_all_orders_pending carries
- * visibleSince). 204 → null.
+ * token stays valid and the merchant only has to open AskCart in Shopify admin (isAskCartStoreLapsed). Everything
+ * else that isn't 2xx throws AskCartError (403 read_all_orders_pending carries visibleSince). 204 → null.
  */
 export async function askCartRequest<T>(
   path: string,
-  opts: { bearer?: string; method?: "GET" | "POST" | "DELETE"; params?: Record<string, string>; body?: unknown; signal?: AbortSignal; /** false: a rate limit fails at once (no Retry-After wait) */ retry?: boolean } = {},
+  opts: {
+    bearer?: string;
+    method?: "GET" | "POST" | "DELETE";
+    params?: Record<string, string>;
+    body?: unknown;
+    signal?: AbortSignal;
+    /** false: a rate limit fails at once (no Retry-After wait) */
+    retry?: boolean;
+  } = {},
 ): Promise<T> {
   const cfg = askCartConfig();
   if (!cfg) throw new AskCartError(0, "not_configured");

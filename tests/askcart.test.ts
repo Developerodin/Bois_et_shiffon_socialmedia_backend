@@ -352,8 +352,6 @@ describe("askCartCatalog", () => {
 });
 
 it("requests on one token go at least PACE_MS apart, even two at once; another token isn't held back", async () => {
-  vi.stubEnv("ASKCART_URL", "https://askcart.test/");
-  vi.stubEnv("ASKCART_SECRET", SECRET);
   stubFetch({ body: { name: "a" } }, { body: { name: "b" } }, { body: { name: "c" } });
   const waits = vi.mocked(sleep);
   waits.mockClear();
