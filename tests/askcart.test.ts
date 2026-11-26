@@ -15,7 +15,7 @@ import { fetchAskCartOrders } from "@/server/data/shopify-orders";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import {
   ASKCART_KEY_REFUSED, ASKCART_REFUSED, ASKCART_SCOPE_MISSING, AskCartError, isAskCartStoreLapsed, askCartCatalog, askCartConfig, askCartVariants, askCartOrders, askCartReason, askCartRequest, askCartRevoke,
-  askCartShop, askCartTokenRequest, isAskCart,
+  askCartShop, askCartTokenRequest, isAskCart, PACE_MS, resetAskCartPace,
 } from "@/server/shopify/askcart";
 
 // Shapes from the AskCart repo's docs/partner-api.md (2026-11-24).
@@ -53,6 +53,7 @@ const urlOf = (call: unknown[]) => new URL(call[0] as string);
 const error = (status: number, code: string, extra: Record<string, unknown> = {}, headers?: Record<string, string>): Res => ({ status, body: { error: code, ...extra }, headers });
 
 beforeEach(() => {
+  resetAskCartPace();
   vi.stubEnv("ASKCART_URL", "https://askcart.test/");
   vi.stubEnv("ASKCART_SECRET", SECRET);
 });
@@ -61,6 +62,9 @@ afterEach(() => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
+
+/** The Retry-After waits, without the pacing between requests (its own test checks those). */
+const retryWaits = () => vi.mocked(sleep).mock.calls.filter((c) => c[1] !== "pace").map((c) => c[0]);
 
 /** Every error a call throws, with the secret checked absent from its message. */
 async function thrown(p: Promise<unknown>) {
@@ -204,7 +208,7 @@ describe("fetchAskCartOrders", () => {
     expect(stoppedReason).toBeUndefined();
     expect(orders.map((o) => o.name)).toEqual(["#1", "#2"]);
     // waited exactly what each page said (the sleep is stubbed to return at once)
-    expect(vi.mocked(sleep).mock.calls.map((c) => c[0])).toEqual([5_000, 2_000]);
+    expect(retryWaits()).toEqual([5_000, 2_000]);
     expect(urlOf(f.mock.calls[1]).searchParams.get("cursor")).toBe("c1");
     expect(urlOf(f.mock.calls[2]).searchParams.get("cursor")).toBe("c1");
   });
@@ -216,7 +220,7 @@ describe("fetchAskCartOrders", () => {
       { body: page([]) },
     );
     await fetchAskCartOrders(SECRET, SINCE);
-    expect(vi.mocked(sleep).mock.calls.map((c) => c[0])).toEqual([1_000]);
+    expect(retryWaits()).toEqual([1_000]);
   });
 
   it("a Retry-After over 30 s stops as rate_limited with the orders read so far", async () => {
@@ -345,6 +349,18 @@ describe("askCartCatalog", () => {
     expect(isAskCart({ externalAccountId: "askcart" })).toBe(true);
     expect(isAskCart({ externalAccountId: "shop.myshopify.com" })).toBe(false);
   });
+});
+
+it("requests on one token go at least PACE_MS apart, even two at once; another token isn't held back", async () => {
+  vi.stubEnv("ASKCART_URL", "https://askcart.test/");
+  vi.stubEnv("ASKCART_SECRET", SECRET);
+  stubFetch({ body: { name: "a" } }, { body: { name: "b" } }, { body: { name: "c" } });
+  const waits = vi.mocked(sleep);
+  waits.mockClear();
+  await Promise.all([askCartShop("pace_token_1"), askCartShop("pace_token_1"), askCartShop("pace_token_2")]);
+  const ms = waits.mock.calls.filter((c) => c[1] === "pace").map((c) => c[0] as number);
+  expect(ms).toHaveLength(1);
+  expect(ms[0]).toBeGreaterThan(PACE_MS - 50);
 });
 
 it("AskCartError's message is the status and code only", () => {

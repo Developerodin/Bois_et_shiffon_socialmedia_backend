@@ -164,6 +164,24 @@ export type AskCartProduct = {
 export type OrdersQuery = { updatedSince: Date } | { createdFrom: string; createdTo: string };
 
 const MAX_BYTES = 10_000_000;
+/**
+ * Gap between two requests on one bearer: AskCart allows 60 a minute per token, and the orders and catalogue syncs
+ * share it. Each call reserves the next free slot before waiting, so two at once still go 1.1 s apart.
+ * ponytail: per process. Two server processes running syncs for one brand could reach 2 a second; then the 429
+ * retries below take over. Move the slots to Postgres or Redis if that shows up in the logs.
+ */
+export const PACE_MS = 1100;
+const nextSlot = new Map<string, number>();
+/** Tests: their waits return at once, so the reserved slots would pile up from one test to the next. */
+export const resetAskCartPace = () => nextSlot.clear();
+async function pace(bearer: string, signal?: AbortSignal) {
+  const now = Date.now();
+  const slot = Math.max(now, nextSlot.get(bearer) ?? 0);
+  nextSlot.set(bearer, slot + PACE_MS);
+  // A slot well in the past is dead weight: forget tokens idle for a minute (keeps the map to the active ones).
+  for (const [k, v] of nextSlot) if (v < now - 60_000) nextSlot.delete(k);
+  if (slot > now) await sleep(slot - now, "pace", { signal }); // the value tells tests these waits apart
+}
 const RETRIES = 2;
 const MAX_RETRY_WAIT_S = 30;
 
@@ -201,6 +219,7 @@ export async function askCartRequest<T>(
   const { params = {}, signal } = opts;
   const url = `${cfg.url}/api/partner/${path}${Object.keys(params).length ? `?${new URLSearchParams(params)}` : ""}`;
   for (let attempt = 0; ; attempt++) {
+    if (opts.bearer !== undefined) await pace(opts.bearer, signal);
     const res = await fetch(url, {
       method: opts.method ?? "GET",
       redirect: "error",
