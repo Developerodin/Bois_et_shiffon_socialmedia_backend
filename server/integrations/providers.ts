@@ -136,6 +136,14 @@ const pinterest: Adapter = {
 /** A Meta ad account as /me/adaccounts lists it. account_status 1 = active. */
 export type MetaAdAccount = { id: string; name: string; currency: string; timezone_name: string; account_status: number };
 const AD_ACCOUNT_PAGES = 20; // ponytail: 20 × 100 accounts; an agency login with more sees the first 2,000
+/**
+ * The most ad accounts one Meta login or system token may connect. Each is its own connection, saved one by one in a
+ * single transaction, and a business runs a few; more means an agency login that should be narrowed in Business
+ * Manager, so it is refused with tooManyAdAccounts' message rather than saving an arbitrary 50.
+ */
+export const MAX_AD_ACCOUNTS = 50;
+export const tooManyAdAccounts = (count: number) =>
+  `This Meta login can see ${count} ad accounts; at most ${MAX_AD_ACCOUNTS} can be connected. Use a login or system user that has only this business's ad accounts.`;
 
 /**
  * The active ad accounts this Meta login can read. The token rides in a header and each page is built from the
@@ -200,6 +208,7 @@ const metaAds: Adapter = {
     }
     const accounts = await metaAdAccounts(long.access_token);
     if (!accounts.length) throw new ProviderError("This Meta login has no active ad accounts. Sign in with the account that runs your ads.");
+    if (accounts.length > MAX_AD_ACCOUNTS) throw new ProviderError(tooManyAdAccounts(accounts.length));
     // Meta sometimes leaves expires_in out of the long-lived answer; it is 60 days.
     // Always an expiry: a connection without one holds a system user token (saveConnections' keep rule).
     const tokenExpiresAt = expiry(long.expires_in || SIXTY_DAYS_S);

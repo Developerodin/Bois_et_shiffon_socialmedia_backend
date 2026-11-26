@@ -219,7 +219,7 @@ pure-function level only (focus restore, the slide, the flash, the Recent menu a
 ### Deferred
 - **A3, two peeks side by side**: not built. Each peek is a narrow column over a board that is already two or three
   columns wide; two would hide the board, and the unsaved-guard and focus rules are per single peek. Revisit if people ask.
-- Not built either: full pages for posts, documents and competitors; hover prefetch.
+- Not built either: full pages for posts and documents; hover prefetch. (Competitors got its own page on 2026-11-26.)
 - Minors: the peek shows a skeleton forever if the agents or docs fetch fails (no retry there); an item opened and edited
   during a brand-switch request is dropped without a new ask; during the 200 ms slide-out an agreed-to-discard editor's
   guard is off, but opening another item inside that window can ask again; picking the already-active brand leaves
@@ -1706,7 +1706,7 @@ The chat has sales and catalogue tools only. Add, reusing the existing read func
 - AskCart runs on a bare IP (13.232.66.119); an Elastic IP or a domain would stop a restart from breaking the link.
 - Orders older than 60 days need Shopify to approve `read_all_orders` for the Shop Assistant app.
 - Business Profile and the customer inbox (Instagram DMs, Messenger) are mobile-app screens only; there is no web page for them yet.
-- Naming: the sidebar main-menu item that opens the Performance *tasks* list is now "Performance tasks" (web 0dbb7f3, local); the data page `/performance` is still reached only via Surge/Pulse or "SEO & GEO reports" in More. Consider a main-menu link to it.
+- Naming: the sidebar main-menu item that opens the Performance *tasks* list is now "Performance tasks" (web 0dbb7f3, local); the data page `/performance` is still reached only via Surge/Pulse or "Growth reports" in More. Consider a main-menu link to it.
 
 ## Money layer, Meta system token, story numbers, order history (branch `phase-2-followup`, 2026-11-26)
 
@@ -1729,3 +1729,92 @@ B&C orders: `currentTaxLines` include the shipping tax. AskCart sends `shippingL
 **Not live-checked:** the token path's query cost (no store uses a pasted token; the first page a process reads logs
 `requestedQueryCost`), Meta `debug_token` with a real system user token, a story read (Meta app review for insights
 pending), `read_all_orders` (the history stays dormant until AskCart stops answering pending). Browser checks not done.
+
+## Review fixes, sync status and the Growth reports rename merged (server 22d641b, web 2f54cad, 2026-11-26)
+
+- **Sync status:** each data source says when a sync is queued or running and when the last one started
+  (`DataSourceDto.sync`, `lastResult.runningSince`); a first run shows no last result. The Growth reports tabs poll once
+  per page while any source has a run queued or running, quietly, and not while the tab is hidden.
+- **AskCart pacing:** requests are spaced 1.1 s apart per token, keyed by a hash of the bearer (never the token). The
+  connect checks skip the waits. An orders sync that stops partway carries on a minute later (a follow-up keyed by the
+  job that queues it).
+- **Sales chat:** saved sales figures are hidden from, and kept out of the model's input for, someone without
+  crm.read; a period's incomplete orders count once per message; salesBreakdown's collection and vendor groups read
+  through topProducts.
+- **Rename:** "SEO & GEO reports" is now **Growth reports** (shared page names, More menu). The Overview's "See the
+  SEO & GEO reports" link stays: it opens that tab.
+
+## Competitors page merged (server 9f72da4, web 729edce, 2026-11-26)
+
+- Competitors moved from an Overview panel to its own page, `/competitors` (brand.read). A competitor's audit
+  (`?competitor=`) and the Competitors agent (`?agent=competitors`, from Find) open in a side peek over the list. Old
+  `/?panel=competitors` and `/?competitor=` links redirect after the account checks, keeping the competitor.
+- The assistant knows when the person is on the Competitors page.
+
+## Blocked-site audits merged (server 03b7b48, web 03be652, 2026-11-26)
+
+- A site that refuses automated readers gets a **partial audit**: PageSpeed scores and a marketing summary from public
+  search results, no page checks or findings. The marker is `approach.partial` in SiteAudit's JSON (no new column).
+- A fresh full audit stays shown over a newer partial one.
+- After a "blocks automated readers" failure the server refuses another audit of that domain for this workspace for
+  `AUDIT_BLOCK_DAYS` (7) days, with a 409 `audit.siteBlocked` and no charge; the failed run is refunded as before. Once
+  the block lifts the row says softly when it was last tried, and Audit is back.
+- Merge commit 4a49f18 kept git's default message; history, left as it is.
+
+## Compact Competitors list, Find more and Audit all merged (server 992dc18, web 9d1c329, 2026-11-26)
+
+- The page is a compact list: name, AI mentions, four score chips, checked date and two icon actions per row. **Find
+  more** opens the Competitors agent; under three competitors the list also asks for more.
+- **Audit all** (POST `competitors/audit-all`, agents.run, at most 50 ids, rate limit 10 presses an hour per brand)
+  audits the stale and never-audited sites in the page's order (most named by AI first) until credits run out. It
+  stops at the daily run cap (429) or when site audits are off for the brand (409) instead of charging and refunding per
+  site.
+- `credits.unlimited` tells the page a workspace in `UNLIMITED_CREDIT_WORKSPACES` is never charged, so Audit all doesn't
+  cap at the balance.
+
+## Merged-main review fixes (branch `merged-review-fixes`, 2026-11-26, not merged)
+
+Four-lens review of everything merged today; its fixes, plus two the owner found in the browser:
+- **Audit all no longer times out.** Eight sites took about 7 s each inside the request (remote DB round trips). The
+  route now answers at once (202 `{ queued, skipped }`, only not-tracked ids skipped there) and queues a
+  `competitors.audit-all` job keyed by the press id (`pressId`, required in the body); the job runs
+  auditAllCompetitors with every stop rule. The web keeps the press id until the server answers (makePresser), toasts
+  "Starting N audits…" and polls the list fast for two minutes. **Server and web must deploy together** (the request
+  and answer changed). A job that stops on "disabled" or the daily cap only logs it; the page shows nothing running.
+- **Competitors list:** one `DISTINCT ON (domain)` query instead of every fresh audit in memory, no findings or
+  approach in the list (the peek reads them from GET `competitors/:id/audit`), polled every 6 s only while an audit
+  runs or was just queued, else every minute. `credits` only for agents.run; the header reads "Unlimited credits" in
+  an unlimited workspace. The agents peek's poll pauses while the tab is hidden (useAgentsPoll, shared with the agents
+  board).
+- Meta Ads refuses a login or system token that sees more than 50 ad accounts. A sync waiting behind a history window
+  keeps its follow-up count; a pending run more than 10 minutes late no longer shows as queued.
+- The competitor types moved to `shared/competitors.ts`; DATA_MODEL §12 describes the money layer.
+
+## End of day 2026-11-26
+
+**Merged to main today (all unpushed):** the review fixes with the sync status and the Growth reports rename
+(22d641b), the Competitors page (9f72da4), blocked-site audits (03b7b48), the compact Competitors list with Find more
+and Audit all (992dc18), and the money layer with the Meta system token, story numbers and order history (0c7e80d).
+The fixes from the review of those merges are on `merged-review-fixes` in server, web and mobile, waiting to merge.
+
+**Migrations:** the five money-layer migrations (`20261126100000_fx_rate`, `20261126110000_shop_order_shipping_taxes`,
+`20261126120000_ad_platform_google`, `20261126120100_ad_budget`, `20261126130000_post_metric_navigation`) are applied
+to the dev DB. See DATA_MODEL §12.
+
+**Deploy steps, in order:**
+1. Merge `merged-review-fixes`, then push server, web and mobile (server and web together: Audit all's request and
+   answer changed).
+2. Deploy; `prisma migrate deploy` applies the five migrations.
+3. Right after, `npm run reset:shopify-orders -- <brandId>` for B&C (every brand with a SHOPIFY_ORDERS source), so its
+   orders carry `shippingTaxes` (see the money layer section above).
+
+**Waiting on outside parties:**
+- The Meta Ads connection for B&C.
+- Shopify approving `read_all_orders` for the Shop Assistant app; order history past 60 days stays dormant until then.
+- Meta's app review for Instagram insights; story numbers can't be live-checked until it passes.
+
+**Open small items:**
+- `tests/crawl.test.ts` is flaky (failed once, passed on rerun); find the timing it depends on.
+- Remove the `sma-money` worktrees; their `node_modules` are junctions, so remove those with `cmd /c rmdir`.
+
+**Next:** chat tools for ads, posts and Search Console, then ads alerts.

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { blockedAuditError } from "@/server/agents/definitions/site-audit";
 import { prisma } from "@/server/db/prisma";
 import { creditBalance } from "@/server/services/credits";
-import { auditAllCompetitors, listCompetitors, startCompetitorAudit } from "@/server/services/competitor-audits";
+import { auditAllCompetitors, competitorAudit, listCompetitors, queueAuditAll, runAuditAllJob, startCompetitorAudit } from "@/server/services/competitor-audits";
 
 /** Competitor audits against Postgres: the full-over-partial pick and the blocked-site refusal's queries. */
 let ws: string;
@@ -19,8 +19,12 @@ beforeAll(async () => {
     data: [
       { id: "c-mixed", workspaceId: ws, brandId: "ca-b", name: "Mixed", domain: "mixed.test", source: "manual" },
       { id: "c-blocked", workspaceId: ws, brandId: "ca-b", name: "Blocked", domain: "blocked.test", source: "manual" },
+      { id: "c-stale", workspaceId: ws, brandId: "ca-b", name: "Stale", domain: "stale.test", source: "manual" },
     ],
   });
+  // A full audit gone stale and a newer partial one: the partial one is shown.
+  await audit("stale.test", ago(60), { positioning: "old full" });
+  await audit("stale.test", ago(2), { partial: true });
   // A full audit (no `partial` key at all) older than a partial one: the full one is shown.
   await audit("mixed.test", ago(3), { positioning: "full" });
   await audit("mixed.test", ago(1), { partial: true });
@@ -33,8 +37,12 @@ describe("competitor audits", () => {
   it("shows the fresh full audit over a newer partial one", async () => {
     const { competitors } = await listCompetitors(ws, "ca-b");
     const mixed = competitors.find((c) => c.domain === "mixed.test")!;
-    expect(mixed.audit).toMatchObject({ partial: false, approach: { positioning: "full" } });
+    expect(mixed.audit).toMatchObject({ partial: false });
+    // The list leaves the heavy fields out; the competitor's own view reads the same audit in full.
+    expect(mixed.audit).not.toHaveProperty("approach");
+    expect(await competitorAudit(ws, "ca-b", "c-mixed")).toMatchObject({ id: mixed.audit!.id, partial: false, approach: { positioning: "full" } });
     expect(competitors.find((c) => c.domain === "blocked.test")).toMatchObject({ auditBlocked: true });
+    expect(competitors.find((c) => c.domain === "stale.test")?.audit).toMatchObject({ partial: true, stale: false });
   });
 
   it("refuses a new audit of a site that blocked us, without spending credits", async () => {
@@ -105,12 +113,41 @@ describe("audit all on a brand with site audits turned off", () => {
   });
 
   it("says when the workspace is never charged, so the page doesn't cap audits at the balance", async () => {
-    expect((await listCompetitors(ws3, "off-b")).credits.unlimited).toBe(false);
+    expect((await listCompetitors(ws3, "off-b")).credits).toBeUndefined();
+    expect((await listCompetitors(ws3, "off-b", { withCredits: true })).credits?.unlimited).toBe(false);
     process.env.UNLIMITED_CREDIT_WORKSPACES = ws3;
     try {
-      expect((await listCompetitors(ws3, "off-b")).credits.unlimited).toBe(true);
+      expect((await listCompetitors(ws3, "off-b", { withCredits: true })).credits?.unlimited).toBe(true);
     } finally {
       delete process.env.UNLIMITED_CREDIT_WORKSPACES;
     }
+  });
+});
+
+describe("audit all as a background job", () => {
+  // Its own workspace: the starter grant (20 credits) pays for two of the three audits.
+  let ws4: string;
+  beforeAll(async () => {
+    ws4 = (await prisma.workspace.create({ data: { name: "W4", slug: "w-competitor-audit-job" } })).id;
+    await prisma.brand.create({ data: { id: "job-b", workspaceId: ws4, slug: "job-b", displayName: "B" } });
+    await prisma.competitor.createMany({
+      data: ["job-1", "job-2", "job-3"].map((id) => ({ id, workspaceId: ws4, brandId: "job-b", name: id, domain: `${id}.test`, source: "manual" })),
+    });
+  });
+
+  it("queues one job per press without starting a run, then the job starts them until credits run out", async () => {
+    const press = { workspaceId: ws4, brandId: "job-b", userId, competitorIds: ["job-1", "job-2", "job-3", "not-ours"], pressId: "press-0001" };
+    const queued = await queueAuditAll(press);
+    expect(queued).toEqual({ queued: ["job-1", "job-2", "job-3"], skipped: [{ id: "not-ours", reason: "not-tracked" }] });
+    // The same press again (a retry after a timeout) joins the job already queued.
+    await queueAuditAll(press);
+    const jobs = await prisma.job.findMany({ where: { type: "competitors.audit-all", workspaceId: ws4 } });
+    expect(jobs).toHaveLength(1);
+    expect(await prisma.agentRun.count({ where: { workspaceId: ws4 } })).toBe(0);
+    expect(await prisma.creditEntry.count({ where: { workspaceId: ws4, reason: "site-audit" } })).toBe(0);
+
+    await runAuditAllJob(jobs[0].payload);
+    expect(await prisma.agentRun.count({ where: { workspaceId: ws4, agentKey: "site-audit" } })).toBe(2);
+    expect(await creditBalance(ws4)).toBe(0);
   });
 });

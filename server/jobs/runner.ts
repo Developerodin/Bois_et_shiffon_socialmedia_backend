@@ -39,6 +39,7 @@ import { onVoiceDeleteFailure, reclaimAbandonedClones, runVoiceDelete, VOICE_DEL
 import { ReconnectNeeded, refreshExpiringTokens } from "@/server/services/connections";
 import { executePublication, onPublishJobLost, PUBLISH_JOB, PublishingError } from "@/server/services/publishing";
 import { runMonthlyPlans } from "@/server/services/automations";
+import { AUDIT_ALL_JOB, runAuditAllJob } from "@/server/services/competitor-audits";
 import { renewDuePlans } from "@/server/services/subscriptions";
 import { expireStaleWrites } from "@/server/shopify/writes";
 
@@ -51,6 +52,7 @@ export const DAILY_SWEEP_JOB = "system.daily-sweep";
 
 const HANDLERS: Record<string, Handler> = {
   [AGENT_RUN_JOB]: { run: executeAgentRun, onFailure: onAgentRunFailure },
+  [AUDIT_ALL_JOB]: { run: runAuditAllJob },
   [CATALOG_PAGES_JOB]: { run: runCatalogPages },
   [CATALOG_SYNC_JOB]: { run: runCatalogSync },
   [DAILY_SWEEP_JOB]: { run: dailySweep },

@@ -2,15 +2,19 @@ import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { prisma } from "@/server/db/prisma";
+import { kickIfDue } from "@/server/jobs/runner";
 import { listCompetitors } from "@/server/services/competitor-audits";
 import { domainOf } from "@/shared";
 
-/** Competitors with the latest shared audit of each domain, plus this workspace's credits. */
+/** Competitors with the latest shared audit of each domain, plus this workspace's credits for someone who may run audits. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "brand.read");
     if (scope instanceof Response) return scope;
-    return Response.json(await listCompetitors(scope.workspaceId, scope.brandId));
+    // The page polls this while audits start: where the API runs jobs, an Audit all job can end its runner's time
+    // budget with the agent runs it queued still waiting, and this picks them up.
+    await kickIfDue().catch(() => {});
+    return Response.json(await listCompetitors(scope.workspaceId, scope.brandId, { withCredits: scope.perms.has("agents.run") }));
   } catch (error) {
     return fromAccessError(error);
   }

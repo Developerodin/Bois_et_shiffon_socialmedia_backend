@@ -181,9 +181,10 @@ const MAX_PAGES = 50;
 /** Below the job's 240 s deadline, so a long read ends as `capped` with its pages rather than aborting. */
 const MAX_MS = 180_000;
 /**
- * AskCart sends up to 25 orders a page (line items make each costlier), a quarter of the pasted-token path's 100: four
- * times the pages keeps a run at about 5,000 orders, still within MAX_MS. Waits for a partial page's Retry-After count
- * as pages too.
+ * AskCart sends up to 25 orders a page (line items make each costlier), a quarter of the pasted-token path's 100. In
+ * practice MAX_MS ends a run first: AskCart requests are spaced 1.1 s apart, so a run reads about 58 pages (about 1,450
+ * orders) and carries on in a follow-up; this cap only bounds a run whose pages come back faster. Waits for a partial
+ * page's Retry-After count as pages too.
  */
 const ASKCART_MAX_PAGES = 200;
 /** The longest Retry-After a run waits out in place (AskCart sends 2–30 s); longer stops the run as rate_limited. */
