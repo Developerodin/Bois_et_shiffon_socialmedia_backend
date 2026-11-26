@@ -7,22 +7,26 @@ const m = vi.hoisted(() => ({
   competitors: vi.fn(),
   audits: vi.fn(),
   runs: vi.fn(),
+  competitor: vi.fn(),
+  runFirst: vi.fn(),
+  auditFirst: vi.fn(),
+  spend: vi.fn(),
 }));
 vi.mock("@/server/seo/site-facts", async (orig) => ({ ...(await orig<object>()), collectSiteFacts: m.facts, runPageSpeed: m.pageSpeed }));
 vi.mock("@/server/db/prisma", () => ({
   prisma: {
-    siteAudit: { create: m.create, findMany: m.audits },
-    competitor: { findMany: m.competitors },
-    agentRun: { findMany: m.runs },
+    siteAudit: { create: m.create, findMany: m.audits, findFirst: m.auditFirst },
+    competitor: { findMany: m.competitors, findFirstOrThrow: m.competitor },
+    agentRun: { findMany: m.runs, findFirst: m.runFirst },
     auditReport: { findFirst: vi.fn(async () => null) },
   },
 }));
-vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), creditBalance: vi.fn(async () => 50) }));
+vi.mock("@/server/services/credits", async (orig) => ({ ...(await orig<object>()), creditBalance: vi.fn(async () => 50), spendCredits: m.spend }));
 
-import { BLOCKED_REASON, blockedAuditError, SiteBlockedError, siteAuditAgent } from "@/server/agents/definitions/site-audit";
+import { blockedAuditError, SiteBlockedError, siteAuditAgent } from "@/server/agents/definitions/site-audit";
 import type { AgentContext } from "@/server/agents/types";
 import { siteRefusedUs } from "@/server/seo/site-facts";
-import { AUDIT_BLOCK_DAYS, listCompetitors } from "@/server/services/competitor-audits";
+import { AUDIT_BLOCK_DAYS, listCompetitors, startCompetitorAudit } from "@/server/services/competitor-audits";
 
 const PS = { performance: 41, seo: 88, accessibility: 77, bestPractices: 92, lcpMs: 5200, cls: 0.02 };
 const noPages = (failures: Array<{ url: string; error: string }>) => ({
@@ -55,13 +59,14 @@ beforeEach(() => {
 });
 
 describe("siteRefusedUs", () => {
-  it("counts 401/403/429 on the home page, or every failure a 401/403", () => {
+  it("counts a 401 or 403 on the home page", () => {
     expect(siteRefusedUs("https://x.com", [{ url: "https://x.com/", error: "HTTP 403 text/html" }])).toBe(true);
-    expect(siteRefusedUs("https://x.com", [{ url: "https://x.com/", error: "HTTP 429 text/html" }])).toBe(true);
-    expect(siteRefusedUs("https://x.com", [{ url: "https://x.com/a", error: "HTTP 401 text/html" }, { url: "https://x.com/b", error: "HTTP 403 text/html" }])).toBe(true);
+    expect(siteRefusedUs("https://x.com", [{ url: "https://x.com/", error: "HTTP 401 text/html" }])).toBe(true);
   });
 
-  it("does not count server errors, timeouts, robots.txt or a 429 deeper in the site", () => {
+  it("does not count a 429, server errors, timeouts, robots.txt or a failure deeper in the site", () => {
+    expect(siteRefusedUs("https://x.com", [{ url: "https://x.com/", error: "HTTP 429 text/html" }])).toBe(false);
+    expect(siteRefusedUs("https://x.com", [{ url: "https://x.com/a", error: "HTTP 403 text/html" }])).toBe(false);
     expect(siteRefusedUs("https://x.com", [{ url: "https://x.com/", error: "HTTP 500 text/html" }])).toBe(false);
     expect(siteRefusedUs("https://x.com", [{ url: "https://x.com/", error: "The operation was aborted due to timeout" }])).toBe(false);
     expect(siteRefusedUs("https://x.com", [{ url: "https://x.com/", error: "disallowed by robots.txt" }])).toBe(false);
@@ -81,7 +86,7 @@ describe("site audit of a site that blocks automated readers", () => {
     expect(data.scores).toMatchObject({ performance: 41, seo: 88, siteChecks: null });
     expect(data.findings).toEqual([]);
     expect(data.pagesRead).toBe(0);
-    expect(data.approach).toMatchObject({ positioning: "Solid wood furniture.", partial: true, blockedReason: BLOCKED_REASON });
+    expect(data.approach).toMatchObject({ positioning: "Solid wood furniture.", partial: true });
     expect(data.sources).toEqual([{ url: "https://news.example/tikamoon", title: "Tikamoon profile" }]);
   });
 
@@ -153,12 +158,61 @@ describe("competitors list: auditBlocked", () => {
     expect((await listCompetitors("w1", "b1")).competitors[0]).toMatchObject({ auditBlocked: false, auditBlockedUntil: null, auditError: blockedAuditError("blocked.com") });
   });
 
-  it("marks a partial audit with its reason", async () => {
+  it("marks a partial audit", async () => {
     m.competitors.mockResolvedValue([competitor("tikamoon.com"), competitor("full.com")]);
-    m.audits.mockResolvedValue([audit("tikamoon.com", at(10), { partial: true, blockedReason: BLOCKED_REASON }), audit("full.com", at(10), { positioning: "x" })]);
+    m.audits.mockResolvedValue([audit("tikamoon.com", at(10), { partial: true }), audit("full.com", at(10), { positioning: "x" })]);
     m.runs.mockResolvedValue([]);
     const { competitors } = await listCompetitors("w1", "b1");
-    expect(competitors[0].audit).toMatchObject({ partial: true, blockedReason: BLOCKED_REASON });
-    expect(competitors[1].audit).toMatchObject({ partial: false, blockedReason: null });
+    expect(competitors[0].audit).toMatchObject({ partial: true });
+    expect(competitors[1].audit).toMatchObject({ partial: false });
+  });
+
+  it("prefers a fresh full audit over a newer partial one, and falls back to the partial one", async () => {
+    m.competitors.mockResolvedValue([competitor("a.com"), competitor("b.com")]);
+    // The newest per domain (distinct) vs every audit since AUDIT_FRESH_DAYS (createdAt filter): b.com's full one is stale.
+    const newest = [audit("a.com", at(7), { partial: true }), audit("b.com", at(7), { partial: true })];
+    const fresh = [newest[0], { ...audit("a.com", at(6), { positioning: "full" }), id: "a-full" }, newest[1]];
+    m.audits.mockImplementation(async (q: { where: { createdAt?: unknown } }) => (q.where.createdAt ? fresh : newest));
+    m.runs.mockResolvedValue([]);
+    const { competitors } = await listCompetitors("w1", "b1");
+    expect(competitors[0].audit).toMatchObject({ id: "a-full", partial: false });
+    expect(competitors[1].audit).toMatchObject({ id: "a-b.com", partial: true });
+  });
+
+  it("says the latest failure was a block even after the block lifted", async () => {
+    m.competitors.mockResolvedValue([competitor("blocked.com")]);
+    m.audits.mockResolvedValue([]);
+    m.runs.mockImplementation(async (q: { where: { status: unknown } }) => (q.where.status === "FAILED" ? [failure("blocked.com", blockedAuditError("blocked.com"), at(5))] : []));
+    vi.setSystemTime(at(5 + AUDIT_BLOCK_DAYS + 1));
+    expect((await listCompetitors("w1", "b1")).competitors[0]).toMatchObject({ auditBlocked: false, auditBlockedAt: at(5).toISOString() });
+  });
+});
+
+describe("starting an audit of a site that blocked us", () => {
+  const at = (d: number) => new Date(Date.UTC(2026, 10, d));
+  const start = () => startCompetitorAudit({ workspaceId: "w1", brandId: "b1", userId: "u1", competitorId: "c1" });
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at(8));
+    m.competitor.mockResolvedValue({ id: "c1", domain: "blocked.com" });
+    m.runFirst.mockImplementation(async (q: { where: { status: unknown } }) =>
+      q.where.status === "FAILED" ? { error: blockedAuditError("blocked.com"), createdAt: at(5), finishedAt: at(5) } : null);
+    m.auditFirst.mockResolvedValue(null);
+    m.spend.mockRejectedValue(new Error("should not charge"));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("refuses within AUDIT_BLOCK_DAYS without spending credits", async () => {
+    expect(await start()).toEqual({ status: "blocked", until: at(5 + AUDIT_BLOCK_DAYS).toISOString() });
+    expect(m.spend).not.toHaveBeenCalled();
+  });
+
+  it("goes ahead once the block lifted or a newer audit landed", async () => {
+    vi.setSystemTime(at(5 + AUDIT_BLOCK_DAYS));
+    await expect(start()).rejects.toThrow("should not charge");
+    vi.setSystemTime(at(8));
+    m.auditFirst.mockResolvedValue({ createdAt: at(6) });
+    await expect(start()).rejects.toThrow("should not charge");
+    expect(m.spend).toHaveBeenCalledTimes(2);
   });
 });
