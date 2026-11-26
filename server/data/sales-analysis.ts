@@ -31,9 +31,12 @@ type Scope = { workspaceId: string; brandId: string };
 const id = (alias: string) => Prisma.raw(`"${alias}"`);
 /** Net units of the lines aliased `a`. */
 const units = (a: string) => Prisma.sql`COALESCE(${id(a)}."currentQuantity", ${id(a)}."quantity")`;
-/** Net sales of the lines aliased `a` (see the header). */
+/**
+ * Net sales of the lines aliased `a` (see the header). A line with quantity 0 and no net price has no unit price to
+ * work out; it sold nothing, so it counts 0 (a NULL would make a group's sum NULL and sort it first).
+ */
 const netSales = (a: string) =>
-  Prisma.sql`${units(a)} * COALESCE(${id(a)}."netUnitPrice", ${id(a)}."discountedTotal" / NULLIF(${id(a)}."quantity", 0))`;
+  Prisma.sql`COALESCE(${units(a)} * COALESCE(${id(a)}."netUnitPrice", ${id(a)}."discountedTotal" / NULLIF(${id(a)}."quantity", 0)), 0)`;
 /** A variant's key: its id; a deleted variant of a live product, the product; a line without a product, OTHER_ITEMS. */
 const VARIANT_KEY = Prisma.sql`COALESCE(l."variantId", 'product:' || l."productId", '(other)')`;
 const PRODUCT_KEY = Prisma.sql`COALESCE(l."productId", '(other)')`;

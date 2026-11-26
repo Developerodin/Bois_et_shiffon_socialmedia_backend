@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The tools over a stubbed data layer: what they let through, refuse, clean and say. The SQL itself is checked against
-// a real Postgres (see the branch's handover notes), not by matching its text here.
+// a real Postgres in tests/db/sales-analysis.db.test.ts, not by matching its text here.
 const perms = vi.hoisted(() => ({ set: new Set(["crm.read"]) }));
 const data = vi.hoisted(() => ({
   salesSummary: vi.fn(),

@@ -128,6 +128,10 @@ describe("sales analysis", () => {
     const ps = await productSales(brandScope(), range, "oak");
     expect(ps.variants.find((v) => v.currency === "EUR")).toMatchObject({ title: "Oak table — Large", units: 1, in_catalogue: true, stock_quantity: 4 });
     expect((await productSales(brandScope(), range, "100%_")).variants).toEqual([]);
+    // A line removed to quantity 0, read without a net price: revenue 0, never NULL (the tool formats it).
+    await upsertOrders(scope(), [order("6", "2026-11-22T00:00:00Z", { lineItems: [line("z", "12", 0, "0.00")] })]);
+    const zero = (await productSales(brandScope(), range, "")).variants.find((v) => v.units === 0);
+    expect(zero && String(zero.revenue)).toBe("0");
     const sr = await stockRisk(brandScope(), range, 10);
     expect(sr.sellers.map((s) => s.title)).toContain("Other / custom items");
     expect(sr.slow[0]).toMatchObject({ title: "Slow lamp", units: 0 });
