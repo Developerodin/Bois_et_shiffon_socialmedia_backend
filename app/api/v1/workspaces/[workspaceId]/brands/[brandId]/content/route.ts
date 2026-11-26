@@ -134,6 +134,8 @@ const NewPostInput = z.object({
   product: z.object({ title: z.string().trim().min(1).max(200), photoKey: z.string().min(1).max(300) }),
   direction: z.string().max(500).optional(),
   requestId: z.string().uuid().optional(),
+  // An instant with its offset, as a scheduled publish's runAt: the web sends the browser's local time as ISO.
+  scheduledFor: z.string().datetime({ offset: true }).optional(),
 });
 
 // A new story (P07): paid, once per requestId (a uuid the app makes when the person taps).
@@ -173,7 +175,8 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
       kickRunner();
       return Response.json({ id: story.id }, { status: 201 });
     }
-    const { item, repeated } = await createPost({ ...scope, ...parsed.data });
+    const { scheduledFor, ...post } = parsed.data;
+    const { item, repeated } = await createPost({ ...scope, ...post, ...(scheduledFor ? { scheduledFor: new Date(scheduledFor) } : {}) });
     // A repeat that raced past the check above: the same post, no second run.
     if (repeated) return Response.json({ id: item.id });
     await startAgentRun({ workspaceId: scope.workspaceId, brandId: scope.brandId, agentKey: "creator", trigger: "event", input: { itemId: item.id } }).catch(() => null);

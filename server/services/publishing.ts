@@ -180,7 +180,8 @@ export async function postAiAllowed(workspaceId: string) {
   return (await hitRateLimit(`post-ai:${workspaceId}`, 60, 86_400_000)).allowed;
 }
 
-export type NewPost = { channel: "INSTAGRAM_POST" | "INSTAGRAM_CAROUSEL"; goal: keyof typeof APP_GOALS; product: { title: string; photoKey: string }; direction?: string; requestId?: string };
+/** `scheduledFor`: the day and time it is planned for (the calendar's empty day); omitted, it is unscheduled. */
+export type NewPost = { channel: "INSTAGRAM_POST" | "INSTAGRAM_CAROUSEL"; goal: keyof typeof APP_GOALS; product: { title: string; photoKey: string }; direction?: string; requestId?: string; scheduledFor?: Date };
 
 /**
  * The post or story already made for this request id in this brand, if it still exists. Posts and stories share one
@@ -201,12 +202,14 @@ export const requestLockKey = (scope: { workspaceId: string; brandId: string }, 
 
 /**
  * A post the person asks for in the app (P06): its brief is what they chose, so it skips the Brief writer;
- * the caller starts the Creator on it. Unscheduled until they pick a slot (P05).
+ * the caller starts the Creator on it. Unscheduled until they pick a slot (P05), unless it comes with `scheduledFor`
+ * (New post from a calendar day), which, like a scheduled publish's time, must not be in the past.
  * With a requestId (the web sends one), a repeat gets the same post back (`repeated`) and the caller starts no second run.
  * A post deleted since is gone: its requestId then makes a new one. Without a requestId nothing is looked up (the app's old behaviour).
  */
 export async function createPost(input: { workspaceId: string; brandId: string; userId: string } & NewPost): Promise<{ item: { id: string }; repeated: boolean }> {
   if (!ownMediaKey(input, input.product.photoKey)) throw new PublishingError("Unknown image", 400);
+  if (input.scheduledFor && input.scheduledFor.getTime() < Date.now() - 60_000) throw new PublishingError("Pick a time in the future", 400);
   const direction = input.direction?.trim() || null;
   const productIds = await productIdsForPhoto(input.workspaceId, input.brandId, input.product.photoKey);
   // A special offer links the live offer covering the photo's product, so the Creator gets its facts.
@@ -220,6 +223,7 @@ export async function createPost(input: { workspaceId: string; brandId: string; 
     const item = await tx.contentItem.create({
       data: {
         workspaceId: input.workspaceId, brandId: input.brandId, title: input.product.title, channel: input.channel, status: "BRIEF_READY", productIds, campaignId, ownerId: input.userId,
+        ...(input.scheduledFor ? { scheduledFor: input.scheduledFor } : {}),
         brief: { goal: APP_GOALS[input.goal], products: [input.product.title], keyMessage: direction ?? "", angle: input.goal, photoKeys: [input.product.photoKey], ...(input.requestId ? { requestId: input.requestId } : {}) },
       },
     });

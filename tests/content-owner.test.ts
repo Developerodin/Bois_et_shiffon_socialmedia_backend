@@ -75,6 +75,16 @@ describe("post owner", () => {
     expect(created().ownerId).toBe("u1");
   });
 
+  it("createPost dates the post with scheduledFor, leaves it undated without, and refuses a past one", async () => {
+    const at = new Date(Date.now() + 86_400_000);
+    await createPost({ ...scope, channel: "INSTAGRAM_POST", goal: "newArrival", product: { title: "Milo", photoKey: "w1/b1/a.jpg" }, scheduledFor: at });
+    expect(created().scheduledFor).toEqual(at);
+    await createPost({ ...scope, channel: "INSTAGRAM_POST", goal: "newArrival", product: { title: "Milo", photoKey: "w1/b1/a.jpg" } });
+    expect(created(1)).not.toHaveProperty("scheduledFor");
+    await expect(createPost({ ...scope, channel: "INSTAGRAM_POST", goal: "newArrival", product: { title: "Milo", photoKey: "w1/b1/a.jpg" }, scheduledFor: new Date(Date.now() - 86_400_000) })).rejects.toThrow("Pick a time in the future");
+    expect(db.contentItem.create).toHaveBeenCalledTimes(2);
+  });
+
   it("planner posts take the user who started the run, else none", async () => {
     m.planning.mockResolvedValue({
       campaigns: [{ id: "c1", name: "BF", startsAt: new Date("2026-11-27T07:00:00Z"), endsAt: new Date("2026-11-30T19:00:00Z"), productIds: [], categories: [], offer: "x", discountPercent: 10, code: null, archivedAt: null }],
