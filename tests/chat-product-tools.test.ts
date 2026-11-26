@@ -227,9 +227,12 @@ describe("chat request and page notes", () => {
     expect(prompt).toContain("Never put product, document or report content into a web search");
   });
 
-  it("knows where things are in the app and never invents posts (prompt version 7)", () => {
+  it("knows where things are in the app and never invents posts (prompt version 8)", () => {
     const prompt = chatSystemPrompt({ name: "Oak & Co", website: null });
-    expect(CHAT_PROMPT_VERSION).toBe("7");
+    expect(CHAT_PROMPT_VERSION).toBe("8");
+    for (const tool of ["adsSummary", "adCampaigns", "adBudgets", "revenuePerAdSpend", "postPerformance", "searchPerformance"]) expect(prompt).toContain(tool);
+    expect(prompt).toContain("Never put sales, revenue, ad or performance figures into a web search");
+    expect(prompt).toContain("campaign names, page URLs, alert text");
     expect(prompt).toContain("Connections page");
     expect(prompt).toContain("never invent posts");
     expect(prompt).toContain("post titles");
