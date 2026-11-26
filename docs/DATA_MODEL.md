@@ -423,3 +423,21 @@ Five migrations, all additive (new tables, nullable columns, one enum value), no
 - The Meta Ads system user token has no column of its own: it is an ACTIVE `IntegrationConnection` (provider
   META_ADS) with `tokenExpiresAt` null. A personal login always has an expiry, and saveConnections' `keep` rule never
   lets it replace a working system token.
+
+## 13. Ads alerts (2026-11-26)
+
+Two migrations, both additive: `20261126140000_notification_ad_alert_kind`, `20261126140100_ad_alert`.
+
+- `NotificationKind.AD_ALERT`: added in its own migration, since Postgres can't use an enum value added by `ALTER
+  TYPE … ADD VALUE` in the same transaction. An `AD_ALERT` notice has no task and no actor; `Notification.adAlertId`
+  (nullable, cascades with the alert, indexed) points at its alert, and its dedupeKey is `AD_ALERT:<userId>:<alertId>`.
+  Who gets one: active people holding brand.read and ads.read on the brand (role ∪ grant); who still sees it: the same
+  keys at read time, brand not archived (visibleNotificationsSql).
+- `AdAlert`: one row per alert episode on a brand. `kind` (`AdAlertKind`: SPEND_UP, ROAS_DOWN, NO_PURCHASES,
+  OVER_PACE), `accountId` ("act_…", null for the brand-wide OVER_PACE), `campaignId` and `campaignName` (NO_PURCHASES),
+  `currency`, `firstDay`/`lastDay` (`@db.Date`, the rule's own day), `values Json` (the figures as strings),
+  `subjectKey` (`<kind>:<brandId>:<account>[:<campaign>]` or `OVER_PACE:<brandId>:<YYYY-MM>`) and a unique `dedupeKey`
+  (subjectKey + first day; OVER_PACE: subjectKey, once a month). A day within one day of an episode moves its
+  `lastDay` on instead of making a new row. Indexes `(brandId, subjectKey, lastDay)`, `(brandId, lastDay)` (the chat's
+  recent alerts) and `(brandId, createdAt)` (the digest's week). Cascades with the brand. Written by the `ads.alerts`
+  job (server/ads/alerts.ts).
