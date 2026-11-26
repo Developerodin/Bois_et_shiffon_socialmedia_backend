@@ -8,7 +8,7 @@ import {
 } from "@/server/data/sales-analysis";
 import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
 import { addDays, badRangeDetail, brandTimeZone, rangeDays, zoneToday } from "@/server/data/sources";
-import { MAX_SALES_CALLS, SALES_HIDDEN } from "@/server/chat/turn";
+import { CHAT_DATA_TOOLS, hiddenFor, MAX_DATA_CALLS, MAX_GROUP_CALLS, type ToolGroup } from "@/server/chat/turn";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
@@ -16,6 +16,7 @@ import { isTimeZone, wallTime } from "@/server/content/offer-checks";
 import { prisma } from "@/server/db/prisma";
 import { latestAuditReports } from "@/server/services/audit-reports";
 import { CONTEXT_DOC_KINDS, listContextDocs } from "@/server/services/context-docs";
+import { cleanTitle } from "@/server/text";
 
 export type ChatScope = { workspaceId: string; brandId: string; userId: string };
 
@@ -26,24 +27,23 @@ const POST_FILTERS = {
   "awaiting-approval": [...STATUS_GROUPS.awaiting],
   published: [...STATUS_GROUPS.published],
 } as const;
-// Titles are data written by agents and people: one line, no control characters, short.
-// Zero-width and bidi characters go too, so a title can't hide or reorder text.
-const cleanTitle = (t: string) =>
-  t.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+/g, " ").trim().slice(0, 100) || "(untitled)";
 // A post whose time passed this recently may still be publishing: not overdue yet.
 const OVERDUE_GRACE_MS = 15 * 60_000;
 
 // Saved threads are validated against these schemas: they may only widen (new optional fields, higher caps), never narrow.
-const SalesRange = z.object({
-  from: z.string().max(10).optional().describe("YYYY-MM-DD, brand-local, inclusive; with to"),
-  to: z.string().max(10).optional().describe("YYYY-MM-DD, inclusive; leave both out for the last 30 days"),
-});
-const BAD_RANGE = { error: badRangeDetail(MAX_SALES_DAYS) };
+/** A tool's optional period: both days, or neither for the tool's default (`defaultHint` says which). */
+const rangeInput = (defaultHint: string) =>
+  z.object({
+    from: z.string().max(10).optional().describe("YYYY-MM-DD, brand-local, inclusive; with to"),
+    to: z.string().max(10).optional().describe(`YYYY-MM-DD, inclusive; ${defaultHint}`),
+  });
+const SalesRange = rangeInput("leave both out for the last 30 days");
 const NEEDS_LINES =
   "Per-product sales need order line items, which only come through the AskCart connection once AskCart sends them; none are stored for this brand yet. salesSummary and salesBreakdown still work from order totals.";
 const LINE_NOTE =
   "From order line items: units and revenue are net of refunds, revenue after every discount (order-level share included), and include VAT where the shop's prices do (unlike salesSummary's netExVat). Lines without a product (custom lines, deleted products) are 'Other / custom items'.";
-const SALES_LIMIT = { error: "Sales tool limit reached for this message." };
+const DATA_LIMIT = { error: "Data tool limit reached for this message." };
+const GROUP_NAME: Record<ToolGroup, string> = { sales: "Sales", ads: "Ads", analytics: "Analytics" };
 const WEEKS_NOTE = "Weeks start on Monday and are labelled by that day; the first and last weeks can be partial.";
 /** stockRisk flags a best seller with less stock than this many days of its average sales. */
 const LOW_COVER_DAYS = 14;
@@ -62,20 +62,38 @@ export function chatTools(scope: ChatScope) {
   let perms: Promise<Set<string>> | undefined;
   const can = async (p: string) => (await (perms ??= effectivePermissions(scope.workspaceId, scope.userId, scope.brandId))).has(p);
   const denied = (what: string) => ({ error: `Your role can't see ${what}.` });
-  // Sales tools: crm.read, and at most MAX_SALES_CALLS calls per message (one chatTools per message). Counted here as
-  // well as by the route's activeTools, which can't stop several calls made in parallel within one step.
-  let salesCalls = 0;
-  const salesGate = async () => {
-    if (!(await can("crm.read"))) return SALES_HIDDEN;
-    if (++salesCalls > MAX_SALES_CALLS) return SALES_LIMIT;
+  // Data tools (CHAT_DATA_TOOLS): every key the tool needs, then at most MAX_GROUP_CALLS calls per group and
+  // MAX_DATA_CALLS in all per message (one chatTools per message). Counted here as well as by the route's activeTools,
+  // which can't stop several calls made in parallel within one step. A refused call counts against nothing.
+  const groupCalls: Partial<Record<ToolGroup, number>> = {};
+  let dataCalls = 0;
+  const gate = async (name: string) => {
+    const { keys, group } = CHAT_DATA_TOOLS[name];
+    const refusal = hiddenFor(keys, await (perms ??= effectivePermissions(scope.workspaceId, scope.userId, scope.brandId)));
+    if (refusal) return refusal;
+    // No await between the checks and the counts, so calls made in parallel can't both take the last slot.
+    if ((groupCalls[group] ?? 0) >= MAX_GROUP_CALLS) return { error: `${GROUP_NAME[group]} tool limit reached for this message.` };
+    if (dataCalls >= MAX_DATA_CALLS) return DATA_LIMIT;
+    groupCalls[group] = (groupCalls[group] ?? 0) + 1;
+    dataCalls++;
     return null;
   };
-  // The sales tools' period: both days given (validated like the Sales tab's), or the last 30 brand-local days.
-  const rangeOf = async ({ from, to }: { from?: string; to?: string }): Promise<DateRange | null> => {
-    if (from || to) return parseRange(from, to, MAX_SALES_DAYS);
-    const zone = await brandTimeZone(scope);
-    const today = zoneToday(isTimeZone(zone) ? zone : DEFAULT_TIME_ZONE);
-    return { from: addDays(today, -29), to: today };
+  // A data tool's period: both days given (validated like the matching tab's, up to the tool's own maximum), or
+  // `defaultDays` days ending at `defaultEnd` (default: brand-local today). A defaultEnd without a day gives its note.
+  const rangeOf = async (
+    { from, to }: { from?: string; to?: string },
+    maxDays: number,
+    defaultEnd?: () => Promise<string | { note: string }>,
+    defaultDays = 30,
+  ): Promise<DateRange | { error: string } | { note: string }> => {
+    if (from || to) return parseRange(from, to, maxDays) ?? { error: badRangeDetail(maxDays) };
+    let end: string | { note: string };
+    if (defaultEnd) end = await defaultEnd();
+    else {
+      const zone = await brandTimeZone(scope);
+      end = zoneToday(isTimeZone(zone) ? zone : DEFAULT_TIME_ZONE);
+    }
+    return typeof end === "string" ? { from: addDays(end, 1 - defaultDays), to: end } : end;
   };
   // Per-product numbers miss lines of orders AskCart sent incomplete (re-read by the sync within a day). Counted once
   // per period in a message: a report makes several sales calls over one period, often in parallel, so the promise is
@@ -310,10 +328,10 @@ export function chatTools(scope: ChatScope) {
         "Shop sales totals for a period (brand-local days, default the last 30 days): orders, gross, discounts, net sales, total, refunded per currency, with the same-length previous period to compare; daily rows when the period is 31 days or less. Start any sales question or report here. netExVat: net sales without VAT, from exVatFrom when set (null: not known yet); exVatMissing orders are left out of it. The other totals include VAT where the shop's prices do.",
       inputSchema: SalesRange,
       execute: async (input) => {
-        const refused = await salesGate();
+        const refused = await gate("salesSummary");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const { currencies } = await salesSummary(scope, range);
         if (!currencies.length) return { ...range, note: "No orders in this period (test and cancelled orders are left out), or the shop's orders aren't synced." };
         const withDays = rangeDays(range) <= 31;
@@ -342,10 +360,10 @@ export function chatTools(scope: ChatScope) {
         limit: z.number().int().min(1).max(MAX_ANALYSIS_ROWS).default(MAX_ANALYSIS_ROWS),
       }),
       execute: async ({ by, limit, ...input }) => {
-        const refused = await salesGate();
+        const refused = await gate("salesBreakdown");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const lineBased = by === "collection" || by === "vendor";
         const [{ columns, rows, moreGroups }, truncated] = await Promise.all([
           salesBreakdown(scope, range, by, limit),
@@ -371,10 +389,10 @@ export function chatTools(scope: ChatScope) {
         limit: z.number().int().min(1).max(25).default(10),
       }),
       execute: async ({ rankBy, group, limit, ...input }) => {
-        const refused = await salesGate();
+        const refused = await gate("topProducts");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const [{ rows, moreGroups }, truncated] = await Promise.all([topProducts(scope, range, rankBy, group, limit), truncatedNote(range)]);
         if (!rows.length) return { ...range, rankBy, group, note: (await hasOrderLines(scope)) ? "No products sold in this period." : NEEDS_LINES };
         return {
@@ -393,10 +411,10 @@ export function chatTools(scope: ChatScope) {
         "How one product (or every product, without q) is selling: its variants matching the title/SKU text with net units, net revenue, current price and stock, plus weekly units and revenue over the period. Use for 'how is X selling'.",
       inputSchema: SalesRange.extend({ q: z.string().max(100).default("") }),
       execute: async ({ q, ...input }) => {
-        const refused = await salesGate();
+        const refused = await gate("productSales");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const [{ variants, weeks }, truncated] = await Promise.all([productSales(scope, range, q.trim()), truncatedNote(range)]);
         if (!variants.length) {
           if (!(await hasOrderLines(scope))) return { ...range, q, note: NEEDS_LINES };
@@ -423,10 +441,10 @@ export function chatTools(scope: ChatScope) {
         "Stock against sales: the period's best sellers (by net units) with current stock and estimated days of cover (stock ÷ average daily units), lowest cover first, flagging sold-out best sellers; plus slow movers (in stock, few sales for the stock held). Use for restock and clearance advice.",
       inputSchema: SalesRange.extend({ limit: z.number().int().min(1).max(MAX_RISK_ROWS).default(20) }),
       execute: async ({ limit, ...input }) => {
-        const refused = await salesGate();
+        const refused = await gate("stockRisk");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const [{ sellers, slow }, truncated] = await Promise.all([stockRisk(scope, range, limit), truncatedNote(range)]);
         if (!sellers.length) return { ...range, note: (await hasOrderLines(scope)) ? "No products sold in this period." : NEEDS_LINES };
         const n = rangeDays(range);

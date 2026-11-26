@@ -32,7 +32,7 @@ vi.mock("@/server/data/sales-analysis", async (orig) => ({
 }));
 
 import { chatTools } from "@/server/chat/tools";
-import { MAX_SALES_CALLS, SALES_TOOLS, SHOP_DATA_TOOLS } from "@/server/chat/turn";
+import { CHAT_DATA_TOOLS, MAX_GROUP_CALLS, SHOP_DATA_TOOLS } from "@/server/chat/turn";
 import { chatSystemPrompt } from "@/server/chat/prompt";
 
 const scope = { workspaceId: "w1", brandId: "b1", userId: "u1" };
@@ -79,6 +79,10 @@ describe("sales tools: access and input", () => {
     expect(reads()).toBe(false);
   });
 
+  it("names the tool's own maximum in a bad-period refusal", async () => {
+    expect((await run(chatTools(scope).salesSummary, { from: "2025-01-01", to: "2026-11-01" })).error).toContain("at most 366 days");
+  });
+
   it("defaults to the last 30 days in the brand's time zone", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-30T23:30:00Z")); // already 1 December in Paris
@@ -88,12 +92,12 @@ describe("sales tools: access and input", () => {
     expect(out).toMatchObject({ from: "2026-11-02", to: "2026-12-01", note: expect.stringContaining("No orders") });
   });
 
-  it(`allows ${MAX_SALES_CALLS} sales calls a message, even made in parallel in one step`, async () => {
+  it(`allows ${MAX_GROUP_CALLS} sales calls a message, even made in parallel in one step`, async () => {
     data.salesSummary.mockResolvedValue({ currencies: [] });
     const tools = chatTools(scope);
-    const outs = await Promise.all(Array.from({ length: MAX_SALES_CALLS + 2 }, (_, i) => run(i % 2 ? tools.salesSummary : tools.topProducts, range)));
+    const outs = await Promise.all(Array.from({ length: MAX_GROUP_CALLS + 2 }, (_, i) => run(i % 2 ? tools.salesSummary : tools.topProducts, range)));
     expect(outs.filter((o) => o.error === "Sales tool limit reached for this message.")).toHaveLength(2);
-    expect(data.salesSummary.mock.calls.length + data.topProducts.mock.calls.length).toBe(MAX_SALES_CALLS);
+    expect(data.salesSummary.mock.calls.length + data.topProducts.mock.calls.length).toBe(MAX_GROUP_CALLS);
     // a new message gets a new allowance
     expect((await run(chatTools(scope).salesSummary, range)).error).toBeUndefined();
   });
@@ -111,7 +115,7 @@ describe("sales tools: access and input", () => {
   });
 
   it("every sales tool counts as shop data, and the prompt names them all", () => {
-    for (const name of SALES) expect(SALES_TOOLS.has(name) && SHOP_DATA_TOOLS.has(name)).toBe(true);
+    for (const name of SALES) expect(CHAT_DATA_TOOLS[name].group === "sales" && SHOP_DATA_TOOLS.has(name)).toBe(true);
     const prompt = chatSystemPrompt({ name: "Oak & Co", website: null });
     for (const name of SALES) expect(prompt).toContain(name);
     expect(prompt).toContain("rankBy");

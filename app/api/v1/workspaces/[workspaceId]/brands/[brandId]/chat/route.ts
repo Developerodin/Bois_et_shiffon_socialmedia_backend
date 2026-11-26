@@ -19,7 +19,7 @@ import { isOutOfCreditsText, logRun, OUT_OF_CREDITS } from "@/server/ai/provider
 import { hitRateLimit, limitKey } from "@/server/auth/rate-limit";
 import { ChatBody, chatSystemPrompt, CHAT_PROMPT_VERSION, withPage, withPageNotes } from "@/server/chat/prompt";
 import { chatTools } from "@/server/chat/tools";
-import { activeTools, askedToSearch, hideSalesOutputs, historyWindow } from "@/server/chat/turn";
+import { activeTools, askedToSearch, hideOutputs, historyWindow } from "@/server/chat/turn";
 import { prisma } from "@/server/db/prisma";
 
 // Streaming replies with a few tool steps can take a while.
@@ -40,10 +40,8 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       orderBy: { updatedAt: "desc" },
       select: { id: true, messages: true },
     });
-    // A person who has lost crm.read since keeps the thread but not the sales figures in it.
-    if (thread && !scope.perms.has("crm.read")) {
-      return Response.json({ thread: { ...thread, messages: hideSalesOutputs(thread.messages as unknown as UIMessage[]) } });
-    }
+    // A person who has lost a key since (crm.read, ads.read, analytics.read) keeps the thread but not the figures in it.
+    if (thread) return Response.json({ thread: { ...thread, messages: hideOutputs(thread.messages as unknown as UIMessage[], scope.perms) } });
     return Response.json({ thread });
   } catch (error) {
     return fromAccessError(error);
@@ -95,11 +93,11 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     // grade; failed turns too. A streamed reply is already on screen, so a finding is recorded, not retried.
     const ctx = { workspaceId: scope.workspaceId, brandId: scope.brandId, userId: scope.userId, workflowId: "chat.turn", promptVersion: CHAT_PROMPT_VERSION };
     const system = chatSystemPrompt({ name: brand.displayName, website: brand.profile?.websiteUrl ?? null });
-    // What the model reads: without crm.read, the saved sales steps as GET shows them (hideSalesOutputs). Only this copy
-    // is redacted; `messages` keeps the figures, so the saved thread is never overwritten with the redactions.
-    const history = scope.perms.has("crm.read") ? historyWindow(messages) : hideSalesOutputs(historyWindow(messages));
+    // What the model reads: the saved data steps as GET shows them (hideOutputs, by the keys the person holds now). Only
+    // this copy is redacted; `messages` keeps the figures, so the saved thread is never overwritten with the redactions.
+    const history = hideOutputs(historyWindow(messages), scope.perms);
     const modelMessages = await convertToModelMessages(withPageNotes(history));
-    // Web search off once shop data is in, sales tools off past their per-turn cap: server/chat/turn.ts activeTools.
+    // Web search off once the brand's data is in, data tools off past their per-turn caps: server/chat/turn.ts activeTools.
     const searchAsked = askedToSearch(messages.at(-1));
     const toolNames = Object.keys(tools) as (keyof typeof tools)[];
     const result = streamText({
