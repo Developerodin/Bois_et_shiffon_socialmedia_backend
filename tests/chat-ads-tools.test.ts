@@ -11,6 +11,7 @@ const data = vi.hoisted(() => ({
   adsSummary: vi.fn(),
   shopRevenueOverSpend: vi.fn(),
   listBudgets: vi.fn(),
+  listAlerts: vi.fn(),
   salesSummary: vi.fn(async () => ({ currencies: [] })),
 }));
 
@@ -28,6 +29,7 @@ vi.mock("@/server/data/ads-read", async (orig) => ({
   shopRevenueOverSpend: data.shopRevenueOverSpend,
 }));
 vi.mock("@/server/data/budgets", async (orig) => ({ ...(await orig<object>()), listBudgets: data.listBudgets }));
+vi.mock("@/server/ads/alerts", () => ({ listAlerts: data.listAlerts }));
 
 import { chatTools } from "@/server/chat/tools";
 import { MAX_DATA_CALLS, MAX_GROUP_CALLS } from "@/server/chat/turn";
@@ -55,6 +57,7 @@ beforeEach(() => {
   data.adsCampaigns.mockResolvedValue([]);
   data.listBudgets.mockResolvedValue({ month: "2026-11", budgets: [], pacing: [], defaultCurrency: "EUR" });
   data.shopRevenueOverSpend.mockResolvedValue({ ratio: 4.2, currency: "EUR", why: null, staleRateFrom: null });
+  data.listAlerts.mockResolvedValue({ alerts: [], more: 0 });
 });
 
 const reads = () => [data.adsDays, data.adsCampaigns, data.listBudgets, data.shopRevenueOverSpend].some((f) => f.mock.calls.length);
@@ -121,7 +124,8 @@ describe("adsSummary", () => {
     ]);
     expect((out.previous as { currency: string }[]).map((t) => t.currency)).toEqual(["EUR"]);
     expect(out.currencyNote).toMatch(/never add currencies/);
-    expect(out.alerts).toEqual([]);
+    expect(out.alerts).toEqual({ columns: ["kind", "text", "day", "lastSeen", "open"], rows: [] });
+    expect(out).not.toHaveProperty("alertsNote");
   });
 
   it("CTR and cost per click are null at zero", async () => {
@@ -157,6 +161,35 @@ describe("adsSummary", () => {
 
   it("names the ads maximum (366 days) in a bad-period refusal", async () => {
     expect((await run(chatTools(scope).adsSummary, { from: "2025-01-01", to: "2026-11-01" })).error).toContain("at most 366 days");
+  });
+});
+
+describe("adsSummary: recent alerts", () => {
+  it("lists the brand's alerts seen in the last 7 days, open ones flagged, with the note", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-26T10:00:00Z"));
+    data.listAlerts.mockResolvedValue({
+      alerts: [
+        { id: "a1", kind: "SPEND_UP", accountId: "act_1", currency: "EUR", firstDay: "2026-11-25", lastDay: "2026-11-25", open: true, text: "Ad spend up 64% on act_1", values: {} },
+        { id: "a2", kind: "NO_PURCHASES", accountId: "act_1", currency: "EUR", firstDay: "2026-11-20", lastDay: "2026-11-22", open: true, text: 'Campaign "Spring" spent…', values: {} },
+      ],
+      more: 3,
+    });
+    const out = await run(chatTools(scope).adsSummary, range);
+    vi.useRealTimers();
+    expect(data.listAlerts).toHaveBeenCalledWith({ workspaceId: "w1", brandId: "b1", userId: "u1" }, { recentFrom: "2026-11-19" }, 10);
+    expect(out.alerts).toEqual({
+      columns: ["kind", "text", "day", "lastSeen", "open"],
+      rows: [["SPEND_UP", "Ad spend up 64% on act_1", "2026-11-25", "2026-11-25", true], ["NO_PURCHASES", 'Campaign "Spring" spent…', "2026-11-20", "2026-11-22", true]],
+    });
+    expect(out.moreAlerts).toBe(3);
+    expect(out.alertsNote).toMatch(/3 days back/);
+  });
+
+  it("without ads.read the tool is refused and no alert is read", async () => {
+    perms.set = new Set(["crm.read"]);
+    expect(await run(chatTools(scope).adsSummary, range)).toEqual({ error: "Your role can't see ads." });
+    expect(data.listAlerts).not.toHaveBeenCalled();
   });
 });
 

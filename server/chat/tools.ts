@@ -23,6 +23,7 @@ import { prisma } from "@/server/db/prisma";
 import { latestAuditReports } from "@/server/services/audit-reports";
 import { CONTEXT_DOC_KINDS, listContextDocs } from "@/server/services/context-docs";
 import { cleanTitle } from "@/server/text";
+import { listAlerts } from "@/server/ads/alerts";
 
 export type ChatScope = { workspaceId: string; brandId: string; userId: string };
 
@@ -56,6 +57,10 @@ const ADS_NOTES = {
   attributionNote: "Meta keeps attributing purchases for 7 days, so the last few days can still grow.",
 };
 const OFF_NOTE = "Switched-off ad accounts are left out.";
+/** Recent ads alerts adsSummary lists: seen in the last 7 days (conversion kinds dated 3 days back count from then). */
+const ALERT_DAYS = 7;
+const CHAT_ALERTS = 10;
+const ALERTS_NOTE = "Alerts are checked once a day after the Meta Ads sync; ROAS and no-purchase alerts look at the day 3 days back.";
 const RATIO_WHY: Record<string, string> = {
   no_spend: "No Meta spend in this period, so there is no ratio.",
   currencies: "The shop sold in several currencies in this period, so one ratio can't be given.",
@@ -563,7 +568,11 @@ export function chatTools(scope: ChatScope) {
         const live = await adSources();
         const prev = previousRange(range);
         // adsDays, not the Ads tab's adsSummary reader: that one adds shop revenue ÷ spend, a sales figure.
-        const [now, before] = await Promise.all([adsDays(scope, range, live.externalIds), adsDays(scope, prev, live.externalIds)]);
+        const [now, before, recent] = await Promise.all([
+          adsDays(scope, range, live.externalIds),
+          adsDays(scope, prev, live.externalIds),
+          listAlerts(scope, { recentFrom: addDays(new Date().toISOString().slice(0, 10), -ALERT_DAYS) }, CHAT_ALERTS),
+        ]);
         const roas = (r: AdsDayRow) => (r.spend.isZero() ? null : r.purchaseValue.div(r.spend).toDecimalPlaces(2).toNumber());
         return {
           ...range,
@@ -577,7 +586,10 @@ export function chatTools(scope: ChatScope) {
               rows: now.map((r) => [r.day, r.currency, r.spend.toFixed(2), r.impressions, r.clicks, r.purchases, roas(r)]),
             },
           }),
-          alerts: [],
+          // The alert text is adAlertText's: campaign names cleaned there. The prompt asks to mention the open ones.
+          alerts: { columns: ["kind", "text", "day", "lastSeen", "open"], rows: recent.alerts.map((a) => [a.kind, a.text, a.firstDay, a.lastDay, a.open]) },
+          ...(recent.more > 0 && { moreAlerts: recent.more }),
+          ...(recent.alerts.length > 0 && { alertsNote: ALERTS_NOTE }),
           ...ADS_NOTES,
           ...(live.offCount > 0 && { offNote: OFF_NOTE }),
         };

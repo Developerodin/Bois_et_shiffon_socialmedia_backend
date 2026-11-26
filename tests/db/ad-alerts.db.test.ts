@@ -188,4 +188,21 @@ describe("listAlerts", () => {
     const capped = await listAlerts(scope, { recentFrom: "2026-11-01" }, 2);
     expect([capped.alerts.length, capped.more]).toEqual([2, 2]);
   });
+
+  it("the chat's window: 7 days back, conversion kinds counted from 3 days before; open by kind", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const ago = (n: number) => addDays(today, -n);
+    await alert(A, "SPEND_UP", "s-old", ago(8), new Date().toISOString());
+    await alert(A, "SPEND_UP", "s-new", ago(1), new Date().toISOString());
+    await alert(A, "NO_PURCHASES", "n-4", ago(4), new Date().toISOString());
+    await alert(A, "NO_PURCHASES", "n-9", ago(9), new Date().toISOString());
+    await alert(A, "NO_PURCHASES", "n-11", ago(11), new Date().toISOString());
+    await alert(B, "SPEND_UP", "b-new", ago(1), new Date().toISOString());
+    const { alerts: seen } = await listAlerts({ workspaceId: ws, brandId: A }, { recentFrom: ago(7) }, 10);
+    expect(seen.map((a) => [a.kind, a.lastDay, a.open])).toEqual([
+      ["SPEND_UP", ago(1), true],
+      ["NO_PURCHASES", ago(4), true],
+      ["NO_PURCHASES", ago(9), false],
+    ]);
+  });
 });
