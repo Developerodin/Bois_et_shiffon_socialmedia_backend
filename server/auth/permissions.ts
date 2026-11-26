@@ -57,8 +57,8 @@ export async function permissionsOf(
   workspaceId: string,
   userId: string,
   brandId?: string,
-  /** brandGrant already read (in parallel with the member, by brandAccess); undefined reads it here. */
-  preread?: Awaited<ReturnType<typeof brandGrant>>,
+  /** brandGrant already read (in parallel with the member, by brandAccess), or just its role; undefined reads it here. */
+  preread?: { role: Parameters<typeof rolePermissions>[0] } | null,
 ): Promise<Set<PermissionKey>> {
   if (!found?.role) return new Set();
   const perms = new Set(rolePermissions(found.role) as PermissionKey[]);
@@ -84,6 +84,9 @@ export const CLIENT_GRANT_WHERE = { isSystem: true, slug: CLIENT_REVIEWER } as c
  * isClientOn (server/tasks/access.ts) and clientMemberSql are the same rule as a query.
  */
 export const isClientMember = (clientGrant: boolean, workspacePerms: readonly string[]) => clientGrant && !workspacePerms.includes("content.approve");
+
+/** The keys an AD_ALERT notice needs on its brand, now: who is notified (keyHolders) and who sees it (visibleNotificationsSql). */
+export const AD_ALERT_KEYS = ["brand.read", "ads.read"] as const satisfies readonly PermissionKey[];
 
 /**
  * Does someone hold every one of `keys` on a brand? Their workspace role's keys ∪ their project grant's (as

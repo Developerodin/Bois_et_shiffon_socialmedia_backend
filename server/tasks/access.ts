@@ -1,7 +1,7 @@
 import "server-only";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
-import { brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, holdsAll, isClientGrant, isClientMember, memberRole } from "@/server/auth/permissions";
+import { AD_ALERT_KEYS, brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, holdsAll, isClientGrant, isClientMember, memberRole } from "@/server/auth/permissions";
 import { CLIENT_REVIEWER, rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { CRM_TASK_KEYS } from "@/shared";
 import { lockRow } from "@/server/services/publishing";
@@ -119,7 +119,8 @@ const notCrm = (a: Prisma.Sql) => Prisma.sql`NOT ('CRM' = ANY(${a}.areas))`;
 
 /**
  * THE definition of which tasks a person sees on one brand, as a SQL condition on the Task row `alias`. Every task read
- * (lists, search, comments, attachments, notifications, counts) builds on it or on visibleTasksAcrossSql below.
+ * (lists, search, comments, attachments, counts) builds on it; the bell builds on tasksAcrossSql below, the same rule
+ * over every brand at once, through visibleNotificationsSql.
  * tasks.all: the whole brand; a client: clientClause; other staff: ownClause. On top, CRM tasks only with v.crm.
  */
 export function visibleTaskSql(v: TaskViewer, alias = "t"): Prisma.Sql {
@@ -133,11 +134,8 @@ export function visibleTaskSql(v: TaskViewer, alias = "t"): Prisma.Sql {
 }
 
 /**
- * visibleTaskSql over every brand of the workspace at once (notifications): reads the person's role and project grants
- * once, then decides per brand as brandAccess + taskViewer would (brand.read and tasks.read from role ∪ grant; a
- * client-reviewer grant without content.approve from the workspace role makes them a client there, isClientMember;
- * tasks.all from role ∪ grant, ignored for a client; CRM tasks where role ∪ grant handlesCustomers). Archived brands are
- * left out, as brandAccess refuses them.
+ * tasksAcrossSql from a fresh memberAccess: only the tests call it (the bell reads tasksAcrossSql through
+ * visibleNotificationsSql, sharing one memberAccess with its ads branch).
  */
 export async function visibleTasksAcrossSql(userId: string, workspaceId: string, alias = "t"): Promise<Prisma.Sql> {
   return tasksAcrossSql(await memberAccess(workspaceId, userId), userId, workspaceId, alias);
@@ -150,7 +148,7 @@ export async function visibleTasksAcrossSql(userId: string, workspaceId: string,
 export async function memberAccess(workspaceId: string, userId: string) {
   const [found, grants] = await Promise.all([
     memberRole(workspaceId, userId),
-    prisma.brandMember.findMany({ where: { workspaceId, userId }, include: { role: true } }),
+    prisma.brandMember.findMany({ where: { workspaceId, userId }, select: { brandId: true, role: { select: { isSystem: true, slug: true, permissions: true } } } }),
   ]);
   return { found, grants };
 }
@@ -160,12 +158,9 @@ type MemberAccess = Awaited<ReturnType<typeof memberAccess>>;
 const liveBrand = (a: Prisma.Sql, workspaceId: string) =>
   Prisma.sql`EXISTS (SELECT 1 FROM "Brand" b WHERE b.id = ${a}."brandId" AND b."workspaceId" = ${workspaceId} AND b.status <> 'ARCHIVED')`;
 
-/** The keys an AD_ALERT notice needs on its brand, now: the same rule decides who is notified (keyHolders). */
-export const AD_ALERT_KEYS = ["brand.read", "ads.read"] as const satisfies readonly PermissionKey[];
-
 /**
  * Which notifications a person sees in one workspace, as a SQL condition on Notification `n` LEFT JOIN Task `t`, from
- * one memberAccess: a task notice while they can still see its task (visibleTasksAcrossSql's rule), an AD_ALERT notice
+ * one memberAccess: a task notice while they can still see its task (tasksAcrossSql's rule), an AD_ALERT notice
  * while they hold brand.read and ads.read on its brand (role ∪ grant, workspace role required, holdsAll) and the brand
  * isn't archived.
  */
@@ -186,6 +181,12 @@ export async function visibleNotificationsSql(userId: string, workspaceId: strin
   return Prisma.sql`((n."taskId" IS NOT NULL AND ${tasks}) OR ${ads})`;
 }
 
+/**
+ * visibleTaskSql over every brand of the workspace at once, from one memberAccess: decides per brand as brandAccess +
+ * taskViewer would (brand.read and tasks.read from role ∪ grant; a client-reviewer grant without content.approve from
+ * the workspace role makes them a client there, isClientMember; tasks.all from role ∪ grant, ignored for a client; CRM
+ * tasks where role ∪ grant handlesCustomers). Archived brands are left out, as brandAccess refuses them.
+ */
 function tasksAcrossSql({ found, grants }: MemberAccess, userId: string, workspaceId: string, alias: string): Prisma.Sql {
   const a = ref(alias);
   if (!found?.role) return Prisma.sql`FALSE`;

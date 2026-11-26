@@ -1,7 +1,6 @@
 import type { Prisma } from "@prisma/client";
-import { keyHolders } from "@/server/auth/permissions";
+import { AD_ALERT_KEYS, keyHolders } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
-import { AD_ALERT_KEYS } from "@/server/tasks/access";
 
 /**
  * Who gets a brand's AD_ALERT notices: active people holding brand.read and ads.read on it (role ∪ grant, workspace role
