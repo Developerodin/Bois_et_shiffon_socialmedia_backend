@@ -1707,3 +1707,25 @@ The chat has sales and catalogue tools only. Add, reusing the existing read func
 - Orders older than 60 days need Shopify to approve `read_all_orders` for the Shop Assistant app.
 - Business Profile and the customer inbox (Instagram DMs, Messenger) are mobile-app screens only; there is no web page for them yet.
 - Naming: the sidebar main-menu item that opens the Performance *tasks* list is now "Performance tasks" (web 0dbb7f3, local); the data page `/performance` is still reached only via Surge/Pulse or "SEO & GEO reports" in More. Consider a main-menu link to it.
+
+## Money layer, Meta system token, story numbers, order history (branch `phase-2-followup`, 2026-11-26)
+
+Plan: `docs/superpowers/plans/2026-11-26-phase-2-followup.md` (Tasks 1–6, all built). Four-lens branch review done;
+its findings fixed on the branch.
+
+**Deploy steps, in this order (the owner's call; never against the dev DB from a branch):**
+1. `prisma migrate deploy`: `20261126100000_fx_rate`, `20261126110000_shop_order_shipping_taxes`,
+   `20261126120000_ad_platform_google` (its own migration: a new enum value can't be used in the same transaction),
+   `20261126120100_ad_budget`, `20261126130000_post_metric_navigation`. All additive, nullable, no table rewrite.
+2. **Required:** right after the deploy, `npm run reset:shopify-orders -- <brandId>` for every brand with a
+   SHOPIFY_ORDERS source (today: B&C). It re-reads 60 days so the rows carry `shippingTaxes`. Until then, tax-included
+   orders the old code wrote on or after `SHIPPING_TAXES_SINCE` (2026-11-26 00:00 UTC) count as "VAT couldn't be read"
+   (`exVatMissing`), and the Sales headline, the digest and revenue ÷ ad spend leave them out. B&C is affected little:
+   971 of its 973 stored orders are tax-excluded (their net sales already have no VAT).
+3. The next daily sweep queues `fx.sync` (ECB rates) and `story.read` catch-ups; nothing else to start by hand.
+
+**Live-checked 2026-11-26:** ECB INR fetch (23 rows a month, 765 for three years; a weekend window is an empty 200).
+B&C orders: `currentTaxLines` include the shipping tax. AskCart sends `shippingLines` on every order.
+**Not live-checked:** the token path's query cost (no store uses a pasted token; the first page a process reads logs
+`requestedQueryCost`), Meta `debug_token` with a real system user token, a story read (Meta app review for insights
+pending), `read_all_orders` (the history stays dormant until AskCart stops answering pending). Browser checks not done.
