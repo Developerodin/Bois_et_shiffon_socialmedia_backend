@@ -129,7 +129,7 @@ export function activeTools<T extends string>(all: T[], turn: { history: UIMessa
 }
 
 /** After "web", "internet", "online", "le web" or "en ligne": no word naming shop or sales data follows. */
-const NOT_SHOP = "(?![\\s'’-]*(?:shop|store|sales?|orders?|ventes?|boutique|commandes?)\\b)";
+const NOT_SHOP = "(?![\\s'’-]*(?:shops?|stores?|sales?|orders?|ventes?|boutiques?|commandes?)\\b)";
 
 /**
  * Explicit requests to search the web, in English and French: a short list of phrases, each led by a verb, not "a
@@ -140,7 +140,8 @@ const NOT_SHOP = "(?![\\s'’-]*(?:shop|store|sales?|orders?|ventes?|boutique|co
  * shop's pages", "search online sales"). They are the very words of a turn that reads ads or search data, so planted
  * text in a campaign name or page URL could otherwise steer a search that carries figures out.
  * Ceiling: a request worded outside the list ("could you check the internet") doesn't count; the model says web search
- * is off and the person can rephrase. Add phrases here as they turn up.
+ * is off and the person can rephrase. Add phrases here as they turn up. The French singular "recherche" is also a
+ * noun, so "ma recherche en ligne" still counts; only the plural noun is ruled out.
  */
 const SEARCH_ASKS = new RegExp(
   "\\b(?:" +
