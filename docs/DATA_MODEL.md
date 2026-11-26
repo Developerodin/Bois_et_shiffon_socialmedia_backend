@@ -398,3 +398,28 @@ Migration `20261125150000_shop_order_lines`. No customer data anywhere: AskCart 
 - `Product` gains `vendor String?`, `tags String[]` (sorted) and `collections Json?` (`[{ id, title, handle }]`, sorted
   by id). They are AskCart products only; the other sources never touch them. The chat matches a line to its
   catalogue row by `Product.externalId = ShopOrderLine.variantId` (source SHOPIFY).
+
+## 12. Money layer (2026-11-26)
+
+Five migrations, all additive (new tables, nullable columns, one enum value), no table rewrite:
+`20261126100000_fx_rate`, `20261126110000_shop_order_shipping_taxes`, `20261126120000_ad_platform_google`,
+`20261126120100_ad_budget`, `20261126130000_post_metric_navigation`.
+
+- `FxRate`: the ECB's daily euro reference rate, `(currency, day)` primary key, `perEur Decimal(18,6)` (units of
+  `currency` per euro). Filled once a day by the `fx.sync` job (server/data/fx.ts) for the currencies in use (ECB
+  currencies only); a weekend or TARGET holiday has no row, so a reader takes the latest rate on or before the day it
+  needs (rateTable). Used to compare ad spend and sales held in different currencies; nothing is stored converted.
+- `ShopOrder.shippingTaxes Decimal(14,2)?`: the tax on the shipping still charged (shippingTaxesOf), so net sales
+  without VAT can take it out. Null on rows read before the migration and when the shipping lines came unreadable;
+  such tax-included orders count as "VAT couldn't be read" (`exVatMissing`) from `SHIPPING_TAXES_SINCE` on, until
+  `reset:shopify-orders` re-reads them.
+- `AdPlatform.GOOGLE`: added in its own migration, since Postgres can't use an enum value added by `ALTER TYPE … ADD
+  VALUE` in the same transaction. No Google Ads sync exists yet; the value lets a budget be set for it.
+- `AdBudget`: a brand's monthly budget per platform, unique on `(brandId, platform, month)`; `month` is the first day
+  of the month, `amount Decimal(14,2)` in `currency` (EUR or one of ECB_CURRENCIES), `updatedByUserId`. Cascades with
+  the brand. Meta pacing compares it with the month's spend (server/data/budgets.ts).
+- `PostMetric.navigation Int?`: Instagram stories only, taps forward, back, exits and next-story swipes summed over the
+  frames; null for every other post.
+- The Meta Ads system user token has no column of its own: it is an ACTIVE `IntegrationConnection` (provider
+  META_ADS) with `tokenExpiresAt` null. A personal login always has an expiry, and saveConnections' `keep` rule never
+  lets it replace a working system token.
