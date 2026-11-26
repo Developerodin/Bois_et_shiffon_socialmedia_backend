@@ -18,6 +18,11 @@ vi.mock("@/server/auth/access", async (orig) => ({
   }),
 }));
 vi.mock("@/server/auth/permissions", async (orig) => ({ ...(await orig<object>()), requirePermission: vi.fn(async () => undefined) }));
+// The pacing's waits return at once: several calls on one token would otherwise wait 1.1 s each.
+vi.mock("node:timers/promises", async (orig) => {
+  const real = await orig<typeof import("node:timers/promises")>();
+  return { ...real, setTimeout: vi.fn((ms: number, value?: unknown, opts?: object) => real.setTimeout(value === "pace" ? 0 : ms, value, opts)) };
+});
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn(), kickIfDue: vi.fn(async () => undefined) }));
 
 import { createHash } from "node:crypto";
@@ -26,7 +31,7 @@ import { decryptCredentials } from "@/server/crypto/credentials";
 import { runCatalogSync } from "@/server/catalog/sync";
 import { ConnectionError, disconnect } from "@/server/services/connections";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
-import { ASKCART_MODE_CHANGED, ASKCART_STORE_LAPSED } from "@/server/shopify/askcart";
+import { ASKCART_MODE_CHANGED, ASKCART_STORE_LAPSED, resetAskCartPace } from "@/server/shopify/askcart";
 import { completeAskCartConnect } from "@/server/shopify/askcart-connect";
 import { askCartToken } from "@/server/shopify/askcart-token";
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/integrations/shopify/askcart/route";
@@ -63,6 +68,7 @@ beforeAll(async () => {
   }
 });
 beforeEach(async () => {
+  resetAskCartPace();
   vi.stubEnv("ASKCART_URL", "https://askcart.test");
   vi.stubEnv("CREDENTIALS_ENCRYPTION_KEY", Buffer.alloc(32, 5).toString("base64"));
   await prisma.product.deleteMany({});
