@@ -36,7 +36,8 @@ const isSalesOutput = (p: UIMessage["parts"][number]) => p.type.startsWith("tool
  * A saved thread as a viewer without crm.read may see it: the sales tools' figures swapped for SALES_HIDDEN, the step
  * and its input kept (the chat lists the steps it took). Someone who loses crm.read keeps their old threads, and
  * the figures the tools returned then must not stay readable in them. For reading only: never saved back, so the
- * figures are there again if the role regains crm.read.
+ * figures are there again if the role regains crm.read. It hides the raw tool payloads only: figures the assistant
+ * already wrote in its own text stay visible.
  */
 export const hideSalesOutputs = (messages: UIMessage[]): UIMessage[] =>
   messages.map((m) => (m.parts.some(isSalesOutput) ? { ...m, parts: m.parts.map((p) => (isSalesOutput(p) ? ({ ...p, output: SALES_HIDDEN } as typeof p) : p)) } : m));

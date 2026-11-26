@@ -95,7 +95,9 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     // grade; failed turns too. A streamed reply is already on screen, so a finding is recorded, not retried.
     const ctx = { workspaceId: scope.workspaceId, brandId: scope.brandId, userId: scope.userId, workflowId: "chat.turn", promptVersion: CHAT_PROMPT_VERSION };
     const system = chatSystemPrompt({ name: brand.displayName, website: brand.profile?.websiteUrl ?? null });
-    const history = historyWindow(messages);
+    // What the model reads: without crm.read, the saved sales steps as GET shows them (hideSalesOutputs). Only this copy
+    // is redacted; `messages` keeps the figures, so the saved thread is never overwritten with the redactions.
+    const history = scope.perms.has("crm.read") ? historyWindow(messages) : hideSalesOutputs(historyWindow(messages));
     const modelMessages = await convertToModelMessages(withPageNotes(history));
     // Web search off once shop data is in, sales tools off past their per-turn cap: server/chat/turn.ts activeTools.
     const searchAsked = askedToSearch(messages.at(-1));
