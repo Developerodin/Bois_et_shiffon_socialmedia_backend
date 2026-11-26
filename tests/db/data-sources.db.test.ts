@@ -266,6 +266,35 @@ describe("GET data-sources", () => {
     expect(manager.map((s) => s.kind)).toEqual(["SEARCH_CONSOLE", "SHOPIFY_ORDERS", "META_ADS"]);
     expect(manager[1]!.label).toBe("shop.myshopify.com");
   });
+
+  it("says a run is queued or running from the job table, with when it started; nothing for a run due later", async () => {
+    auth.perms = new Set(["brand.read", "analytics.read", "crm.read"]);
+    const search = await source("ds-a", "SEARCH_CONSOLE");
+    const orders = await source("ds-a", "SHOPIFY_ORDERS");
+    await enqueueSourceSync(search, "manual");
+    await enqueueSourceSync(orders, "daily", { runAt: new Date(Date.now() + 60 * 60_000) }); // the sweep's slot, an hour out
+    let [s, o] = await get();
+    expect(s!.sync).toMatchObject({ state: "queued" });
+    expect(o!.sync).toBeNull();
+
+    // While it runs: the job is RUNNING and the run has stamped its start.
+    let seen: unknown;
+    next = async () => { [s] = await get(); seen = s!.sync; return { count: 3 }; };
+    const [job] = await dataJobs(search.id);
+    await prisma.job.update({ where: { id: job!.id }, data: { status: "RUNNING", leasedUntil: new Date(Date.now() + 60_000) } });
+    await runDataSync(job!.payload, lease);
+    expect(seen).toMatchObject({ state: "running", since: expect.any(String) });
+
+    // A run whose process died: RUNNING with its lease lapsed is not "running".
+    await prisma.job.update({ where: { id: job!.id }, data: { leasedUntil: new Date(Date.now() - 1000) } });
+    expect((await get())[0]!.sync).toBeNull();
+    await prisma.job.update({ where: { id: job!.id }, data: { status: "COMPLETED" } });
+    [s] = await get();
+    expect(s!.sync).toBeNull();
+    const last = s!.lastResult as { startedAt: string; at: string };
+    expect(Date.parse(last.startedAt)).toBeLessThanOrEqual(Date.parse(last.at));
+    expect(s!.lastResult).not.toHaveProperty("runningSince");
+  });
 });
 
 describe("POST data-sources/:kind/sync", () => {
