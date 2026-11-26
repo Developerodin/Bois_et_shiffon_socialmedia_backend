@@ -1818,3 +1818,41 @@ to the dev DB. See DATA_MODEL §12.
 - Remove the `sma-money` worktrees; their `node_modules` are junctions, so remove those with `cmd /c rmdir`.
 
 **Next:** chat tools for ads, posts and Search Console, then ads alerts.
+
+## Chat data tools and ads alerts (branch `chat-data-tools`, 2026-11-26, not merged)
+
+Plan: `docs/superpowers/plans/2026-11-26-chat-data-tools.md`. Server, web and mobile worktrees in `../sma-chat`.
+
+**What was built:**
+- **Chat data tools.** The assistant reads Meta Ads (`adsSummary`, `adCampaigns`, `adBudgets`, `revenuePerAdSpend`),
+  post and story performance (`postPerformance`) and Search Console (`searchPerformance`) from our own rows. One
+  permission map (`CHAT_DATA_TOOLS`, server/chat/turn.ts) gates every data tool and hides outputs from a reader who
+  lost the key; at most 8 calls per group and 12 data calls per message. Switched-off ad accounts are left out. Web
+  search stays off while a sales read (the sales tools and `revenuePerAdSpend`) is in the conversation the model sees;
+  after any other data read it stays off unless the person's own message asks for it with a verb ("search the web for…", "do a web
+  search", "cherche sur internet"); a bare "web search" or a phrase ending in shop or sales words doesn't count.
+  Prompt version 8 (`CHAT_PROMPT_VERSION`) describes the tools; the web chat names each step in plain words.
+- **Ads alerts.** After an ad account's complete daily or manual sync, the `ads.alerts` job checks four rules and
+  stores what it finds in `AdAlert`, one row per episode: SPEND_UP, ROAS_DOWN, NO_PURCHASES and OVER_PACE (thresholds
+  and ceilings at the top of server/ads/alerts.ts). OVER_PACE is only raised while the day is in the current UTC month.
+- **Where alerts show:** the bell (an `AD_ALERT` notice per person holding brand.read and ads.read, hidden again once
+  they lose a key or the brand is archived), the Monday digest (the week's alerts, web page and email), and the chat
+  (`adsSummary` lists the recent ones and the prompt asks to mention the open ones).
+- Pre-merge four-lens review fixes: the bell's unread groups now pick one row per group from the fenced unread
+  notices before joining the task, actor and alert (EXPLAIN ANALYZE at 40k unread: 37 → 28 ms); narrower search asks;
+  month-end pacing; the episode lookup bound. Not taken: maintainability 8 (keyHolders' unused `db`), security 2–3
+  (accepted designs), performance 3 (query counts fine).
+
+**Migrations still to apply to the dev DB:** `20261126140000_notification_ad_alert_kind` (the `AD_ALERT` value, in its
+own migration as Postgres can't use a new enum value in the same transaction) and `20261126140100_ad_alert` (the
+`AdAlert` table and `Notification.adAlertId`). See DATA_MODEL §13.
+
+**The bell sits behind the `tasks` web flag:** the top bar shows it only when `WEB_FEATURES` includes `tasks`, so ads
+alerts reach the bell only in a workspace with tasks on. The digest and the chat show them either way.
+
+**Next:**
+1. Merge `chat-data-tools` in server, web and mobile; apply the two migrations to the dev DB.
+2. Browser-check the bell's alert line and its link to `/performance?tab=ads`, the digest's alerts and the chat's step
+   labels.
+3. Live-check the rules and tune the thresholds once B&C's Meta Ads is connected.
+4. Decide whether ads alerts need the bell outside the `tasks` flag.

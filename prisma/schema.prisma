@@ -244,6 +244,7 @@ model Brand {
   searchDays     SearchDay[]
   adDays         AdDay[]
   adBudgets      AdBudget[]
+  adAlerts       AdAlert[]
   shopifyWrites  ShopifyWrite[]
   blogArticles   BlogArticle[]
   quotes         Quote[]
@@ -1442,6 +1443,8 @@ enum TaskCommentKind {
   SYSTEM
 }
 
+/// AD_ALERT is added in its own migration (20261126140000): Postgres can't use a value added by ALTER TYPE … ADD VALUE
+/// in the same transaction.
 enum NotificationKind {
   TASK_ASSIGNED
   REVIEW_REQUESTED
@@ -1449,6 +1452,7 @@ enum NotificationKind {
   TASK_RECHECK
   TASK_APPROVED
   TASK_CHANGES_REQUESTED
+  AD_ALERT
 }
 
 enum TaskAttachmentRole {
@@ -1633,20 +1637,24 @@ model Notification {
   brandId     String
   kind        NotificationKind
   taskId      String?
+  /// AD_ALERT notices: the alert they point at (no task)
+  adAlertId   String?
   actorId     String?
   dedupeKey   String           @unique
   readAt      DateTime?
   createdAt   DateTime         @default(now())
 
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  task  Task? @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brand   Brand    @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  task    Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  adAlert AdAlert? @relation(fields: [adAlertId], references: [id], onDelete: Cascade)
 
   @@index([userId, workspaceId, readAt, createdAt])
   @@index([createdAt])
   @@index([userId, workspaceId, createdAt(sort: Desc), id(sort: Desc)])
   @@index([taskId])
   @@index([brandId, workspaceId])
+  @@index([adAlertId])
 }
 
 enum DataSourceKind {
@@ -1892,6 +1900,45 @@ model AdDay {
 
   @@unique([brandId, platform, accountId, campaignId, day])
   @@index([brandId, platform, accountId, day])
+}
+
+enum AdAlertKind {
+  SPEND_UP
+  ROAS_DOWN
+  NO_PURCHASES
+  OVER_PACE
+}
+
+/// A Meta Ads problem found after an account's daily sync (server/ads/alerts.ts). One row per episode: a rule holding
+/// on consecutive days moves lastDay instead of adding rows. values: the figures as strings (Decimal), in `currency`.
+/// ponytail: never pruned; a few rows per brand per month. Prune past 13 months if it ever matters.
+model AdAlert {
+  id           String      @id @default(cuid())
+  workspaceId  String
+  brandId      String
+  kind         AdAlertKind
+  /// "act_123"; null for OVER_PACE (brand-wide)
+  accountId    String?
+  campaignId   String?
+  campaignName String?
+  currency     String
+  /// The rule's own day: D_spend (SPEND_UP), D_conv (ROAS_DOWN, NO_PURCHASES), pacing.through (OVER_PACE)
+  firstDay     DateTime    @db.Date
+  lastDay      DateTime    @db.Date
+  values       Json
+  /// <kind>:<brandId>:<account>[:<campaign>] or OVER_PACE:<brandId>:<YYYY-MM>: the episode's subject, always brand-scoped
+  subjectKey   String
+  /// subjectKey + ":" + firstDay (OVER_PACE: subjectKey, once a month); globally unique because subjectKey holds the brand
+  dedupeKey    String      @unique
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  brand         Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  notifications Notification[]
+
+  @@index([brandId, subjectKey, lastDay])
+  @@index([brandId, lastDay])
+  @@index([brandId, createdAt])
 }
 
 /// ECB euro reference rates: 1 EUR = perEur units of currency on that day (TARGET working days only). Global, not per

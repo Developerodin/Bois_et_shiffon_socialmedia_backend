@@ -4,7 +4,7 @@ import { AD_BUDGET_PLATFORMS, isEcbCurrency, type AdBudgetDto, type AdBudgetsDto
 import { prisma } from "@/server/db/prisma";
 import { minorDigits, tooPrecise } from "@/server/quotes/quotes";
 import { rateTable } from "./fx";
-import { dayDate, dayOf } from "./sources";
+import { dayDate, dayOf, liveSources, type LiveSources } from "./sources";
 
 /**
  * Monthly ad budgets per platform (plan 2026-11-26-phase-2-followup, Task 3) and Meta's pacing against them. Read
@@ -14,7 +14,8 @@ import { dayDate, dayOf } from "./sources";
 type Scope = { workspaceId: string; brandId: string };
 
 const monthIndex = (month: string) => Number(month.slice(0, 4)) * 12 + Number(month.slice(5, 7)) - 1;
-const currentMonth = (now = new Date()) => now.toISOString().slice(0, 7);
+/** The current month, "YYYY-MM" in UTC: the budget screen's and the chat's default. */
+export const currentMonth = (now = new Date()) => now.toISOString().slice(0, 7);
 
 /** "YYYY-MM", from 24 months before the current (UTC) month to 12 after it. The one month rule for GET and PUT. */
 export const MonthSchema = z
@@ -43,16 +44,14 @@ const daysBetween = (from: string, to: string) => (Date.parse(to) - Date.parse(f
 /**
  * The brand's Meta spend per currency and day over from..to, converted into `currency`; null when a rate is missing.
  * Also the oldest stale rate used. Only ad accounts whose source is on (an account switched off keeps its old rows,
- * which mustn't count against this month's budget).
+ * which mustn't count against this month's budget). `accountIds`: those accounts, already read by the caller.
+ * Not ads-read's adsDays, the same groupBy with every figure: ads-read imports this module, and this needs spend only.
  */
-export async function convertedSpend(scope: Scope, from: string, to: string, currency: string) {
-  const accounts = await prisma.dataSource.findMany({
-    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "META_ADS", status: { not: "OFF" } },
-    select: { externalId: true },
-  });
+export async function convertedSpend(scope: Scope, from: string, to: string, currency: string, accountIds?: string[]) {
+  const externalIds = accountIds ?? (await liveSources(scope, "META_ADS")).externalIds;
   const rows = await prisma.adDay.groupBy({
     by: ["currency", "day"],
-    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, platform: "META", accountId: { in: accounts.map((a) => a.externalId) }, day: { gte: dayDate(from), lte: dayDate(to) } },
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, platform: "META", accountId: { in: externalIds }, day: { gte: dayDate(from), lte: dayDate(to) } },
     _sum: { spend: true },
   });
   const table = await rateTable([currency, ...rows.map((r) => r.currency)], from, to);
@@ -67,20 +66,17 @@ export async function convertedSpend(scope: Scope, from: string, to: string, cur
   return { total, stale };
 }
 
-/** Meta pacing for a month's budget (see PacingDto). */
-async function metaPacing(scope: Scope, budget: { amount: Prisma.Decimal; currency: string }, month: string): Promise<PacingDto> {
-  const sources = await prisma.dataSource.findMany({
-    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "META_ADS", status: { not: "OFF" } },
-    select: { syncedThrough: true },
-  });
+/** Meta pacing for a month's budget (see PacingDto). `live`: the brand's live Meta Ads sources, if already read. */
+async function metaPacing(scope: Scope, budget: { amount: Prisma.Decimal; currency: string }, month: string, live?: LiveSources): Promise<PacingDto> {
+  const sources = live ?? (await liveSources(scope, "META_ADS"));
   // The least advanced account decides: a lagging one's missing days would read as under-spending.
-  if (!sources.length || sources.some((s) => !s.syncedThrough)) return { platform: "META", state: "no_data" };
-  const held = sources.map((s) => dayOf(s.syncedThrough!)).sort()[0];
+  const held = sources.syncedThrough;
+  if (!held) return { platform: "META", state: "no_data" };
   const first = firstDay(month);
   const end = lastDay(month);
   const through = held < end ? held : end;
   if (through < first) return { platform: "META", state: "no_data" };
-  const spend = await convertedSpend(scope, first, through, budget.currency);
+  const spend = await convertedSpend(scope, first, through, budget.currency, sources.externalIds);
   if (!spend) return { platform: "META", state: "no_rate" };
   const expected = budget.amount.mul(daysBetween(first, through)).div(daysBetween(first, end));
   const ratio = expected.isZero() ? 0 : spend.total.div(expected).toDecimalPlaces(2).toNumber();
@@ -97,15 +93,18 @@ async function metaPacing(scope: Scope, budget: { amount: Prisma.Decimal; curren
   };
 }
 
-/** GET ads/budgets: the month's budgets, their pacing, and the currency a new budget starts in. */
-export async function listBudgets(scope: Scope, month: string): Promise<AdBudgetsDto> {
+/**
+ * GET ads/budgets: the month's budgets, their pacing, and the currency a new budget starts in. `live`: the brand's
+ * live Meta Ads sources, when the caller has read them already (the chat, once per message).
+ */
+export async function listBudgets(scope: Scope, month: string, live?: LiveSources): Promise<AdBudgetsDto> {
   const rows = await prisma.adBudget.findMany({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId, month: dayDate(firstDay(month)) },
     orderBy: { platform: "asc" },
   });
   const budgets: AdBudgetDto[] = rows.map((r) => ({ platform: r.platform, month, amount: r.amount.toFixed(2), currency: r.currency, updatedAt: r.updatedAt.toISOString() }));
   const pacing: PacingDto[] = [];
-  for (const r of rows) pacing.push(r.platform === "META" ? await metaPacing(scope, r, month) : { platform: r.platform, state: "google_later" });
+  for (const r of rows) pacing.push(r.platform === "META" ? await metaPacing(scope, r, month, live) : { platform: r.platform, state: "google_later" });
   return { month, budgets, pacing, defaultCurrency: await defaultCurrency(scope) };
 }
 

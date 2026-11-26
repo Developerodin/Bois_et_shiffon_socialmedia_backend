@@ -19,7 +19,7 @@ const sweep = vi.hoisted(() => ({
 }));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/auth/request-user", () => ({ requestUserId: m.userId }));
-vi.mock("@/server/tasks/access", async (orig) => ({ clientMemberSql: (await orig<typeof import("@/server/tasks/access")>()).clientMemberSql, visibleTasksAcrossSql: m.visible }));
+vi.mock("@/server/tasks/access", async (orig) => ({ clientMemberSql: (await orig<typeof import("@/server/tasks/access")>()).clientMemberSql, visibleNotificationsSql: m.visible }));
 vi.mock("next/server", async (orig) => ({ ...(await orig<object>()), after: vi.fn() }));
 vi.mock("@/server/jobs/queue", async (orig) => ({ ...(await orig<object>()), claimNextJob: sweep.claim, completeJob: sweep.complete, holdLease: () => () => {} }));
 vi.mock("@/server/services/subscriptions", () => ({ renewDuePlans: sweep.renew }));
@@ -88,7 +88,7 @@ describe("notification API", () => {
     const sql = sqlOf(db.$queryRaw.mock.calls[0]!);
     expect(sql).toMatch(/LIMIT 100/);
     expect(sql).toMatch(/"readAt" IS NULL OFFSET 0/);
-    expect(m.visible).toHaveBeenCalledWith("u1", "w1", "t");
+    expect(m.visible).toHaveBeenCalledWith("u1", "w1");
 
     const res = await countGet(req("/count"));
     expect(await res.json()).toEqual({ count: 100 });
@@ -101,12 +101,14 @@ describe("notification API", () => {
     expect(await res.json()).toEqual({ notifications: [], nextCursor: null });
     const [count, groups, list] = db.$queryRaw.mock.calls.map(sqlOf);
     // Unread come as one row per kind and business with its count; the page itself is read ones only.
-    const where = /FROM "Notification" n JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/;
-    expect(groups).toMatch(where);
-    expect(groups).toMatch(/DISTINCT ON \(n\.kind, n\."brandId"\)[\s\S]*count\(\*\) OVER \(PARTITION BY n\.kind, n\."brandId"\)[\s\S]*n\."readAt" IS NULL/);
+    const where = /FROM "Notification" n LEFT JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*LEFT JOIN "AdAlert" al ON al\.id = n\."adAlertId" AND al\."brandId" = n\."brandId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/;
+    // The groups pick one id per group from the fenced unread rows, visibility checked there, then join for those ids.
+    expect(groups).toMatch(/DISTINCT ON \(n\.kind, n\."brandId"\) n\.id, \(count\(\*\) OVER \(PARTITION BY n\.kind, n\."brandId"\)\)/);
+    expect(groups).toMatch(/"readAt" IS NULL OFFSET 0\s*\) n LEFT JOIN "Task" t ON t\.id = n\."taskId"\s*WHERE n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/);
+    expect(groups).toMatch(/\) g JOIN "Notification" n ON n\.id = g\.id LEFT JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*LEFT JOIN "AdAlert" al ON al\.id = n\."adAlertId" AND al\."brandId" = n\."brandId"/);
     expect(list).toMatch(/n\."readAt" IS NOT NULL/);
     // The count reads the unread rows through a fenced subquery aliased n, then applies the same where.
-    expect(count).toMatch(/\) n JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/);
+    expect(count).toMatch(/kind, "brandId", "adAlertId", "createdAt" FROM "Notification"[\s\S]*\) n LEFT JOIN "Task" t ON t\.id = n\."taskId"[\s\S]*n\."userId" = \? AND n\."workspaceId" = \? AND TRUE/);
     expect(list).toMatch(where);
     expect(list).toMatch(/LIMIT 21/);
   });

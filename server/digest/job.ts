@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/server/db/prisma";
 import { spreadSecs } from "@/server/data/sources";
-import { buildDigest, digestWeekStart, sweepAt } from "@/server/digest/build";
+import { AFTER_SWEEP_MS, buildDigest, digestWeekStart, sweepAt } from "@/server/digest/build";
 import { emailConfigured, queueEmail } from "@/server/email/outbox";
 
 /**
@@ -13,7 +13,6 @@ import { emailConfigured, queueEmail } from "@/server/email/outbox";
  * ponytail: one job per member and one SMTP send per opted-in reader; past ~500 emails per Monday use a bulk provider.
  */
 export const DIGEST_JOB = "digest.build";
-const AFTER_SWEEP_MS = 3 * 60 * 60_000;
 const SPREAD_SECS = 60 * 60;
 /** Members per insert: one statement each, so a large workspace count stays a handful of round trips. */
 const CHUNK = 500;

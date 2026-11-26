@@ -32,7 +32,12 @@ function sectionLines(s: DigestSection): string[] {
     case "sales":
       return s.data ? [`Sales: ${s.data.length ? s.data.map(salesLine).join("; ") : "no orders"}`] : ["Sales: no data yet"];
     case "ads":
-      return s.data ? [`Ads: ${s.data.length ? s.data.map((c) => `${c.spend} ${c.currency} spent, ${n(c.purchases)} purchases`).join("; ") : "no spend"}`] : ["Ads: no data yet"];
+      return [
+        s.data ? `Ads: ${s.data.length ? s.data.map((c) => `${c.spend} ${c.currency} spent, ${n(c.purchases)} purchases`).join("; ") : "no spend"}` : "Ads: no data yet",
+        // One line each: adAlertText cleaned the text (no line breaks, control or bidi characters) when it was built.
+        ...(s.alerts ?? []).map((a) => `  - alert: ${a.text}`),
+        ...(s.moreAlerts ? [`  - ${n(s.moreAlerts)} more alerts in the app`] : []),
+      ];
   }
 }
 

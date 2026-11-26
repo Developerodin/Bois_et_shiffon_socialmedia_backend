@@ -43,6 +43,13 @@ describe("chat GET", () => {
   it("returns the thread as saved to a viewer with crm.read", async () => {
     expect(await read(["agents.read", "crm.read"])).toEqual(thread);
   });
+
+  it("hides a saved ads step from a viewer who lost ads.read, and keeps the sales step for crm.read", async () => {
+    const ads = { type: "tool-adsSummary", toolCallId: "2", state: "output-available", input: {}, output: { spend: "120.00" } };
+    m.findFirst.mockResolvedValue({ id: "t1", messages: [{ id: "a", role: "assistant", parts: [sales, ads] }] });
+    const parts = (await read(["agents.read", "crm.read"])).messages[0].parts;
+    expect(parts).toEqual([sales, { ...ads, output: { error: "Your role can't see ads." } }]);
+  });
 });
 
 describe("chat POST", () => {
@@ -60,6 +67,15 @@ describe("chat POST", () => {
     expect(model).not.toContain("900.00");
     expect(model).toContain(SALES_HIDDEN.error);
     expect(saved).toContain("900.00");
+  });
+
+  it("doesn't give the model a saved ads step's figures once ads.read is lost; the thread keeps them", async () => {
+    const ads = { type: "tool-adsSummary", toolCallId: "2", state: "output-available", input: {}, output: { spend: "120.00" } };
+    m.findUnique.mockResolvedValue({ id: "thread-1", userId: "u1", brandId: "b1", messages: [{ id: "a", role: "assistant", parts: [ads] }] });
+    const { model, saved } = await send(["agents.read", "crm.read"]);
+    expect(model).not.toContain("120.00");
+    expect(model).toContain("Your role can't see ads.");
+    expect(saved).toContain("120.00");
   });
 
   it("gives them to the model for a person with crm.read", async () => {

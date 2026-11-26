@@ -44,6 +44,9 @@ let next: (ctx: SyncContext) => Promise<SyncOutcome> = async () => ({ count: 0 }
 registerSync("SEARCH_CONSOLE", async (ctx) => (calls.push(ctx), next(ctx)));
 // Shopify orders' runner stands in for any kind that opts into halving.
 registerSync("SHOPIFY_ORDERS", async (ctx) => (calls.push(ctx), next(ctx)), { halveOnCap: true });
+// Post metrics' runner stands in for a kind with an afterRun hook (META_ADS queues its alerts there).
+const afterRun = vi.fn<(source: unknown, outcome: SyncOutcome, syncedThrough: string | null) => Promise<void>>(async () => {});
+registerSync("POST_METRICS", async (ctx) => (calls.push(ctx), next(ctx)), { afterRun });
 
 beforeAll(async () => {
   ws = (await prisma.workspace.create({ data: { name: "W", slug: "w-data-sources" } })).id;
@@ -51,6 +54,7 @@ beforeAll(async () => {
   await brand("ds-b");
 });
 beforeEach(async () => {
+  afterRun.mockReset().mockResolvedValue(undefined);
   calls.length = 0;
   next = async () => ({ count: 0 });
   await prisma.job.deleteMany({});
@@ -105,6 +109,51 @@ describe("enqueueDailyDataSyncs", () => {
 });
 
 describe("runDataSync", () => {
+  describe("afterRun", () => {
+    const yesterday = { from: "2026-11-19", to: "2026-11-25" };
+    const synced = () => source("ds-a", "POST_METRICS", { syncedThrough: new Date("2026-11-20") });
+
+    it("is called after a complete daily or manual run, with the syncedThrough it left", async () => {
+      for (const mode of ["daily", "manual"]) {
+        const s = await synced();
+        next = async () => ({ count: 3, complete: true, window: yesterday });
+        await runDataSync(payload(s, { mode }), lease);
+        expect(afterRun).toHaveBeenLastCalledWith(expect.objectContaining({ id: s.id }), { count: 3, complete: true, window: yesterday }, "2026-11-25");
+      }
+      expect(afterRun).toHaveBeenCalledTimes(2);
+    });
+
+    it("is not called for a backfill, partial, stopChain or switched-off run", async () => {
+      const s = await synced();
+      next = async () => ({ count: 1, complete: true });
+      await runDataSync(payload(s, { mode: "backfill", from: "2026-11-01", to: "2026-11-07", end: "2026-11-25" }), lease);
+      next = async () => ({ count: 1, complete: false, reason: "partial", window: yesterday });
+      await runDataSync(payload(s), lease);
+      next = async () => ({ count: 0, complete: true, stopChain: true, window: yesterday });
+      await runDataSync(payload(s), lease);
+      next = async () => ({ count: 0, complete: false, reason: "permission", window: yesterday });
+      await runDataSync(payload(s), lease);
+      const off = await source("ds-a", "POST_METRICS", { status: "OFF", syncedThrough: new Date("2026-11-20") });
+      next = async () => ({ count: 1, complete: true, window: yesterday });
+      await runDataSync(payload(off), lease);
+      expect(afterRun).not.toHaveBeenCalled();
+    });
+
+    it("an error in it is logged, the sync is recorded as ok and nothing is thrown or retried", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const s = await synced();
+      afterRun.mockRejectedValue(new Error("boom"));
+      next = async () => ({ count: 2, complete: true, window: yesterday });
+      await expect(runDataSync(payload(s), lease)).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith("[data] afterRun failed", "POST_METRICS", "ds-a", "boom");
+      const after = await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } });
+      expect(after.lastResult).toMatchObject({ reason: null, count: 2 });
+      expect(after.syncedThrough?.toISOString().slice(0, 10)).toBe("2026-11-25");
+      expect(await dataJobs(s.id)).toHaveLength(0);
+      warn.mockRestore();
+    });
+  });
+
   it("a payload naming another brand's source does nothing", async () => {
     const s = await source("ds-a", "SEARCH_CONSOLE");
     await runDataSync(payload(s, { brandId: "ds-b" }), lease);

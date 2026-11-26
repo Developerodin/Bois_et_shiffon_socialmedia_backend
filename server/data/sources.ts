@@ -103,8 +103,14 @@ export type SyncRunner = (ctx: SyncContext) => Promise<SyncOutcome>;
  * halveOnCap: a backfill window still stopped by the time cap after its retries is read again at half its length
  * (down to 1 day) instead of waiting for the sweep's daily restart. Opt-in (Shopify orders): other kinds keep today's
  * retries.
+ * afterRun: called after a complete daily or manual run is recorded (never a backfill, partial, permission-stopped or
+ * stopChain run, nor for a source that is OFF), with the syncedThrough the run left. Its error is logged, never
+ * rethrown, so it neither fails nor retries the sync. META_ADS queues its alerts job here.
  */
-type SyncOptions = { halveOnCap?: boolean };
+type SyncOptions = {
+  halveOnCap?: boolean;
+  afterRun?: (source: DataSource, outcome: SyncOutcome, syncedThrough: string | null) => Promise<void>;
+};
 
 const RUNNERS: Partial<Record<DataSourceKind, SyncRunner>> = {};
 const OPTIONS: Partial<Record<DataSourceKind, SyncOptions>> = {};
@@ -121,6 +127,8 @@ export async function runSync(kind: DataSourceKind, ctx: SyncContext): Promise<S
 
 // ---- day helpers -------------------------------------------------------------------------------------------------
 
+/** Today's date in UTC, "YYYY-MM-DD". */
+export const utcToday = (now = new Date()) => now.toISOString().slice(0, 10);
 /** Today's date in `zone`, "YYYY-MM-DD". */
 export const zoneToday = (zone: string, now = new Date()) => new Intl.DateTimeFormat("en-CA", { timeZone: zone }).format(now);
 export const addDays = (day: string, n: number) => new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
@@ -376,6 +384,15 @@ export async function runDataSync(payload: unknown, lease: Lease) {
   // The provider said "not now" (no retry, no next window, no follow-up): a later run starts the chain again.
   if (outcome.stopChain) return;
 
+  const afterRun = OPTIONS[source.kind]?.afterRun;
+  if (afterRun && p.mode !== "backfill" && outcome.complete && outcome.window) {
+    try {
+      await afterRun(source, outcome, syncedThrough);
+    } catch (error) {
+      console.warn("[data] afterRun failed", source.kind, source.brandId, error instanceof Error ? error.message : error);
+    }
+  }
+
   // A plan this run started: its first window, after today's daily spread (also from a daily, manual or follow-up run).
   const started = outcome.settings?.set?.backfill as BackfillPlan | undefined;
   if (started) await enqueueBackfill({ ...source, syncedThrough: syncedThrough ? new Date(`${syncedThrough}T00:00:00Z`) : null }, started, { runAt: chainStart(source.id) });
@@ -531,6 +548,23 @@ async function syncRuns(scope: { workspaceId: string; brandId: string }) {
     if (!runs.has(id) || state === "running") runs.set(id, { state, runAt: j.runAt, backfill });
   }
   return runs;
+}
+
+/**
+ * The brand's sources of `kind` that are on: their external ids (ad accounts "act_…", the site), the last day every one
+ * of them has read in full (their minimum `syncedThrough`; null when there is none or any hasn't finished its first
+ * sync, as a lagging one's missing days would read as a drop), and how many are switched off. One query; budgets'
+ * pacing and spend and the chat's default ranges read it. The digest's `synced()` keeps its own, wider rule.
+ */
+export type LiveSources = Awaited<ReturnType<typeof liveSources>>;
+export async function liveSources(scope: { workspaceId: string; brandId: string }, kind: DataSourceKind) {
+  const all = await prisma.dataSource.findMany({
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind },
+    select: { status: true, externalId: true, syncedThrough: true },
+  });
+  const on = all.filter((s) => s.status !== "OFF");
+  const syncedThrough = !on.length || on.some((s) => !s.syncedThrough) ? null : on.map((s) => dayOf(s.syncedThrough!)).sort()[0];
+  return { externalIds: on.map((s) => s.externalId), syncedThrough, offCount: all.length - on.length };
 }
 
 /** The brand's own zone (BrandProfile.timeZone, else the default), for days we bucket ourselves. */

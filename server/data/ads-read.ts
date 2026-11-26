@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import { dayDate, previousRange } from "./sources";
+import { dayDate, dayOf, previousRange } from "./sources";
 import type { AdsCampaignDto, AdsSummaryDto, AdsTotals, DateRange, ShopRevenueOverSpend } from "@/shared";
 import { prisma } from "@/server/db/prisma";
 import { convertedSpend } from "./budgets";
@@ -58,9 +58,9 @@ export async function adsSummary(scope: Scope, range: DateRange, opts: { crmRead
  * Net sales without VAT (Task 2) ÷ ad spend over the same days, the spend converted to the shop's currency. Shopify
  * days are the brand's and ad days the ad account's, so the two may differ by a few hours (the screen says so).
  * Reads the ex-VAT figure alone (sales-read.ts exVat), for the range's currencies only. No figure when orders were
- * left out of the ex-VAT sum (exVatMissing): the ratio would read low.
+ * left out of the ex-VAT sum (exVatMissing): the ratio would read low. `accountIds`: the live ad accounts, if already read.
  */
-export async function shopRevenueOverSpend(scope: Scope, range: DateRange): Promise<ShopRevenueOverSpend> {
+export async function shopRevenueOverSpend(scope: Scope, range: DateRange, accountIds?: string[]): Promise<ShopRevenueOverSpend> {
   const none = (why: ShopRevenueOverSpend["why"], currency: string | null = null): ShopRevenueOverSpend => ({ ratio: null, currency, why, staleRateFrom: null });
   const vat = await exVat(scope, range);
   if (vat.size > 1) return none("currencies");
@@ -69,10 +69,36 @@ export async function shopRevenueOverSpend(scope: Scope, range: DateRange): Prom
   const [currency, shop] = entry;
   if (shop.netExVat === null || shop.exVatFrom !== null) return none("no_revenue", currency);
   if (shop.exVatMissing > 0) return none("vat_missing", currency);
-  const spend = await convertedSpend(scope, range.from, range.to, currency);
+  const spend = await convertedSpend(scope, range.from, range.to, currency, accountIds);
   if (!spend) return none("no_rate", currency);
   if (spend.total.isZero()) return none("no_spend", currency);
   return { ratio: D(shop.netExVat).div(spend.total).toDecimalPlaces(2).toNumber(), currency, why: null, staleRateFrom: spend.stale };
+}
+
+/** One currency's ads sums for one day (adsDays). */
+export type AdsDayRow = { currency: string; day: string; spend: Prisma.Decimal; impressions: number; clicks: number; purchases: number; purchaseValue: Prisma.Decimal };
+
+/**
+ * The brand's Meta sums per currency and day over the range, for the given ad accounts only (the chat passes the ones
+ * switched on). The same groupBy shape as budgets' convertedSpend, with every figure summed; it reads through the
+ * (brandId, platform, accountId, day) index like totals(). Ordered by day, then currency.
+ */
+export async function adsDays(scope: Scope, range: DateRange, accountIds: string[]): Promise<AdsDayRow[]> {
+  const groups = await prisma.adDay.groupBy({
+    by: ["currency", "day"],
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, platform: "META", accountId: { in: accountIds }, day: { gte: dayDate(range.from), lte: dayDate(range.to) } },
+    _sum: { spend: true, impressions: true, clicks: true, purchases: true, purchaseValue: true },
+    orderBy: [{ day: "asc" }, { currency: "asc" }],
+  });
+  return groups.map((g) => ({
+    currency: g.currency,
+    day: dayOf(g.day),
+    spend: D(g._sum.spend),
+    impressions: g._sum.impressions ?? 0,
+    clicks: g._sum.clicks ?? 0,
+    purchases: g._sum.purchases ?? 0,
+    purchaseValue: D(g._sum.purchaseValue),
+  }));
 }
 
 type CampaignRow = {

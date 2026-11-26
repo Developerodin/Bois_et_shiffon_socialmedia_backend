@@ -2,13 +2,19 @@ import { ContentChannel, type Prisma } from "@prisma/client";
 import { tool } from "ai";
 import { z } from "zod";
 import { ProductPageQuery, productPageWhere, STOCK_UNKNOWN } from "@/server/catalog/products";
-import { OPEN_STATUSES, parseRange, STATUS_GROUPS, stockLabel, type CatalogSync, type DateRange } from "@/shared";
+import {
+  OPEN_STATUSES, parseRange, SEARCH_PAGE_SORTS, SEARCH_RANGE_MAX_DAYS, STATUS_GROUPS, stockLabel, type CatalogSync, type DateRange, type PostInsightDto,
+} from "@/shared";
 import {
   BREAKDOWNS, hasOrderLines, MAX_ANALYSIS_ROWS, MAX_RISK_ROWS, PRODUCT_GROUPS, productSales, salesBreakdown, stockRisk, TIME_BREAKDOWNS, topProducts, truncatedOrders,
 } from "@/server/data/sales-analysis";
 import { MAX_SALES_DAYS, salesSummary } from "@/server/data/sales-read";
-import { addDays, badRangeDetail, brandTimeZone, rangeDays, zoneToday } from "@/server/data/sources";
-import { MAX_SALES_CALLS, SALES_HIDDEN } from "@/server/chat/turn";
+import { addDays, badRangeDetail, brandTimeZone, liveSources, previousRange, rangeDays, utcToday, zoneToday } from "@/server/data/sources";
+import { ADS_MAX_DAYS, adsCampaigns, adsDays, D, shopRevenueOverSpend, totalsOf, type AdsDayRow } from "@/server/data/ads-read";
+import { currentMonth, listBudgets, MonthSchema } from "@/server/data/budgets";
+import { MAX_POSTS, POSTS_MAX_DAYS, postsWithMetrics } from "@/server/data/post-metrics-read";
+import { searchPages, searchSummary } from "@/server/data/search-read";
+import { CHAT_DATA_TOOLS, hiddenFor, MAX_DATA_CALLS, MAX_GROUP_CALLS, type ToolGroup } from "@/server/chat/turn";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
 import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
@@ -16,6 +22,8 @@ import { isTimeZone, wallTime } from "@/server/content/offer-checks";
 import { prisma } from "@/server/db/prisma";
 import { latestAuditReports } from "@/server/services/audit-reports";
 import { CONTEXT_DOC_KINDS, listContextDocs } from "@/server/services/context-docs";
+import { cleanTitle } from "@/server/text";
+import { listAlerts } from "@/server/ads/alerts";
 
 export type ChatScope = { workspaceId: string; brandId: string; userId: string };
 
@@ -26,24 +34,90 @@ const POST_FILTERS = {
   "awaiting-approval": [...STATUS_GROUPS.awaiting],
   published: [...STATUS_GROUPS.published],
 } as const;
-// Titles are data written by agents and people: one line, no control characters, short.
-// Zero-width and bidi characters go too, so a title can't hide or reorder text.
-const cleanTitle = (t: string) =>
-  t.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]+/g, " ").trim().slice(0, 100) || "(untitled)";
 // A post whose time passed this recently may still be publishing: not overdue yet.
 const OVERDUE_GRACE_MS = 15 * 60_000;
 
 // Saved threads are validated against these schemas: they may only widen (new optional fields, higher caps), never narrow.
-const SalesRange = z.object({
-  from: z.string().max(10).optional().describe("YYYY-MM-DD, brand-local, inclusive; with to"),
-  to: z.string().max(10).optional().describe("YYYY-MM-DD, inclusive; leave both out for the last 30 days"),
-});
-const BAD_RANGE = { error: badRangeDetail(MAX_SALES_DAYS) };
+/** A tool's optional period: both days, or neither for the tool's default (`defaultHint` says which). */
+const rangeInput = (defaultHint: string) =>
+  z.object({
+    from: z.string().max(10).optional().describe("YYYY-MM-DD, brand-local, inclusive; with to"),
+    to: z.string().max(10).optional().describe(`YYYY-MM-DD, inclusive; ${defaultHint}`),
+  });
+const SalesRange = rangeInput("leave both out for the last 30 days");
 const NEEDS_LINES =
   "Per-product sales need order line items, which only come through the AskCart connection once AskCart sends them; none are stored for this brand yet. salesSummary and salesBreakdown still work from order totals.";
 const LINE_NOTE =
   "From order line items: units and revenue are net of refunds, revenue after every discount (order-level share included), and include VAT where the shop's prices do (unlike salesSummary's netExVat). Lines without a product (custom lines, deleted products) are 'Other / custom items'.";
-const SALES_LIMIT = { error: "Sales tool limit reached for this message." };
+const DATA_LIMIT = { error: "Data tool limit reached for this message." };
+const GROUP_NAME: Record<ToolGroup, string> = { sales: "Sales", ads: "Ads", analytics: "Analytics" };
+const NO_ADS = { note: "Meta Ads isn't connected or hasn't finished its first sync." };
+const ADS_NOTES = {
+  currencyNote: "Amounts are per ad account currency; never add currencies together.",
+  attributionNote: "Meta keeps attributing purchases for 7 days, so the last few days can still grow.",
+};
+const OFF_NOTE = "Switched-off ad accounts are left out.";
+/** Recent ads alerts adsSummary lists: seen in the last 7 days (conversion kinds dated 3 days back count from then). */
+const ALERT_DAYS = 7;
+const CHAT_ALERTS = 10;
+const ALERTS_NOTE = "Alerts are checked once a day after the Meta Ads sync; ROAS and no-purchase alerts look at the day 3 days back.";
+const RATIO_WHY: Record<string, string> = {
+  no_spend: "No Meta spend in this period, so there is no ratio.",
+  currencies: "The shop sold in several currencies in this period, so one ratio can't be given.",
+  no_revenue: "Shop net sales without VAT aren't known for this whole period, so there is no ratio.",
+  no_rate: "An exchange rate is missing to convert the ad spend, so there is no ratio.",
+  vat_missing: "Some orders' VAT couldn't be read, so revenue would read low; no ratio given.",
+};
+const POST_METRICS = ["reach", "views", "likes", "comments", "shares", "saves", "interactions"] as const;
+const POST_NOTES = [
+  "Numbers are each post's latest read; posts under 30 days old can still grow (final: false).",
+  "Story reach is the highest frame's reach.",
+  "Unread: the platform hasn't been read yet or the account lacks insights permission.",
+];
+const SEARCH_NOTES = [
+  "Days are Google's (Pacific time) and lag 2–3 days.",
+  "Only site totals and the top pages per day are stored; search queries (keywords) aren't synced, so they can't be answered here.",
+  "Page sums sit below the site total.",
+];
+const NO_SEARCH = { note: "Search Console isn't connected or hasn't finished its first sync." };
+
+/**
+ * Posts ranked by one metric, unread posts (and posts the platform gives no such number for) last; ties keep
+ * postsWithMetrics' order (most reach first).
+ */
+function rankPosts(posts: PostInsightDto[], by: (typeof POST_METRICS)[number]) {
+  const value = (p: PostInsightDto) => p.metrics?.[by] ?? null;
+  return [...posts].sort((a, b) => {
+    const x = value(a);
+    const y = value(b);
+    return x === null ? (y === null ? 0 : 1) : y === null ? -1 : y - x;
+  });
+}
+
+const PACING_NOTE: Record<string, string> = {
+  no_data: "No Meta spend synced for this month yet.",
+  no_rate: "No exchange rate yet to convert spend into the budget currency.",
+  google_later: "Google Ads spend arrives in Phase 3.",
+};
+
+/**
+ * adsDays rows folded per currency: the totals (totalsOf) plus impressions, clicks, CTR (clicks ÷ impressions) and
+ * cost per click, each null when its divisor is 0. Never adds across currencies.
+ */
+function foldAds(rows: AdsDayRow[]) {
+  const by = new Map<string, { spend: ReturnType<typeof D>; value: ReturnType<typeof D>; purchases: number; impressions: number; clicks: number }>();
+  for (const r of rows) {
+    const t = by.get(r.currency) ?? { spend: D(0), value: D(0), purchases: 0, impressions: 0, clicks: 0 };
+    by.set(r.currency, { spend: t.spend.plus(r.spend), value: t.value.plus(r.purchaseValue), purchases: t.purchases + r.purchases, impressions: t.impressions + r.impressions, clicks: t.clicks + r.clicks });
+  }
+  return [...by].sort(([a], [b]) => a.localeCompare(b)).map(([currency, t]) => ({
+    ...totalsOf(currency, t.spend, t.purchases, t.value),
+    impressions: t.impressions,
+    clicks: t.clicks,
+    ctr: t.impressions ? Math.round((t.clicks / t.impressions) * 10_000) / 10_000 : null,
+    cpc: t.clicks ? t.spend.div(t.clicks).toFixed(2) : null,
+  }));
+}
 const WEEKS_NOTE = "Weeks start on Monday and are labelled by that day; the first and last weeks can be partial.";
 /** stockRisk flags a best seller with less stock than this many days of its average sales. */
 const LOW_COVER_DAYS = 14;
@@ -60,22 +134,50 @@ const RUNNABLE = AGENTS.filter((a) => a.key !== "systems-check" && !a.internal).
 export function chatTools(scope: ChatScope) {
   // Chat sees exactly what the person's role can see on screen: same permissions as the matching pages.
   let perms: Promise<Set<string>> | undefined;
-  const can = async (p: string) => (await (perms ??= effectivePermissions(scope.workspaceId, scope.userId, scope.brandId))).has(p);
+  const permsOf = () => (perms ??= effectivePermissions(scope.workspaceId, scope.userId, scope.brandId));
+  const can = async (p: string) => (await permsOf()).has(p);
   const denied = (what: string) => ({ error: `Your role can't see ${what}.` });
-  // Sales tools: crm.read, and at most MAX_SALES_CALLS calls per message (one chatTools per message). Counted here as
-  // well as by the route's activeTools, which can't stop several calls made in parallel within one step.
-  let salesCalls = 0;
-  const salesGate = async () => {
-    if (!(await can("crm.read"))) return SALES_HIDDEN;
-    if (++salesCalls > MAX_SALES_CALLS) return SALES_LIMIT;
+  // Data tools (CHAT_DATA_TOOLS): every key the tool needs, then at most MAX_GROUP_CALLS calls per group and
+  // MAX_DATA_CALLS in all per message (one chatTools per message). Counted here as well as by the route's activeTools,
+  // which can't stop several calls made in parallel within one step. A refused call counts against nothing.
+  const groupCalls: Partial<Record<ToolGroup, number>> = {};
+  let dataCalls = 0;
+  const gate = async (name: string) => {
+    const { keys, group } = CHAT_DATA_TOOLS[name];
+    const refusal = hiddenFor(keys, await permsOf());
+    if (refusal) return refusal;
+    // No await between the checks and the counts, so calls made in parallel can't both take the last slot.
+    if ((groupCalls[group] ?? 0) >= MAX_GROUP_CALLS) return { error: `${GROUP_NAME[group]} tool limit reached for this message.` };
+    if (dataCalls >= MAX_DATA_CALLS) return DATA_LIMIT;
+    groupCalls[group] = (groupCalls[group] ?? 0) + 1;
+    dataCalls++;
     return null;
   };
-  // The sales tools' period: both days given (validated like the Sales tab's), or the last 30 brand-local days.
-  const rangeOf = async ({ from, to }: { from?: string; to?: string }): Promise<DateRange | null> => {
-    if (from || to) return parseRange(from, to, MAX_SALES_DAYS);
-    const zone = await brandTimeZone(scope);
-    const today = zoneToday(isTimeZone(zone) ? zone : DEFAULT_TIME_ZONE);
-    return { from: addDays(today, -29), to: today };
+  // A data tool's period: both days given (validated like the matching tab's, up to the tool's own maximum), or
+  // `defaultDays` days ending at `defaultEnd` (default: brand-local today). A defaultEnd without a day gives its note.
+  const rangeOf = async (
+    { from, to }: { from?: string; to?: string },
+    maxDays: number,
+    defaultEnd?: () => Promise<string | { note: string }>,
+    defaultDays = 30,
+  ): Promise<DateRange | { error: string } | { note: string }> => {
+    if (from || to) return parseRange(from, to, maxDays) ?? { error: badRangeDetail(maxDays) };
+    let end: string | { note: string };
+    if (defaultEnd) end = await defaultEnd();
+    else {
+      const zone = await brandTimeZone(scope);
+      end = zoneToday(isTimeZone(zone) ? zone : DEFAULT_TIME_ZONE);
+    }
+    return typeof end === "string" ? { from: addDays(end, 1 - defaultDays), to: end } : end;
+  };
+  // The brand's Meta Ads accounts that are on, read once per message and shared by the ads tools (like perms).
+  let ads: ReturnType<typeof liveSources> | undefined;
+  const adSources = () => (ads ??= liveSources(scope, "META_ADS"));
+  // The ads tools' period: both days given, or the 30 days ending at the last day every live account has synced.
+  // Either way, no live account that has finished its first sync gives the not-connected note, not empty figures.
+  const adsRange = async (input: { from?: string; to?: string }) => {
+    const range = await rangeOf(input, ADS_MAX_DAYS, async () => (await adSources()).syncedThrough ?? NO_ADS);
+    return "from" in range && (await adSources()).syncedThrough === null ? NO_ADS : range;
   };
   // Per-product numbers miss lines of orders AskCart sent incomplete (re-read by the sync within a day). Counted once
   // per period in a message: a report makes several sales calls over one period, often in parallel, so the promise is
@@ -310,10 +412,10 @@ export function chatTools(scope: ChatScope) {
         "Shop sales totals for a period (brand-local days, default the last 30 days): orders, gross, discounts, net sales, total, refunded per currency, with the same-length previous period to compare; daily rows when the period is 31 days or less. Start any sales question or report here. netExVat: net sales without VAT, from exVatFrom when set (null: not known yet); exVatMissing orders are left out of it. The other totals include VAT where the shop's prices do.",
       inputSchema: SalesRange,
       execute: async (input) => {
-        const refused = await salesGate();
+        const refused = await gate("salesSummary");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const { currencies } = await salesSummary(scope, range);
         if (!currencies.length) return { ...range, note: "No orders in this period (test and cancelled orders are left out), or the shop's orders aren't synced." };
         const withDays = rangeDays(range) <= 31;
@@ -342,10 +444,10 @@ export function chatTools(scope: ChatScope) {
         limit: z.number().int().min(1).max(MAX_ANALYSIS_ROWS).default(MAX_ANALYSIS_ROWS),
       }),
       execute: async ({ by, limit, ...input }) => {
-        const refused = await salesGate();
+        const refused = await gate("salesBreakdown");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const lineBased = by === "collection" || by === "vendor";
         const [{ columns, rows, moreGroups }, truncated] = await Promise.all([
           salesBreakdown(scope, range, by, limit),
@@ -371,10 +473,10 @@ export function chatTools(scope: ChatScope) {
         limit: z.number().int().min(1).max(25).default(10),
       }),
       execute: async ({ rankBy, group, limit, ...input }) => {
-        const refused = await salesGate();
+        const refused = await gate("topProducts");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const [{ rows, moreGroups }, truncated] = await Promise.all([topProducts(scope, range, rankBy, group, limit), truncatedNote(range)]);
         if (!rows.length) return { ...range, rankBy, group, note: (await hasOrderLines(scope)) ? "No products sold in this period." : NEEDS_LINES };
         return {
@@ -393,10 +495,10 @@ export function chatTools(scope: ChatScope) {
         "How one product (or every product, without q) is selling: its variants matching the title/SKU text with net units, net revenue, current price and stock, plus weekly units and revenue over the period. Use for 'how is X selling'.",
       inputSchema: SalesRange.extend({ q: z.string().max(100).default("") }),
       execute: async ({ q, ...input }) => {
-        const refused = await salesGate();
+        const refused = await gate("productSales");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const [{ variants, weeks }, truncated] = await Promise.all([productSales(scope, range, q.trim()), truncatedNote(range)]);
         if (!variants.length) {
           if (!(await hasOrderLines(scope))) return { ...range, q, note: NEEDS_LINES };
@@ -423,10 +525,10 @@ export function chatTools(scope: ChatScope) {
         "Stock against sales: the period's best sellers (by net units) with current stock and estimated days of cover (stock ÷ average daily units), lowest cover first, flagging sold-out best sellers; plus slow movers (in stock, few sales for the stock held). Use for restock and clearance advice.",
       inputSchema: SalesRange.extend({ limit: z.number().int().min(1).max(MAX_RISK_ROWS).default(20) }),
       execute: async ({ limit, ...input }) => {
-        const refused = await salesGate();
+        const refused = await gate("stockRisk");
         if (refused) return refused;
-        const range = await rangeOf(input);
-        if (!range) return BAD_RANGE;
+        const range = await rangeOf(input, MAX_SALES_DAYS);
+        if (!("from" in range)) return range;
         const [{ sellers, slow }, truncated] = await Promise.all([stockRisk(scope, range, limit), truncatedNote(range)]);
         if (!sellers.length) return { ...range, note: (await hasOrderLines(scope)) ? "No products sold in this period." : NEEDS_LINES };
         const n = rangeDays(range);
@@ -449,6 +551,214 @@ export function chatTools(scope: ChatScope) {
             `Stock is the catalogue's last sync; low cover = under ${LOW_COVER_DAYS} days; daysOfCover null = stock not tracked, or no sales (slow movers).`,
             ...truncated,
           ],
+        };
+      },
+    }),
+
+    // Meta Ads: read-only, from our own AdDay rows and budgets; ads.read, like the Ads tab. Unlike the tab, the chat
+    // leaves switched-off ad accounts out (as pacing and the ratio do), so its figures never contradict each other.
+    adsSummary: tool({
+      description:
+        "Meta Ads totals per currency for a period (default the last 30 synced days): spend, impressions, clicks, CTR, cost per click, purchases, purchase value, ROAS, cost per purchase, with the same-length previous period; daily rows when the period is 31 days or less; and recent ads alerts. Start any ads question here.",
+      inputSchema: rangeInput("leave both out for the last 30 synced days"),
+      execute: async (input) => {
+        const refused = await gate("adsSummary");
+        if (refused) return refused;
+        const range = await adsRange(input);
+        if (!("from" in range)) return range;
+        const live = await adSources();
+        const prev = previousRange(range);
+        // adsDays, not the Ads tab's adsSummary reader: that one adds shop revenue ÷ spend, a sales figure.
+        const [now, before, recent] = await Promise.all([
+          adsDays(scope, range, live.externalIds),
+          adsDays(scope, prev, live.externalIds),
+          listAlerts(scope, { recentFrom: addDays(utcToday(), -ALERT_DAYS) }, CHAT_ALERTS),
+        ]);
+        const roas = (r: AdsDayRow) => totalsOf(r.currency, r.spend, r.purchases, r.purchaseValue).roas;
+        return {
+          ...range,
+          syncedThrough: live.syncedThrough,
+          totals: foldAds(now),
+          previousRange: prev,
+          previous: foldAds(before),
+          ...(rangeDays(range) <= 31 && {
+            days: {
+              columns: ["day", "currency", "spend", "impressions", "clicks", "purchases", "roas"],
+              rows: now.map((r) => [r.day, r.currency, r.spend.toFixed(2), r.impressions, r.clicks, r.purchases, roas(r)]),
+            },
+          }),
+          // The alert text is adAlertText's: campaign names cleaned there. The prompt asks to mention the open ones.
+          alerts: { columns: ["kind", "text", "day", "lastSeen", "open"], rows: recent.alerts.map((a) => [a.kind, a.text, a.firstDay, a.lastDay, a.open]) },
+          ...(recent.more > 0 && { moreAlerts: recent.more }),
+          ...(recent.alerts.length > 0 && { alertsNote: ALERTS_NOTE }),
+          ...ADS_NOTES,
+          ...(live.offCount > 0 && { offNote: OFF_NOTE }),
+        };
+      },
+    }),
+
+    // ponytail: sorts all of a period's campaigns in memory; a year at ~100 campaigns is fine. Past ~5k campaign rows
+    // per range, rank in SQL.
+    adCampaigns: tool({
+      description:
+        "Meta Ads campaigns for a period (default the last 30 synced days), ranked by spend, purchases or ROAS: spend, impressions, clicks, purchases, ROAS and cost per purchase per campaign, in its ad account's currency. Use for which campaigns work or waste money.",
+      inputSchema: rangeInput("leave both out for the last 30 synced days").extend({
+        // At most 25: its rows are the largest output the thread keeps.
+        limit: z.number().int().min(1).max(25).default(20),
+        rankBy: z.enum(["spend", "purchases", "roas"]).default("spend"),
+      }),
+      execute: async ({ limit, rankBy, ...input }) => {
+        const refused = await gate("adCampaigns");
+        if (refused) return refused;
+        const range = await adsRange(input);
+        if (!("from" in range)) return range;
+        const live = await adSources();
+        const ids = new Set(live.externalIds);
+        // The Ads tab's reader, unchanged; switched-off accounts are dropped here.
+        const all = (await adsCampaigns(scope, range)).filter((c) => ids.has(c.accountId));
+        const key = (c: (typeof all)[number]) => (rankBy === "spend" ? Number(c.spend) : rankBy === "purchases" ? c.purchases : c.roas);
+        all.sort((a, b) => (key(b) ?? -Infinity) - (key(a) ?? -Infinity));
+        const shown = all.slice(0, limit);
+        return {
+          ...range,
+          rankBy,
+          columns: ["campaign", "account", "currency", "spend", "impressions", "clicks", "purchases", "roas", "costPerPurchase"],
+          rows: shown.map((c) => [cleanTitle(c.campaignName), c.accountId, c.currency, c.spend, c.impressions, c.clicks, c.purchases, c.roas, c.costPerPurchase]),
+          ...(all.length > limit && { moreCampaigns: all.length - limit }),
+          ...ADS_NOTES,
+          ...(live.offCount > 0 && { offNote: OFF_NOTE }),
+        };
+      },
+    }),
+
+    adBudgets: tool({
+      description:
+        "The month's ad budgets per platform and Meta's pacing against them (spend so far, converted to the budget currency, vs budget × days elapsed ÷ days in the month: under, on or over). Default the current month.",
+      // The month is checked in execute, not in the schema: MonthSchema's window moves with today, and a saved
+      // thread's month must keep validating once it falls out of it.
+      inputSchema: z.object({ month: z.string().max(7).optional().describe("YYYY-MM; leave out for the current month") }),
+      execute: async ({ month = currentMonth() }) => {
+        const refused = await gate("adBudgets");
+        if (refused) return refused;
+        if (!MonthSchema.safeParse(month).success) return { error: "month must be YYYY-MM, from 24 months back to 12 ahead." };
+        const { budgets, pacing } = await listBudgets(scope, month, await adSources());
+        const notes = pacing.map((p) =>
+          p.state === "ok"
+            ? p.staleRateFrom ? `Spend converted at ECB rates; uses a rate from ${p.staleRateFrom}.` : null
+            : PACING_NOTE[p.state],
+        ).filter((n): n is string => !!n);
+        return {
+          month,
+          budgets: budgets.map((b) => ({ platform: b.platform, amount: b.amount, currency: b.currency })),
+          pacing,
+          ...(!budgets.length && { note: "No ad budget set for this month." }),
+          ...(notes.length && { notes: [...new Set(notes)] }),
+        };
+      },
+    }),
+
+    revenuePerAdSpend: tool({
+      description:
+        "Shop revenue ÷ Meta ad spend for a period (default the last 30 synced days): shop net sales without VAT divided by the ad spend converted to the shop's currency. Needs sales access as well as ads.",
+      inputSchema: rangeInput("leave both out for the last 30 synced days"),
+      execute: async (input) => {
+        const refused = await gate("revenuePerAdSpend");
+        if (refused) return refused;
+        const range = await adsRange(input);
+        if (!("from" in range)) return range;
+        const { ratio, currency, why, staleRateFrom } = await shopRevenueOverSpend(scope, range, (await adSources()).externalIds);
+        const notes = [
+          ...(currency ? [`Shop net sales without VAT ÷ Meta spend converted to ${currency} at the ECB daily rates.`] : []),
+          "Shopify days and ad account days may differ by a few hours.",
+          ...(staleRateFrom ? [`Uses a rate from ${staleRateFrom}.`] : []),
+          ...(why ? [RATIO_WHY[why]] : []),
+        ];
+        return { ...range, ratio, currency, why, staleRateFrom, notes };
+      },
+    }),
+
+    // Posts and Search Console: read-only, from our own PostMetric and SearchDay rows; analytics.read, like the
+    // Performance tabs. Titles and page URLs are typed by people, so they go through cleanTitle.
+    // ponytail: postsWithMetrics reads at most the top 500 posts by reach; a brand posting more than 500 in 90 days
+    // gets a note, and its totals cover those 500.
+    postPerformance: tool({
+      description:
+        "How the brand's Instagram, Facebook and Threads posts and Instagram stories did in a period (brand-local days, default the last 30): per-channel totals, then the top posts and the top stories ranked by one metric (reach, views, likes, comments, shares, saves or interactions).",
+      inputSchema: rangeInput("leave both out for the last 30 days").extend({
+        rankBy: z.enum(POST_METRICS).default("reach"),
+        channel: z.nativeEnum(ContentChannel).optional(),
+        limit: z.number().int().min(1).max(25).default(10),
+      }),
+      execute: async ({ rankBy, channel, limit, ...input }) => {
+        const refused = await gate("postPerformance");
+        if (refused) return refused;
+        const range = await rangeOf(input, POSTS_MAX_DAYS);
+        if (!("from" in range)) return range;
+        const read = await postsWithMetrics(scope, range, new Date(), { stories: true });
+        const all = channel ? read.filter((p) => p.channel === channel) : read;
+        // Totals from every row read, before any cap.
+        const totals = new Map<string, { posts: number; read: number } & Record<(typeof POST_METRICS)[number], number>>();
+        for (const p of all) {
+          const t = totals.get(p.channel) ?? { posts: 0, read: 0, reach: 0, views: 0, likes: 0, comments: 0, shares: 0, saves: 0, interactions: 0 };
+          t.posts++;
+          if (p.metrics) {
+            t.read++;
+            for (const m of POST_METRICS) t[m] += p.metrics[m] ?? 0;
+          }
+          totals.set(p.channel, t);
+        }
+        const posts = rankPosts(all.filter((p) => p.channel !== "INSTAGRAM_STORY"), rankBy);
+        const stories = rankPosts(all.filter((p) => p.channel === "INSTAGRAM_STORY"), rankBy);
+        const title = (p: PostInsightDto) => cleanTitle(p.title ?? "");
+        return {
+          ...range,
+          rankBy,
+          totals: [...totals].map(([ch, t]) => ({ channel: ch, ...t })),
+          top: {
+            columns: ["title", "channel", "published", "reach", "views", "likes", "comments", "shares", "saves"],
+            rows: posts.slice(0, limit).map((p) => [title(p), p.channel, p.publishedAt, p.metrics?.reach ?? null, p.metrics?.views ?? null, p.metrics?.likes ?? null, p.metrics?.comments ?? null, p.metrics?.shares ?? null, p.metrics?.saves ?? null]),
+          },
+          ...(posts.length > limit && { morePosts: posts.length - limit }),
+          stories: {
+            // A story's comments are its replies, and its reach is the highest frame's.
+            columns: ["title", "published", "reachHighestFrame", "views", "replies", "shares", "navigation"],
+            rows: stories.slice(0, limit).map((p) => [title(p), p.publishedAt, p.metrics?.reach ?? null, p.metrics?.views ?? null, p.metrics?.comments ?? null, p.metrics?.shares ?? null, p.metrics?.navigation ?? null]),
+          },
+          ...(stories.length > limit && { moreStories: stories.length - limit }),
+          notes: [...POST_NOTES, ...(read.length >= MAX_POSTS ? [`Only the top ${MAX_POSTS} posts by reach in this period were read.`] : [])],
+        };
+      },
+    }),
+
+    searchPerformance: tool({
+      description:
+        "Google Search Console results for the brand's site over a period (Google's days, default the last 28 synced days): clicks, impressions, CTR and average position with the previous period, daily rows when 31 days or less, and the top pages by clicks or impressions. Search keywords aren't available.",
+      inputSchema: rangeInput("leave both out for the last 28 synced days").extend({
+        pageSort: z.enum(SEARCH_PAGE_SORTS).default("clicks"),
+        pages: z.number().int().min(0).max(25).default(10),
+      }),
+      execute: async ({ pageSort, pages, ...input }) => {
+        const refused = await gate("searchPerformance");
+        if (refused) return refused;
+        const range = await rangeOf(input, SEARCH_RANGE_MAX_DAYS, async () => (await liveSources(scope, "SEARCH_CONSOLE")).syncedThrough ?? NO_SEARCH, 28);
+        if (!("from" in range)) return range;
+        // manage: false, so the site's URL never reaches the model (only integrations.manage sees it on screen).
+        const [summary, top] = await Promise.all([searchSummary(scope, range, { manage: false }), searchPages(scope, range, { sort: pageSort, offset: 0 })]);
+        if (!summary.hasSite) return { ...range, hasSite: false, ...NO_SEARCH };
+        return {
+          ...range,
+          hasSite: true,
+          totals: summary.totals,
+          previousRange: summary.previousRange,
+          previous: summary.previous,
+          ...(rangeDays(range) <= 31 && {
+            days: { columns: ["day", "clicks", "impressions", "ctr", "position"], rows: summary.days.map((d) => [d.day, d.clicks, d.impressions, d.ctr, d.position]) },
+          }),
+          topPages: {
+            columns: ["page", "clicks", "impressions", "ctr", "position"],
+            rows: top.pages.slice(0, pages).map((p) => [cleanTitle(p.page), p.clicks, p.impressions, p.ctr, p.position]),
+          },
+          notes: SEARCH_NOTES,
         };
       },
     }),
