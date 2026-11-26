@@ -195,12 +195,20 @@ describe("runDataSync", () => {
   it("a cursor run that stopped partway queues one follow-up a minute later, at most FOLLOW_UPS in a row; a full run none", async () => {
     const s = await source("ds-a", "SEARCH_CONSOLE", { cursor: "2026-11-20T00:00:00.000Z" });
     next = async () => ({ count: 100, reason: "partial", cursor: "2026-11-21T00:00:00.000Z" });
+    const rewind = () => prisma.dataSource.update({ where: { id: s.id }, data: { cursor: "2026-11-20T00:00:00.000Z" } });
     await runDataSync(payload(s, { mode: "manual" }), lease);
-    await runDataSync(payload(s, { mode: "manual" }), lease); // a duplicate delivery: same cursor, same key
+    await rewind(); // a duplicate delivery of the same job, as if both read the source before either saved
+    await runDataSync(payload(s, { mode: "manual" }), lease);
     const [more, ...rest] = await dataJobs(s.id);
     expect(rest).toHaveLength(0);
     expect(more!.payload).toMatchObject({ mode: "manual", follow: 1 });
     expect(more!.runAt.getTime()).toBeGreaterThan(Date.now() + 50_000);
+
+    // A later chain whose step ends on the same cursor as one that already ran still queues its own follow-up.
+    await prisma.job.update({ where: { id: more!.id }, data: { status: "COMPLETED" } });
+    await rewind();
+    await runDataSync(payload(s, { mode: "manual" }), { jobId: "a-later-job", leasedBy: null });
+    expect(await dataJobs(s.id)).toHaveLength(2);
 
     await prisma.job.deleteMany({});
     next = async () => ({ count: 1, reason: "rate_limited", cursor: "2026-11-22T00:00:00.000Z" });

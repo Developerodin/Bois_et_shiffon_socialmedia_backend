@@ -297,12 +297,13 @@ export async function runDataSync(payload: unknown, lease: Lease) {
   }, startedAt);
 
   // A cursor kind (Shopify orders) that stopped partway and moved its cursor carries on in a minute rather than at the
-  // next daily sweep. Keyed by the cursor, so a duplicate delivery queues one; at most FOLLOW_UPS in a row, so a store
+  // next daily sweep. Keyed by this job's id: a duplicate delivery queues one, and each step of a chain (or a later
+  // chain that ends on a cursor an earlier one reached) gets its own key; at most FOLLOW_UPS in a row, so a store
   // that is always rate limited waits for the sweep. A run that read to the end never queues one (even when it steps
   // the cursor back to re-read an incomplete order), so the chain can't loop.
   if (!window && (outcome.reason === "partial" || outcome.reason === "rate_limited") && outcome.cursor !== undefined
     && outcome.cursor !== source.cursor && (p.follow ?? 0) < FOLLOW_UPS) {
-    await enqueueSourceSync(source, p.mode, { follow: (p.follow ?? 0) + 1, runAt: new Date(Date.now() + FOLLOW_UP_MS), key: `data:${source.id}:more:${outcome.cursor}` });
+    await enqueueSourceSync(source, p.mode, { follow: (p.follow ?? 0) + 1, runAt: new Date(Date.now() + FOLLOW_UP_MS), key: `data:${source.id}:more:${lease.jobId}` });
   }
 
   // Backfill chain: one window at a time. A complete window queues the next; one that stopped partway is tried again
