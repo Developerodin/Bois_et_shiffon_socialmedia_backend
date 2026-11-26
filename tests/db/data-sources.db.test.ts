@@ -15,7 +15,7 @@ vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
 import { prisma } from "@/server/db/prisma";
 import { enqueueDailyCatalogSyncs, CATALOG_SYNC_JOB } from "@/server/catalog/sync";
 import { claimNextJob, enqueueJob } from "@/server/jobs/queue";
-import { DATA_SYNC_JOB, enqueueDailyDataSyncs, enqueueSourceSync, registerSync, runDataSync, spreadSecs, type SyncContext, type SyncOutcome } from "@/server/data/sources";
+import { DATA_SYNC_JOB, FOLLOW_UPS, enqueueDailyDataSyncs, enqueueSourceSync, registerSync, runDataSync, spreadSecs, type SyncContext, type SyncOutcome } from "@/server/data/sources";
 import { ReconnectNeeded } from "@/server/services/connections";
 import { GET } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/data-sources/route";
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/data-sources/[kind]/sync/route";
@@ -190,6 +190,28 @@ describe("runDataSync", () => {
     const retry = (await dataJobs(s.id))[1]!;
     expect(retry.payload).toMatchObject({ from: "2026-01-31", retry: 1 });
     expect(retry.runAt.getTime()).toBeGreaterThan(Date.now() + 50 * 60_000);
+  });
+
+  it("a cursor run that stopped partway queues one follow-up a minute later, at most FOLLOW_UPS in a row; a full run none", async () => {
+    const s = await source("ds-a", "SEARCH_CONSOLE", { cursor: "2026-11-20T00:00:00.000Z" });
+    next = async () => ({ count: 100, reason: "partial", cursor: "2026-11-21T00:00:00.000Z" });
+    await runDataSync(payload(s, { mode: "manual" }), lease);
+    await runDataSync(payload(s, { mode: "manual" }), lease); // a duplicate delivery: same cursor, same key
+    const [more, ...rest] = await dataJobs(s.id);
+    expect(rest).toHaveLength(0);
+    expect(more!.payload).toMatchObject({ mode: "manual", follow: 1 });
+    expect(more!.runAt.getTime()).toBeGreaterThan(Date.now() + 50_000);
+
+    await prisma.job.deleteMany({});
+    next = async () => ({ count: 1, reason: "rate_limited", cursor: "2026-11-22T00:00:00.000Z" });
+    await runDataSync(payload(s, { mode: "manual", follow: FOLLOW_UPS }), lease);
+    expect(await dataJobs(s.id)).toHaveLength(0);
+
+    next = async () => ({ count: 1, reason: "partial", cursor: "2026-11-22T00:00:00.000Z" }); // cursor didn't move
+    await runDataSync(payload(s, { mode: "manual" }), lease);
+    next = async () => ({ count: 5, cursor: "2026-11-19T00:00:00.000Z" }); // read to the end, stepped back
+    await runDataSync(payload(s, { mode: "manual" }), lease);
+    expect(await dataJobs(s.id)).toHaveLength(0);
   });
 
   it("a daily run waits five minutes behind a running backfill of the same source", async () => {

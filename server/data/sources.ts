@@ -35,6 +35,9 @@ import { DEFAULT_TIME_ZONE } from "@/server/catalog/campaigns";
  * `lastResult`, which only holds DATA_SYNC_ERRORS strings.
  */
 export const DATA_SYNC_JOB = "data.sync";
+/** Follow-up runs in a row after cursor runs that stopped partway, and the wait before each. */
+export const FOLLOW_UPS = 5;
+const FOLLOW_UP_MS = 60_000;
 
 /**
  * A client's stop as the job's outcome: reconnect throws ReconnectNeeded (not retried), failed throws (retried);
@@ -138,6 +141,8 @@ const Payload = z.object({
   end: z.string().optional(),
   /** Backfill: retries of a window that stopped partway. */
   retry: z.number().int().optional(),
+  /** Cursor kinds: follow-up runs queued in a row after runs that stopped partway (FOLLOW_UPS). */
+  follow: z.number().int().optional(),
 });
 type Payload = z.infer<typeof Payload>;
 
@@ -158,7 +163,7 @@ export const spreadSecs = (id: string) => [...id].reduce((h, c) => (h * 31 + c.c
 export function enqueueSourceSync(
   source: SourceRef,
   mode: SyncMode,
-  opts: { runAt?: Date; window?: DayWindow & { end: string }; retry?: number; key?: string } = {},
+  opts: { runAt?: Date; window?: DayWindow & { end: string }; retry?: number; follow?: number; key?: string } = {},
 ) {
   const day = new Date().toISOString().slice(0, 10);
   const key = opts.key
@@ -173,6 +178,7 @@ export function enqueueSourceSync(
       dataSourceId: source.id, workspaceId: source.workspaceId, brandId: source.brandId, kind: source.kind, mode,
       ...(opts.window ? { from: opts.window.from, to: opts.window.to, end: opts.window.end } : {}),
       ...(opts.retry ? { retry: opts.retry } : {}),
+      ...(opts.follow ? { follow: opts.follow } : {}),
     },
     runAt: opts.runAt,
     maxAttempts: 3,
@@ -284,6 +290,15 @@ export async function runDataSync(payload: unknown, lease: Lease) {
     ...(syncedThrough !== dayOf(source.syncedThrough) ? { syncedThrough: new Date(`${syncedThrough}T00:00:00Z`) } : {}),
     ...(outcome.cursor !== undefined ? { cursor: outcome.cursor } : {}),
   });
+
+  // A cursor kind (Shopify orders) that stopped partway and moved its cursor carries on in a minute rather than at the
+  // next daily sweep. Keyed by the cursor, so a duplicate delivery queues one; at most FOLLOW_UPS in a row, so a store
+  // that is always rate limited waits for the sweep. A run that read to the end never queues one (even when it steps
+  // the cursor back to re-read an incomplete order), so the chain can't loop.
+  if (!window && (outcome.reason === "partial" || outcome.reason === "rate_limited") && outcome.cursor !== undefined
+    && outcome.cursor !== source.cursor && (p.follow ?? 0) < FOLLOW_UPS) {
+    await enqueueSourceSync(source, p.mode, { follow: (p.follow ?? 0) + 1, runAt: new Date(Date.now() + FOLLOW_UP_MS), key: `data:${source.id}:more:${outcome.cursor}` });
+  }
 
   // Backfill chain: one window at a time. A complete window queues the next; one that stopped partway is tried again
   // in an hour (a few times), so an hourly quota isn't burned through retries.
