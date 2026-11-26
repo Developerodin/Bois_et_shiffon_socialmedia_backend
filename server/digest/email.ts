@@ -1,5 +1,5 @@
 import "server-only";
-import type { DigestBody, DigestSection } from "@/shared";
+import type { DigestBody, DigestSales, DigestSection } from "@/shared";
 import { appUrl } from "@/server/auth/tokens";
 import { prisma } from "@/server/db/prisma";
 import { readableDigest, readerAccess } from "@/server/digest/build";
@@ -7,6 +7,15 @@ import { unsubscribeUrl } from "@/server/digest/unsubscribe";
 
 const n = (v: number) => v.toLocaleString("en-GB");
 const pct = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixed(1)}%`);
+
+/** A currency's week: net without VAT when known; a digest built before that change still shows its VAT-included net. */
+function salesLine(c: DigestSales) {
+  const orders = `${n(c.orders)} orders`;
+  if (c.netExVat === undefined) return c.netSales === undefined ? orders : `${orders}, ${c.netSales} ${c.currency} net`;
+  if (c.netExVat === null) return orders;
+  const missing = c.exVatMissing ? ` (${n(c.exVatMissing)} orders left out: their VAT couldn't be read)` : "";
+  return `${orders}, ${c.netExVat} ${c.currency} net excl. VAT${c.exVatFrom ? ` from ${c.exVatFrom}` : ""}${missing}`;
+}
 
 function sectionLines(s: DigestSection): string[] {
   switch (s.kind) {
@@ -21,7 +30,7 @@ function sectionLines(s: DigestSection): string[] {
     case "posts":
       return [s.published ? "Top posts:" : "Top posts: none published",...s.top.map((p) => `  - ${p.title ?? "Untitled"} (${p.channel}): ${p.reach === null ? "reach not read yet" : `${n(p.reach)} reach`}`)];
     case "sales":
-      return s.data ? [`Sales: ${s.data.length ? s.data.map((c) => `${n(c.orders)} orders, ${c.netSales} ${c.currency} net`).join("; ") : "no orders"}`] : ["Sales: no data yet"];
+      return s.data ? [`Sales: ${s.data.length ? s.data.map(salesLine).join("; ") : "no orders"}`] : ["Sales: no data yet"];
     case "ads":
       return s.data ? [`Ads: ${s.data.length ? s.data.map((c) => `${c.spend} ${c.currency} spent, ${n(c.purchases)} purchases`).join("; ") : "no spend"}`] : ["Ads: no data yet"];
   }

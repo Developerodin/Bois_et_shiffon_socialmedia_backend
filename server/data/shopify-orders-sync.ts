@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { Prisma, type IntegrationConnection } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
-import { grantedScopes, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
+import { grantedScopes, SHOPIFY_HISTORY_SCOPE, SHOPIFY_ORDER_SCOPES, SHOPIFY_REFUSED } from "@/server/catalog/shopify";
 import { accessToken, markReconnect } from "@/server/services/connections";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
 import { AskCartError, askCartReason, askCartShop, isAskCart } from "@/server/shopify/askcart";
 import { isShopifyMcp } from "@/server/shopify/catalog-mcp";
 import { askCartToken } from "@/server/shopify/askcart-token";
-import { ASKCART_LINES_PER_ORDER, fetchAskCartOrders, fetchOrders, type ShopOrderLineRow, type ShopOrderRow } from "./shopify-orders";
-import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from "./sources";
+import { ASKCART_LINES_PER_ORDER, fetchAskCartOrders, fetchOrders, type FetchOrdersResult, type ShopOrderLineRow, type ShopOrderRow } from "./shopify-orders";
+import { addDays, backfillPlan, enqueueSourceSync, registerSync, stopReason, type BackfillPlan, type SyncContext, type SyncOutcome } from "./sources";
 
 /**
  * SHOPIFY_ORDERS runner: reads every order updated since `DataSource.cursor` (Shopify's updated_at high-water mark;
@@ -21,6 +21,20 @@ import { enqueueSourceSync, registerSync, stopReason, type SyncOutcome } from ".
 
 export const FIRST_RUN_DAYS = 60;
 const PAGE = 100;
+/** How far back the order history goes once the store allows reading all orders (decision 7: 24 months). */
+export const HISTORY_DAYS = 730;
+/**
+ * Days per history window. AskCart: 14 (~233 B&C orders, ~10 pages of 25 at ~3.1 s, ~30 s). A token: 14 too, since
+ * a run on that path reads about 40 pages of ORDERS_PAGE (~560 orders) before the time cap: 30-day windows of a busy
+ * month would never complete and spend 3 h of retries before halving.
+ * ponytail: a window must finish in one run (MAX_MS 180 s): ~58 AskCart pages, ~1,450 orders. B&C's two years are
+ * ~12.2k orders, ~53 windows, a 30–45 min chain. A busy-season window can come close to the cap; one that still caps
+ * after its retries is halved (registerSync halveOnCap), down to 1 day. Upgrade path: resume a window from AskCart's
+ * nextCursor saved in the job payload. The catalogue sync isn't starved: it shares AskCart's per-token pacing.
+ */
+export const HISTORY_WINDOW_DAYS = { askCart: 14, token: 14 };
+/** A pasted token's scopes are asked of Shopify at most once a day (settings.scopesCheckedAt). */
+const SCOPES_CHECK_MS = 24 * 3_600_000;
 
 /**
  * One `INSERT … ON CONFLICT (brandId, shopifyId) DO UPDATE` for up to a page of orders, the page sent as one JSON
@@ -53,22 +67,27 @@ export async function upsertOrders(scope: { workspaceId: string; brandId: string
     fulfillment_status: r.fulfillmentStatus, fulfillment_sent: r.fulfillmentStatus !== undefined,
     financial_status: r.financialStatus, financial_sent: r.financialStatus !== undefined, discount_codes: r.discountCodes,
     line_items_truncated: r.lines ? (r.lineItemsTruncated ?? false) : undefined,
+    // Three states: not sent (keep the stored value), sent unreadable (null), a value.
+    shipping_taxes: r.shippingTaxes ?? null, shipping_sent: r.shippingTaxes !== undefined,
   })));
   // `WHERE true` ends the SELECT before ON CONFLICT, so the join's ON and the upsert's ON CONFLICT can't be misread.
   const upsert = Prisma.sql`
     INSERT INTO "ShopOrder" ("id", "workspaceId", "brandId", "connectionId", "shopifyId", "name", "processedAt", "cancelledAt", "test",
       "currency", "netSales", "discounts", "shipping", "taxes", "taxesIncluded", "total", "refunded", "sourceName", "shopifyUpdatedAt",
-      "fulfillmentStatus", "financialStatus", "discountCodes", "lineItemsTruncated", "updatedAt")
+      "fulfillmentStatus", "financialStatus", "discountCodes", "lineItemsTruncated", "shippingTaxes", "updatedAt")
     SELECT u.id, ${scope.workspaceId}, ${scope.brandId}, ${scope.connectionId}, u.shopify_id, u.name,
       u.processed_at AT TIME ZONE 'UTC', u.cancelled_at AT TIME ZONE 'UTC', u.test, u.currency, u.net_sales, u.discounts,
       u.shipping, u.taxes, u.taxes_included, u.total, u.refunded, u.source_name, u.shopify_updated_at AT TIME ZONE 'UTC',
       CASE WHEN u.fulfillment_sent THEN u.fulfillment_status ELSE s."fulfillmentStatus" END,
       CASE WHEN u.financial_sent THEN u.financial_status ELSE s."financialStatus" END,
-      COALESCE(u.discount_codes, s."discountCodes", ARRAY[]::text[]), COALESCE(u.line_items_truncated, s."lineItemsTruncated", false), now()
+      COALESCE(u.discount_codes, s."discountCodes", ARRAY[]::text[]), COALESCE(u.line_items_truncated, s."lineItemsTruncated", false),
+      -- Not COALESCE: lines sent but unreadable must clear a stale value, not keep it.
+      CASE WHEN u.shipping_sent THEN u.shipping_taxes ELSE s."shippingTaxes" END, now()
     FROM jsonb_to_recordset(${page}::jsonb) AS u(id text, shopify_id text, name text, processed_at timestamptz, cancelled_at timestamptz,
       test boolean, currency text, net_sales numeric, discounts numeric, shipping numeric, taxes numeric, taxes_included boolean,
       total numeric, refunded numeric, source_name text, shopify_updated_at timestamptz, fulfillment_status text, fulfillment_sent boolean,
-      financial_status text, financial_sent boolean, discount_codes text[], line_items_truncated boolean)
+      financial_status text, financial_sent boolean, discount_codes text[], line_items_truncated boolean, shipping_taxes numeric,
+      shipping_sent boolean)
     LEFT JOIN "ShopOrder" s ON s."brandId" = ${scope.brandId} AND s."shopifyId" = u.shopify_id
     WHERE true
     ON CONFLICT ("brandId", "shopifyId") DO UPDATE SET
@@ -79,7 +98,7 @@ export async function upsertOrders(scope: { workspaceId: string; brandId: string
       "refunded" = EXCLUDED."refunded", "sourceName" = EXCLUDED."sourceName", "shopifyUpdatedAt" = EXCLUDED."shopifyUpdatedAt",
       "fulfillmentStatus" = EXCLUDED."fulfillmentStatus", "financialStatus" = EXCLUDED."financialStatus",
       "discountCodes" = EXCLUDED."discountCodes", "lineItemsTruncated" = EXCLUDED."lineItemsTruncated",
-      "updatedAt" = now()
+      "shippingTaxes" = EXCLUDED."shippingTaxes", "updatedAt" = now()
     WHERE "ShopOrder"."shopifyUpdatedAt" <= EXCLUDED."shopifyUpdatedAt"`;
   const withLines = rows.filter((r) => r.lines);
   // No line items on this page (the pasted-token path, or an AskCart that doesn't send them): one statement, as before.
@@ -142,23 +161,18 @@ function upsertLines(tx: Prisma.TransactionClient, scope: { workspaceId: string;
            EXCLUDED."netUnitPrice", EXCLUDED."currency")`;
 }
 
-export async function syncShopifyOrders(
-  ctx: { source: { workspaceId: string; brandId: string; cursor: string | null }; connection: IntegrationConnection | null; signal: AbortSignal },
-  now = new Date(),
-): Promise<SyncOutcome> {
+type OrdersContext = Pick<SyncContext, "connection" | "signal" | "window"> & {
+  source: Pick<SyncContext["source"], "workspaceId" | "brandId" | "cursor"> & Partial<Pick<SyncContext["source"], "settings" | "syncedThrough">>;
+};
+
+export async function syncShopifyOrders(ctx: OrdersContext, now = new Date()): Promise<SyncOutcome> {
   const conn = ctx.connection;
   if (!conn) return { count: 0, reason: stopReason("reconnect") };
   // The Catalog MCP has no orders (turnOnShopifyOrders refuses it); a source left on a store reconnected that way stops.
   if (isShopifyMcp(conn)) return { count: 0, reason: stopReason("missing_scope") };
+  if (ctx.window) return syncOrderHistory({ ...ctx, connection: conn, window: ctx.window });
   const since = ctx.source.cursor ? new Date(ctx.source.cursor) : new Date(now.getTime() - FIRST_RUN_DAYS * 86_400_000);
-  const read = isAskCart(conn)
-    ? await (async () => fetchAskCartOrders(await askCartToken(conn), since, ctx.signal))().catch(async (e: unknown) => {
-        // AskCart refused our access, lost the store, or the connection is from the other mode: the connection's
-        // fault, like a refused token.
-        if (e instanceof ReconnectNeeded) await markReconnect(conn.id, askCartReason(e));
-        throw e;
-      })
-    : await fetchOrders({ shop: conn.externalAccountId, accessToken: await accessToken(conn) }, since, ctx.signal);
+  const read = await readOrders(conn, since, ctx.signal);
   const stop = read.stoppedReason;
   // A refused token is the connection's fault (products stop too); a missing scope or permission is not.
   if (stop === "reconnect") await markReconnect(conn.id, SHOPIFY_REFUSED);
@@ -188,7 +202,90 @@ export async function syncShopifyOrders(
   // ages past REFETCH_HOURS; every run still moves new orders in.
   const held = isAskCart(conn) && !reason ? await refetchFrom(scope, now) : null;
   const cursor = held && held < cursorEnd ? held : cursorEnd;
-  return { count: Math.min(written, read.orders.length), reason, cursor: cursor.toISOString() };
+  const settings = await historySignal(ctx, conn, read, now);
+  return { count: Math.min(written, read.orders.length), reason, cursor: cursor.toISOString(), ...(settings ? { settings } : {}) };
+}
+
+/** One read through AskCart or the pasted token; an AskCart refusal marks the connection (its fault, like a token's). */
+async function readOrders(conn: IntegrationConnection, read: Date | { createdFrom: string; createdTo: string }, signal: AbortSignal): Promise<FetchOrdersResult> {
+  if (!isAskCart(conn)) return fetchOrders({ shop: conn.externalAccountId, accessToken: await accessToken(conn) }, read, signal);
+  try {
+    return await fetchAskCartOrders(await askCartToken(conn), read, signal);
+  } catch (e) {
+    // AskCart refused our access, lost the store, or the connection is from the other mode.
+    if (e instanceof ReconnectNeeded) await markReconnect(conn.id, askCartReason(e));
+    throw e;
+  }
+}
+
+/**
+ * Whether the store lets us read all orders (decision 7), as a settings patch for recordSync, and the history plan
+ * when that just became true. AskCart: from the incremental read's warning (no extra request; nothing when the read
+ * didn't say). A token: its scopes, asked once a day. A plan starts at 24 months back, or right after the history
+ * already held (a history stopped by a pending answer resumes contiguously, so syncedThrough can move on).
+ */
+async function historySignal(ctx: OrdersContext, conn: IntegrationConnection, read: FetchOrdersResult, now: Date): Promise<SyncOutcome["settings"]> {
+  const settings = (ctx.source.settings ?? {}) as { backfill?: BackfillPlan; scopesCheckedAt?: unknown };
+  let allOrders: boolean | undefined;
+  const set: Record<string, unknown> = {};
+  const unset: string[] = [];
+  if (isAskCart(conn)) {
+    allOrders = read.allOrders;
+    if (allOrders === false) {
+      if (read.visibleSince) set.visibleSince = read.visibleSince;
+    } else if (allOrders) unset.push("visibleSince");
+  } else {
+    const checked = typeof settings.scopesCheckedAt === "string" ? Date.parse(settings.scopesCheckedAt) : NaN;
+    if (!(now.getTime() - checked < SCOPES_CHECK_MS)) {
+      try {
+        const { scopes } = await grantedScopes(conn.externalAccountId, await accessToken(conn), ctx.signal);
+        allOrders = scopes.includes(SHOPIFY_HISTORY_SCOPE);
+        set.scopesCheckedAt = now.toISOString();
+      } catch (e) {
+        // Asked again tomorrow; the orders read itself already succeeded.
+        console.warn("[shopify-orders] scope check failed", ctx.source.brandId, e instanceof Error ? e.message.split(":")[0] : "error");
+      }
+    }
+  }
+  if (allOrders === undefined && !Object.keys(set).length) return undefined;
+  if (allOrders !== undefined) set.allOrders = allOrders;
+  if (allOrders && !settings.backfill) {
+    const plan = backfillPlan(now.toISOString().slice(0, 10), HISTORY_DAYS, isAskCart(conn) ? HISTORY_WINDOW_DAYS.askCart : HISTORY_WINDOW_DAYS.token);
+    const held = ctx.source.syncedThrough ? ctx.source.syncedThrough.toISOString().slice(0, 10) : null;
+    set.backfill = held !== null && held < plan.start ? { ...plan, start: addDays(held, 1) } : plan;
+  }
+  return { set, ...(unset.length ? { unset } : {}) };
+}
+
+/**
+ * A history window (ctx.window, creation days): every order created in it, written like the daily read's. Complete
+ * only when the read reached its end and nothing stopped the writes. Never returns a cursor (the updated_at cursor and
+ * the refetch hold belong to the daily read), so it never queues a follow-up. AskCart's pending answer stops the
+ * history quietly: the plan is cleared (no sweep restart, no retry), okAt and syncedThrough are kept, and the next
+ * daily read re-plans once AskCart can read all orders.
+ */
+async function syncOrderHistory(ctx: OrdersContext & { connection: IntegrationConnection; window: { from: string; to: string } }): Promise<SyncOutcome> {
+  const conn = ctx.connection;
+  const read = await readOrders(conn, { createdFrom: ctx.window.from, createdTo: ctx.window.to }, ctx.signal);
+  if (read.historyPending) {
+    return { count: 0, reason: null, stopChain: true, settings: { set: { allOrders: false, ...(read.visibleSince ? { visibleSince: read.visibleSince } : {}) }, unset: ["backfill"] } };
+  }
+  const stop = read.stoppedReason;
+  if (stop === "reconnect") await markReconnect(conn.id, SHOPIFY_REFUSED);
+  if (stop === "reconnect" || stop === "failed" || stop === "permission" || stop === "missing_scope") {
+    return { count: 0, reason: stopReason(stop) };
+  }
+  const scope = { workspaceId: ctx.source.workspaceId, brandId: ctx.source.brandId, connectionId: conn.id };
+  let written = 0;
+  let reason = stopReason(stop);
+  for (; written < read.orders.length; written += PAGE) {
+    if (written > 0 && ctx.signal.aborted) {
+      reason = stopReason("capped");
+      break;
+    }
+    await upsertOrders(scope, read.orders.slice(written, written + PAGE));
+  }
+  return { count: Math.min(written, read.orders.length), reason, complete: !reason };
 }
 
 /**
@@ -218,7 +315,7 @@ async function refetchFrom(scope: { workspaceId: string; brandId: string; connec
   return row?.at ? new Date(row.at) : null;
 }
 
-registerSync("SHOPIFY_ORDERS", (ctx) => syncShopifyOrders(ctx));
+registerSync("SHOPIFY_ORDERS", (ctx) => syncShopifyOrders(ctx), { halveOnCap: true });
 
 export type TurnOn =
   | { ok: true; sourceId: string }

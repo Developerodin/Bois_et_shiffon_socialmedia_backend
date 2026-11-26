@@ -168,7 +168,7 @@ describe("fetchAskCartOrders", () => {
     expect(orders).toEqual([{
       shopifyId: "gid://shopify/Order/1001", name: "#1001", processedAt: new Date("2026-11-02T10:00:00Z"), cancelledAt: null, test: false,
       currency: "INR", netSales: "100.00", discounts: "10.00", gross: "110.00", shipping: "5.00", taxes: "15.00", taxesIncluded: true,
-      total: "95.00", refunded: "0.00", sourceName: "web", shopifyUpdatedAt: new Date("2026-11-03T10:00:00Z"),
+      total: "95.00", refunded: "0.00", sourceName: "web", shopifyUpdatedAt: new Date("2026-11-03T10:00:00Z"), shippingTaxes: "0.00",
     }]);
     expect(cursorEnd).toEqual(new Date("2026-11-03T10:00:00Z"));
   });
@@ -185,6 +185,69 @@ describe("fetchAskCartOrders", () => {
     expect(cursorEnd).toEqual(new Date("2026-11-05T10:00:00Z"));
     expect(Object.fromEntries(urlOf(f.mock.calls[1]).searchParams)).toEqual({ updatedSince: "2026-11-01T23:00:00.000Z", cursor: "c1" });
     expect(warn).toHaveBeenCalledOnce();
+  });
+
+  it("AskCart warning → allOrders false with visibleSince; no warning on a page that reached Shopify → true", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = { code: "read_all_orders_pending", visibleSince: "2026-09-25T00:00:00Z" };
+    stubFetch({ body: page([ORDER], { warning: pending }) });
+    expect(await fetchAskCartOrders(SECRET, SINCE)).toMatchObject({ allOrders: false, visibleSince: "2026-09-25T00:00:00Z" });
+    stubFetch({ body: page([]) });
+    const granted = await fetchAskCartOrders(SECRET, SINCE);
+    expect(granted.allOrders).toBe(true);
+    expect(granted).not.toHaveProperty("visibleSince");
+  });
+
+  it("a warning on a later page wins over a clean page 0", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    stubFetch(
+      { body: page([order(1, "2026-11-03T10:00:00Z")], { complete: false, nextCursor: "c1" }) },
+      { body: page([order(2, "2026-11-04T10:00:00Z")], { warning: { code: "read_all_orders_pending", visibleSince: "2026-09-25" } }) },
+    );
+    expect(await fetchAskCartOrders(SECRET, SINCE)).toMatchObject({ allOrders: false, visibleSince: "2026-09-25" });
+  });
+
+  it("all pages rate-limited and empty → allOrders undefined (says nothing); a failed run says nothing either", async () => {
+    stubFetch({ body: page([], { rateLimited: true, complete: false, nextCursor: null }), headers: { "retry-after": "60" } });
+    const r = await fetchAskCartOrders(SECRET, SINCE);
+    expect(r.stoppedReason).toBe("rate_limited");
+    expect(r).not.toHaveProperty("allOrders");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch(error(502, "upstream_error"), error(502, "upstream_error"), error(502, "upstream_error"));
+    expect(await fetchAskCartOrders(SECRET, SINCE)).not.toHaveProperty("allOrders");
+  });
+
+  it("visibleSince not an ISO date → not kept", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    stubFetch({ body: page([], { warning: { code: "read_all_orders_pending", visibleSince: "<script>" } }) });
+    const r = await fetchAskCartOrders(SECRET, SINCE);
+    expect(r.allOrders).toBe(false);
+    expect(r).not.toHaveProperty("visibleSince");
+  });
+
+  it("history uses createdFrom/createdTo (no updatedSince) and is complete only on `complete`", async () => {
+    const f = stubFetch({ body: page([ORDER], { complete: false, nextCursor: "c1" }) }, { body: page([order(2, "2026-11-04T10:00:00Z")]) });
+    const r = await fetchAskCartOrders(SECRET, { createdFrom: "2025-01-01", createdTo: "2025-01-14" });
+    expect(Object.fromEntries(urlOf(f.mock.calls[0]).searchParams)).toEqual({ createdFrom: "2025-01-01", createdTo: "2025-01-14" });
+    expect(Object.fromEntries(urlOf(f.mock.calls[1]).searchParams)).toEqual({ createdFrom: "2025-01-01", createdTo: "2025-01-14", cursor: "c1" });
+    expect(r.stoppedReason).toBeUndefined();
+    expect(r.orders).toHaveLength(2);
+    expect(r).not.toHaveProperty("allOrders");
+  });
+
+  it("history: nextCursor null without complete → not complete (capped)", async () => {
+    stubFetch({ body: page([ORDER], { complete: false, nextCursor: null }) });
+    const r = await fetchAskCartOrders(SECRET, { createdFrom: "2025-01-01", createdTo: "2025-01-14" });
+    expect(r.stoppedReason).toBe("capped");
+    expect(r.orders).toHaveLength(1);
+  });
+
+  it("history: 403 read_all_orders_pending → historyPending (not failed), visibleSince kept when ISO", async () => {
+    stubFetch(error(403, "read_all_orders_pending", { visibleSince: "2026-09-25T00:00:00Z" }));
+    expect(await fetchAskCartOrders(SECRET, { createdFrom: "2024-01-01", createdTo: "2024-01-14" })).toEqual({
+      orders: [], cursorEnd: new Date(0), historyPending: true, visibleSince: "2026-09-25T00:00:00Z",
+    });
+    await expect(fetchAskCartOrders(SECRET, { createdFrom: "2024-01-01&x=1", createdTo: "2024-01-14" })).rejects.toThrow();
   });
 
   it("returns orders oldest update first, an order re-read with a newer update moving to its new place", async () => {

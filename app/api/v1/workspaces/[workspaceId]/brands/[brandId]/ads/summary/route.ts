@@ -3,7 +3,10 @@ import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-r
 import { ADS_MAX_DAYS, adsSummary } from "@/server/data/ads-read";
 import { badRange, parseDayRange } from "@/server/data/sources";
 
-/** Ad spend, purchases, purchase value, ROAS and cost per purchase per currency for `?from&to`, and the period before. */
+/**
+ * Ad spend, purchases, purchase value, ROAS and cost per purchase per currency for `?from&to`, and the period before;
+ * shop revenue ÷ ad spend only for people who may also see sales (crm.read).
+ */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "ads.read");
@@ -11,7 +14,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const q = new URL(request.url).searchParams;
     const range = parseDayRange(q, ADS_MAX_DAYS);
     if (!range) return badRange(ADS_MAX_DAYS);
-    return Response.json(await adsSummary(scope, range), { headers: { "Cache-Control": "private, no-store" } });
+    return Response.json(await adsSummary(scope, range, { crmRead: scope.perms.has("crm.read") }), { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return fromAccessError(error);
   }

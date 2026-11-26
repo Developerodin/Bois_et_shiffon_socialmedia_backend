@@ -243,6 +243,7 @@ model Brand {
   shopOrderLines ShopOrderLine[]
   searchDays     SearchDay[]
   adDays         AdDay[]
+  adBudgets      AdBudget[]
   shopifyWrites  ShopifyWrite[]
   blogArticles   BlogArticle[]
   quotes         Quote[]
@@ -1711,6 +1712,8 @@ model PostMetric {
   shares               Int?
   saves                Int?
   interactions         Int?
+  /// Instagram stories only: taps forward, back, exits and next-story swipes, summed over the frames
+  navigation           Int?
 
   attempt PublicationAttempt @relation(fields: [publicationAttemptId], references: [id], onDelete: Cascade)
   brand   Brand              @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
@@ -1740,8 +1743,11 @@ model ShopOrder {
   netSales           Decimal   @db.Decimal(14, 2)
   discounts          Decimal   @db.Decimal(14, 2)
   shipping           Decimal   @db.Decimal(14, 2)
-  /// sum of currentTaxLines, not totalTaxSet
+  /// sum of currentTaxLines, not totalTaxSet; includes the shipping tax (checked live 2026-11-26)
   taxes              Decimal   @db.Decimal(14, 2)
+  /// the tax on the shipping still charged (server/data/shopify-orders.ts shippingTaxesOf); null on rows read before
+  /// 20261126110000 or when the shipping lines came unreadable
+  shippingTaxes      Decimal?  @db.Decimal(14, 2)
   taxesIncluded      Boolean
   /// currentTotalPriceSet
   total              Decimal   @db.Decimal(14, 2)
@@ -1833,8 +1839,31 @@ model SearchDay {
   @@unique([brandId, siteUrl, dimension, day, page])
 }
 
+/// GOOGLE is added in its own migration (20261126120000): Postgres can't use a value added by ALTER TYPE … ADD VALUE
+/// in the same transaction. Only budgets use GOOGLE for now; the Meta Ads sync writes META only.
 enum AdPlatform {
   META
+  GOOGLE
+}
+
+/// A brand's monthly ad budget per platform (server/data/budgets.ts), in the currency chosen when it was entered.
+/// Pacing compares it with AdDay spend converted through FxRate. Amount 0 deletes the row.
+model AdBudget {
+  id              String     @id @default(cuid())
+  workspaceId     String
+  brandId         String
+  platform        AdPlatform
+  /// first day of the month
+  month           DateTime   @db.Date
+  amount          Decimal    @db.Decimal(14, 2)
+  /// in ECB_CURRENCIES or EUR
+  currency        String
+  updatedByUserId String
+  updatedAt       DateTime   @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([brandId, platform, month])
 }
 
 /// One ad campaign's numbers for one day of its ad account (the account's own zone), filled by the META_ADS data sync
@@ -1863,6 +1892,17 @@ model AdDay {
 
   @@unique([brandId, platform, accountId, campaignId, day])
   @@index([brandId, platform, accountId, day])
+}
+
+/// ECB euro reference rates: 1 EUR = perEur units of currency on that day (TARGET working days only). Global, not per
+/// brand. Filled by the daily fx.sync job (server/data/fx.ts); EUR itself is never stored (its rate is 1).
+/// ponytail: ~250 rows per currency per year; a few thousand rows in all.
+model FxRate {
+  currency String
+  day      DateTime @db.Date
+  perEur   Decimal  @db.Decimal(18, 6)
+
+  @@id([currency, day])
 }
 
 enum ShopifyWriteEntity {

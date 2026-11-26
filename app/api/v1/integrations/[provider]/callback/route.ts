@@ -39,12 +39,17 @@ export async function GET(request: Request, context: { params: Promise<{ provide
   if (!session?.user?.id) return Response.redirect(appUrl(`/login?next=${encodeURIComponent("/settings?tab=connections")}`), 303);
 
   try {
-    const { connections } = await completeConnect({ provider, state, code, userId: session.user.id });
+    const done = await completeConnect({ provider, state, code, userId: session.user.id });
+    const { connections } = done;
+    // A repeated callback (replay) reports the connections only.
+    const kept = "kept" in done ? done.kept : [];
     // One Meta Ads login saves a connection per ad account: listing every name would put them all in the URL
     // (history, logs) and can overflow it, so say how many instead.
     if (provider === "META_ADS") {
       const n = connections.length;
-      return back({ connected: `${PROVIDERS.META_ADS.label} (${n} account${n === 1 ? "" : "s"})` });
+      // Accounts running on a working system user token keep it (saveConnections' keep rule).
+      const k = kept.length ? `; ${kept.length} kept the system user token` : "";
+      return back({ connected: `${PROVIDERS.META_ADS.label} (${n} account${n === 1 ? "" : "s"}${k})` });
     }
     return back({ connected: connections.map((c) => c.displayName).join(", ") });
   } catch (error) {

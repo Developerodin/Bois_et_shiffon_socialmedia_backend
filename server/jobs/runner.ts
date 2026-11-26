@@ -14,6 +14,8 @@ import { runCatalogPages } from "@/server/catalog/page-reader";
 import { CATALOG_PAGES_JOB, CATALOG_SYNC_JOB, enqueueDailyCatalogSyncs, runCatalogSync } from "@/server/catalog/sync";
 import { DATA_SYNC_JOB, enqueueDailyDataSyncs, runDataSync } from "@/server/data/sources";
 import { DIGEST_JOB, enqueueWeeklyDigests, runDigest } from "@/server/digest/job";
+import { enqueueFxSync, FX_SYNC_JOB, runFxSync } from "@/server/data/fx";
+import { enqueueMissedStoryReads, runStoryRead, STORY_READ_JOB } from "@/server/data/story-metrics";
 import { ensurePostMetricSources } from "@/server/data/post-metric-sync"; // also registers the POST_METRICS runner
 import "@/server/data/shopify-orders-sync"; // registers the SHOPIFY_ORDERS runner
 import "@/server/data/meta-ads-sync"; // registers the META_ADS sync
@@ -57,10 +59,12 @@ const HANDLERS: Record<string, Handler> = {
   [EMAIL_SEND_JOB]: { run: sendOutboxEmail },
   [FINDING_CLEAR_JOB]: { run: clearFindings },
   [FINDING_TASKS_JOB]: { run: tasksFromReport },
+  [FX_SYNC_JOB]: { run: runFxSync },
   [PHOTOSHOOT_JOB]: { run: runShoot, onFailure: onShootFailure },
   [PUBLISH_JOB]: { run: executePublication, onFailure: onPublishJobLost },
   [REEL_ASSET_JOB]: { run: runAsset, onFailure: onAssetFailure },
   [REEL_RENDER_JOB]: { run: advanceRender, onFailure: failRender },
+  [STORY_READ_JOB]: { run: runStoryRead },
   [STORY_RENDER_JOB]: { run: runStoryRender, onFailure: onStoryRenderFailure },
   [VOICE_DELETE_JOB]: { run: runVoiceDelete, onFailure: onVoiceDeleteFailure },
 };
@@ -180,9 +184,11 @@ async function dailySweep() {
   // Last, and each on its own: a failing step is logged and never blocks the steps above (billing renewals).
   const now = new Date();
   // "data" only queues each data source's sync (no provider calls), spread over the next two hours; "post-metric
-  // sources" first gives each brand with published posts its POST_METRICS source. "digest" queues Monday's digests for
-  // after those syncs, last: a workspace-wide insert that must never hold up the steps before it.
-  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites], ["digest", enqueueWeeklyDigests]] as const) {
+  // sources" first gives each brand with published posts its POST_METRICS source. "fx" queues the day's exchange-rate
+  // read (server/data/fx.ts), one short job outside the data cap; "story reads" queues reads the publish paths missed.
+  // "digest" queues Monday's digests for after those syncs, last: a workspace-wide insert that must never hold up the
+  // steps before it.
+  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["fx", enqueueFxSync], ["story reads", enqueueMissedStoryReads], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites], ["digest", enqueueWeeklyDigests]] as const) {
     try {
       await step(now);
     } catch (e) {

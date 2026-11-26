@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { THROTTLE_RETRIES } from "@/server/catalog/shopify";
-import { ORDERS_QUERY, fetchOrders, mapAskCartOrder } from "@/server/data/shopify-orders";
+import { MAX_QUERY_COST, ORDER_FIELDS, ORDER_NODE_COST, ORDERS_PAGE, ORDERS_QUERY, fetchOrders, mapAskCartOrder, shippingTaxesOf } from "@/server/data/shopify-orders";
 
 // recorded 2026-11-23, Shopify Admin GraphQL (shape from docs)
 const money = (amount: string, currencyCode = "EUR") => ({ shopMoney: { amount, currencyCode } });
@@ -86,8 +86,18 @@ describe("fetchOrders", () => {
     const { orders, stoppedReason } = await fetchOrders(CONN, SINCE);
     expect(stoppedReason).toBeUndefined();
     expect(orders.map((o) => o.name)).toEqual(["#1001", "#1002"]);
-    expect(sentVariables(fetchMock.mock.calls[0])).toEqual({ after: null, query: "updated_at:>='2026-11-19T23:00:00.000Z'" });
+    expect(sentVariables(fetchMock.mock.calls[0])).toEqual({ after: null, query: "updated_at:>='2026-11-19T23:00:00.000Z'", sortKey: "UPDATED_AT" });
     expect(sentVariables(fetchMock.mock.calls[1]).after).toBe("c1");
+  });
+
+  it("history: created_at window and CREATED_AT through the one ORDERS_QUERY; bad days refused", async () => {
+    const fetchMock = stubFetch({ body: page([REFUNDED], null) });
+    const r = await fetchOrders(CONN, { createdFrom: "2025-01-01", createdTo: "2025-01-30" });
+    expect(r.stoppedReason).toBeUndefined();
+    expect(sentVariables(fetchMock.mock.calls[0])).toEqual({
+      after: null, sortKey: "CREATED_AT", query: "created_at:>='2025-01-01T00:00:00Z' AND created_at:<'2025-01-31T00:00:00Z'",
+    });
+    await expect(fetchOrders(CONN, { createdFrom: "2025-01-01' OR x", createdTo: "2025-01-30" })).rejects.toThrow();
   });
 
   it("stops as partial when Shopify keeps throttling, keeping only finished pages", async () => {
@@ -141,6 +151,56 @@ describe("fetchOrders", () => {
   });
 });
 
+describe("shipping tax (Task 2)", () => {
+  const ship = (discounted: string, ...taxes: string[]) => ({ discountedPriceSet: money(discounted), taxLines: taxes.map((t) => ({ priceSet: money(t) })) });
+
+  it("no customer field in ORDER_FIELDS: the allow-list is exactly this", () => {
+    expect(ORDER_FIELDS.replace(/\s+/g, " ")).toBe(
+      "id name processedAt cancelledAt test updatedAt taxesIncluded sourceName currentSubtotalPriceSet { shopMoney { amount currencyCode } } " +
+      "currentTotalDiscountsSet { shopMoney { amount } } currentShippingPriceSet { shopMoney { amount } } currentTotalPriceSet { shopMoney { amount } } " +
+      "totalRefundedSet { shopMoney { amount } } currentTaxLines { priceSet { shopMoney { amount } } } " +
+      "shippingLines(first: 5) { nodes { discountedPriceSet { shopMoney { amount } } taxLines { priceSet { shopMoney { amount } } } } }",
+    );
+  });
+
+  it("query cost constant under limit, and the page size follows it", () => {
+    expect(2 + ORDERS_PAGE * ORDER_NODE_COST).toBeLessThanOrEqual(MAX_QUERY_COST);
+    expect(ORDERS_PAGE).toBeGreaterThan(0);
+    expect(ORDERS_QUERY).toContain(`orders(first: ${ORDERS_PAGE},`);
+  });
+
+  it("the shipping lines' tax, scaled by what is still charged; refunded shipping removes its tax", () => {
+    expect(shippingTaxesOf([ship("10.00", "1.67")], money("10.00"))).toBe("1.67");
+    expect(shippingTaxesOf([ship("10.00", "1.67")], money("5.00"))).toBe("0.84");
+    expect(shippingTaxesOf([ship("6.00", "1.00"), ship("4.00", "0.50", "0.17")], money("10.00"))).toBe("1.67");
+  });
+
+  it("free shipping (charged 0) → 0, no division; no shipping line → 0; fully refunded order → 0", () => {
+    expect(shippingTaxesOf([ship("0.00", "0.00")], money("0.00"))).toBe("0.00");
+    expect(shippingTaxesOf([ship("0.00", "1.00")], money("0.00"))).toBe("0.00");
+    expect(shippingTaxesOf([], money("0.00"))).toBe("0.00");
+    expect(shippingTaxesOf([ship("10.00", "2.00")], money("0.00"))).toBe("0.00");
+    expect(shippingTaxesOf([ship("10.00", "2.00")], null)).toBe("0.00");
+  });
+
+  it("never more than the lines' own tax; an unreadable amount → null (unknown, never 0)", () => {
+    expect(shippingTaxesOf([ship("10.00", "2.00")], money("12.00"))).toBe("2.00");
+    expect(shippingTaxesOf([ship("abc", "2.00")], money("10.00"))).toBeNull();
+    expect(shippingTaxesOf([ship("10.00", "1e3")], money("10.00"))).toBeNull();
+    expect(shippingTaxesOf([{ discountedPriceSet: null, taxLines: [] }], money("10.00"))).toBeNull();
+    expect(shippingTaxesOf([{ discountedPriceSet: money("1.00"), taxLines: null }], money("10.00"))).toBeNull();
+    expect(shippingTaxesOf(null, money("10.00"))).toBeNull();
+  });
+
+  it("token path: every order carries shippingTaxes from its shippingLines", async () => {
+    stubFetch({ body: page([{ ...REFUNDED, shippingLines: { nodes: [ship("10.0", "1.67")] } }, FREE_SHIPPING], null) });
+    const { orders } = await fetchOrders(CONN, SINCE);
+    expect(orders[0].shippingTaxes).toBe("0.84");
+    // A node without the field (not asked for): left out, so the stored value would stay.
+    expect(orders[1]).not.toHaveProperty("shippingTaxes");
+  });
+});
+
 describe("mapAskCartOrder: AskCart's optional line items and statuses", () => {
   const m = (amount: string, currencyCode = "EUR") => ({ amount, currencyCode });
   const ORDER = {
@@ -155,9 +215,21 @@ describe("mapAskCartOrder: AskCart's optional line items and statuses", () => {
     originalUnitPriceSet: m("50.0"), discountedTotalSet: m("90.0"), discountedUnitPriceAfterAllDiscountsSet: m("40.5"),
   };
 
+  it("AskCart shippingLines mapped: tax scaled by current ÷ discounted price; unreadable or null → null", () => {
+    const line = (discounted: string, tax: string) => ({ title: "Colissimo", originalPriceSet: m("12.00"), discountedPriceSet: m(discounted), taxLines: [{ title: "TVA", rate: 0.2, priceSet: m(tax) }] });
+    const order = (shippingLines: unknown, shipping = "10.00") => mapAskCartOrder({ ...ORDER, currentShippingPriceSet: m(shipping), shippingLines } as never)!;
+    expect(order([line("10.00", "1.67")]).shippingTaxes).toBe("1.67");
+    expect(order([line("10.00", "1.67")], "0.00").shippingTaxes).toBe("0.00");
+    expect(order([]).shippingTaxes).toBe("0.00");
+    expect(order([line("ten", "1.67")]).shippingTaxes).toBeNull();
+    expect(order([{ ...line("10.00", "1.67"), taxLines: [{ priceSet: { amount: 1.67 } }] }]).shippingTaxes).toBeNull();
+    expect(order(null).shippingTaxes).toBeNull();
+    expect(order("x").shippingTaxes).toBeNull();
+  });
+
   it("an order without the new fields leaves them undefined, so the stored lines and statuses are kept", () => {
     const row = mapAskCartOrder(ORDER as never)!;
-    for (const k of ["lines", "lineItemsTruncated", "fulfillmentStatus", "financialStatus", "discountCodes"]) expect(row).not.toHaveProperty(k);
+    for (const k of ["lines", "lineItemsTruncated", "fulfillmentStatus", "financialStatus", "discountCodes", "shippingTaxes"]) expect(row).not.toHaveProperty(k);
   });
 
   it("maps line items, statuses and codes; amounts as exact fixed-2 strings", () => {

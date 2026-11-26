@@ -227,9 +227,9 @@ describe("chat request and page notes", () => {
     expect(prompt).toContain("Never put product, document or report content into a web search");
   });
 
-  it("knows where things are in the app and never invents posts (prompt version 6)", () => {
+  it("knows where things are in the app and never invents posts (prompt version 7)", () => {
     const prompt = chatSystemPrompt({ name: "Oak & Co", website: null });
-    expect(CHAT_PROMPT_VERSION).toBe("6");
+    expect(CHAT_PROMPT_VERSION).toBe("7");
     expect(prompt).toContain("Connections page");
     expect(prompt).toContain("never invent posts");
     expect(prompt).toContain("post titles");

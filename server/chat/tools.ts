@@ -42,7 +42,7 @@ const BAD_RANGE = { error: badRangeDetail(MAX_SALES_DAYS) };
 const NEEDS_LINES =
   "Per-product sales need order line items, which only come through the AskCart connection once AskCart sends them; none are stored for this brand yet. salesSummary and salesBreakdown still work from order totals.";
 const LINE_NOTE =
-  "From order line items: units and revenue are net of refunds, revenue after every discount (order-level share included). Lines without a product (custom lines, deleted products) are 'Other / custom items'.";
+  "From order line items: units and revenue are net of refunds, revenue after every discount (order-level share included), and include VAT where the shop's prices do (unlike salesSummary's netExVat). Lines without a product (custom lines, deleted products) are 'Other / custom items'.";
 const SALES_LIMIT = { error: "Sales tool limit reached for this message." };
 const WEEKS_NOTE = "Weeks start on Monday and are labelled by that day; the first and last weeks can be partial.";
 /** stockRisk flags a best seller with less stock than this many days of its average sales. */
@@ -307,7 +307,7 @@ export function chatTools(scope: ChatScope) {
     // cell from the shop (titles, SKUs, codes, channels, collections, vendors) goes through cleanTitle.
     salesSummary: tool({
       description:
-        "Shop sales totals for a period (brand-local days, default the last 30 days): orders, gross, discounts, net sales, total, refunded per currency, with the same-length previous period to compare; daily rows when the period is 31 days or less. Start any sales question or report here.",
+        "Shop sales totals for a period (brand-local days, default the last 30 days): orders, gross, discounts, net sales, total, refunded per currency, with the same-length previous period to compare; daily rows when the period is 31 days or less. Start any sales question or report here. netExVat: net sales without VAT, from exVatFrom when set (null: not known yet); exVatMissing orders are left out of it. The other totals include VAT where the shop's prices do.",
       inputSchema: SalesRange,
       execute: async (input) => {
         const refused = await salesGate();
@@ -323,6 +323,9 @@ export function chatTools(scope: ChatScope) {
             currency: c.currency,
             totals: c.totals,
             previous: c.previous,
+            netExVat: c.netExVat,
+            exVatFrom: c.exVatFrom,
+            exVatMissing: c.exVatMissing,
             ...(withDays && {
               days: { columns: ["day", "orders", "netSales", "total"], rows: c.days.map((d) => [d.day, d.orders, d.netSales, d.total]) },
             }),

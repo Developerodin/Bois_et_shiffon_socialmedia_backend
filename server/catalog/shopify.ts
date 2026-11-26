@@ -11,6 +11,8 @@ export const SHOPIFY_API_VERSION = "2025-07";
 export const SHOPIFY_SCOPES = ["read_products", "read_inventory"];
 /** Needed on top of SHOPIFY_SCOPES for the Sales tab (orders sync). */
 export const SHOPIFY_ORDER_SCOPES = ["read_orders"];
+/** Orders older than 60 days (Shopify approves it per app); without it the history stays at 60 days. */
+export const SHOPIFY_HISTORY_SCOPE = "read_all_orders";
 export const SHOPIFY_REFUSED = "Shopify refused the access token. Reconnect with a new token.";
 
 const SHOP_DOMAIN = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;

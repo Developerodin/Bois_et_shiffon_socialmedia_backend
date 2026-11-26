@@ -3,7 +3,7 @@ import { z } from "zod";
 import { CHAT_PAGES, isChatPage } from "@/shared";
 
 /** System prompt for the CMO chat. Bump CHAT_PROMPT_VERSION when it changes (logged with usage). */
-export const CHAT_PROMPT_VERSION = "6";
+export const CHAT_PROMPT_VERSION = "7";
 
 export function chatSystemPrompt(brand: { name: string; website: string | null }) {
   return `You are the AI CMO (chief marketing officer) for the brand "${brand.name}"${brand.website ? ` (${brand.website})` : ""}.

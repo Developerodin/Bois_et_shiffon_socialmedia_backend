@@ -57,7 +57,7 @@ export const toMinor = (s: string, digits = 2) => {
 };
 export const fromMinor = (n: number, digits = 2) => (digits ? `${Math.floor(n / 10 ** digits)}.${String(n % 10 ** digits).padStart(digits, "0")}` : String(n));
 /** More decimals than the currency has (non-zero ones): "1200.5" in JPY. */
-const tooPrecise = (s: string, digits: number) => /[1-9]/.test((s.split(".")[1] ?? "").slice(digits));
+export const tooPrecise = (s: string, digits: number) => /[1-9]/.test((s.split(".")[1] ?? "").slice(digits));
 
 /**
  * Subtotal of the lines, the discount (a percentage rounded half up to the minor unit, or an amount capped at the

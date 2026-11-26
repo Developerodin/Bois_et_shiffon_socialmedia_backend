@@ -1,6 +1,6 @@
 // recorded 2026-11-23, Graph API v23.0 / Threads API v1.0 (shape from docs)
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { hasFacebookPostId, readPostMetrics, type ConnectionToRead } from "@/server/data/post-metrics";
+import { hasFacebookPostId, readPostMetrics, STORY_METRICS, type ConnectionToRead } from "@/server/data/post-metrics";
 
 const TOKEN = "EAAB-secret-token-123";
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -159,3 +159,37 @@ describe("readPostMetrics", () => {
   });
 });
 
+
+describe("stories and too few viewers (Task 5)", () => {
+  const story = (n: number) => ({
+    data: ["reach", "views", "replies", "shares", "total_interactions", "navigation"].map((name, i) => ({ name, period: "lifetime", total_value: { value: n + i } })),
+  });
+
+  it("a story frame: STORY_METRICS asked; replies stored in comments, navigation in navigation", async () => {
+    const f = vi.fn(async () => json(200, story(10)));
+    const [r] = await readPostMetrics([conn({ posts: posts(1), metrics: STORY_METRICS })], { fetch: f as unknown as typeof fetch });
+    expect(String((f.mock.calls[0] as unknown[])[0])).toBe("https://graph.instagram.com/v23.0/m0/insights?metric=reach,views,replies,shares,total_interactions,navigation");
+    expect(r.posts[0]).toEqual({ attemptId: "a0", ok: true, metrics: { reach: 10, views: 11, likes: null, comments: 12, shares: 13, saves: null, interactions: 14, navigation: 15 } });
+  });
+
+  it("Threads replies still land in comments", async () => {
+    const threads = { data: ["views", "likes", "replies", "reposts", "quotes", "shares"].map((name, i) => ({ name, values: [{ value: i + 1 }] })) };
+    const f = vi.fn(async () => json(200, threads));
+    const [r] = await readPostMetrics([conn({ provider: "THREADS", posts: posts(1) })], { fetch: f as unknown as typeof fetch });
+    expect(r.posts[0]).toMatchObject({ ok: true, metrics: { comments: 3 } });
+  });
+
+  it.each([["a post", undefined], ["a story", STORY_METRICS]] as const)("not enough viewers → null numbers, not permission (%s)", async (_name, metrics) => {
+    const f = vi.fn(async () => json(400, { error: { message: "(#10) Not enough viewers for the media to show insights", code: 10, error_subcode: 2108006 } }));
+    const [r] = await readPostMetrics([conn({ posts: posts(1), ...(metrics ? { metrics } : {}) })], { fetch: f as unknown as typeof fetch });
+    expect(r.stoppedReason).toBeUndefined();
+    expect(r.posts).toEqual([{ attemptId: "a0", ok: true, metrics: { views: null, reach: null, likes: null, comments: null, shares: null, saves: null, interactions: null } }]);
+  });
+
+  it("a frame already gone is skipped (not_found), the others saved", async () => {
+    const replies = [json(400, { error: { message: "Unsupported get request", code: 100, error_subcode: 33 } }), json(200, story(1))];
+    const f = vi.fn(async () => replies.shift()!);
+    const [r] = await readPostMetrics([conn({ posts: posts(2), metrics: STORY_METRICS })], { fetch: f as unknown as typeof fetch });
+    expect(r.posts.map((p) => p.ok)).toEqual([false, true]);
+  });
+});

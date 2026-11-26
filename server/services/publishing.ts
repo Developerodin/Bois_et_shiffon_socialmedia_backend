@@ -19,6 +19,7 @@ import { personName, TEAM_MEMBER } from "@/server/content/person-name";
 import { signedMediaUrl } from "@/server/storage/media";
 import type { StoryBody } from "@/server/stories/body";
 import { attemptOutcome, expiredFrames, type FrameProgress, nextFramesToPublish, publishingLimitRoom, settleStoryFrame, unconfirmedMessage, withFrame } from "@/server/stories/publish";
+import { enqueueStoryRead } from "@/server/data/story-metrics";
 
 /**
  * Approval → publishing (design §6 "sealed package", DEC-015/016). Rules:
@@ -629,7 +630,12 @@ export async function executePublication(payload: unknown, lease?: Lease) {
   // handler has settled it, a worker that is somehow still running can neither post another frame nor overwrite that.
   const storyT = storyTargetOf(a.target);
   let progress: FrameProgress = storyT?.progress ?? [];
+  // A story settled with frames out gets its one numbers read queued (story-metrics.ts; it never throws).
   const finishStory = (status: "PUBLISHED" | "PARTIAL" | "FAILED" | "PENDING_VERIFY", data: Prisma.PublicationAttemptUpdateManyMutationInput, itemStatus: ItemStatus, errorCode?: string) =>
+    settleStory(status, data, itemStatus, errorCode).then(async () => {
+      if (status === "PUBLISHED" || status === "PARTIAL") await enqueueStoryRead(a.id);
+    });
+  const settleStory = (status: "PUBLISHED" | "PARTIAL" | "FAILED" | "PENDING_VERIFY", data: Prisma.PublicationAttemptUpdateManyMutationInput, itemStatus: ItemStatus, errorCode?: string) =>
     prisma.$transaction(async (tx) => {
       const { errorCode: _old, ...rest } = storyT!;
       const target = { ...rest, progress, ...(errorCode ? { errorCode } : {}) };
@@ -852,6 +858,7 @@ async function publishNeverStarted(a: Prisma.PublicationAttemptGetPayload<object
       data: { workspaceId: a.workspaceId, brandId: a.brandId, actorUserId: a.createdByUserId, action: `content.publish.${posted ? "partial" : "failed"}`, entityType: "PublicationAttempt", entityId: a.id, metadata: { provider: a.provider, lost: true, started: false } },
     });
   }, TX);
+  if (posted) await enqueueStoryRead(a.id);
 }
 
 /**
@@ -880,6 +887,8 @@ async function storyJobLost(attemptId: string) {
       data: { workspaceId: a.workspaceId, brandId: a.brandId, actorUserId: a.createdByUserId, action: `content.publish.${status.toLowerCase()}`, entityType: "PublicationAttempt", entityId: a.id, metadata: { lost: true, posted, total: st.frames } },
     });
   }, TX);
+  // Settled PUBLISHED or PARTIAL: its numbers read (enqueueStoryRead reads the attempt's status back and skips others).
+  await enqueueStoryRead(attemptId);
 }
 
 /** Cancel a scheduled post, or settle a PENDING_VERIFY one after someone looked at the account. */
@@ -962,7 +971,7 @@ export async function settleFrame(input: AttemptRef & { frame: number; appeared:
     if (count !== 1) throw new PublishingError("This frame was already settled. Reload the story.", 409, "story.alreadyHandled");
     await tx.contentItem.update({ where: { id: a.contentItemId }, data: { status: status === "PUBLISHED" ? "PUBLISHED" : status === "PARTIAL" ? "SCHEDULED" : "APPROVED" } });
     await audit(tx, input, "content.publish.settle-frame", a.id, { frame: input.frame + 1, appeared: input.appeared, posted, total: st.frames });
-  }, TX);
+  }, TX).then(() => enqueueStoryRead(input.attemptId).then(() => undefined));
 }
 
 /**
