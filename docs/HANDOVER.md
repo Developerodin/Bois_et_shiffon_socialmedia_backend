@@ -2186,3 +2186,24 @@ Re-run `npm run sync:shared` after the merge so every `.hash` matches.
      warning on text-only written posts, `NewPostInput.channel` literal instead of `AI_POST_CHANNELS`.
    - Throwaway-DB recipe: set BOTH `DATABASE_URL` and `DATABASE_URL_UNPOOLED` to the test URL for `prisma migrate
      deploy`; the schema's directUrl is the unpooled one, so setting only the first points the deploy at the dev DB.
+7. **Late afternoon 2026-11-27 (all merged on `main`, unpushed):**
+   - **Analytics page** `/social/analytics` (web `798e63d` + fixes `661460a`): rail of six channels, one-click switching
+     (URL `?account=&days=`, no reload), shared components in `components/social/analytics/`, logic in
+     `lib/analytics-channels.ts`. Live: Instagram (thumbnails via server `dca4570`), Facebook Page (per-post needs
+     `pages_read_user_content` → notice), Pinterest (server `82aef47`; tiny numbers today), Threads (not connected).
+     LinkedIn/X: shared "published by hand" state with upcoming posts. Previous-period change only for additive metrics
+     at 7/14 days. Channels page has an Analytics button and a compact summary section.
+   - **Agents phase 1** (server `3fa7995` + fixes `ddbc11f`, web `9f649e5`): every Planner start chains (runs route
+     `runInput()` defaults `chain:true` unless `chain:false`); optional `channels` scope enforced in code and passed down
+     brief → creator; per-brand Planner advisory lock (`pg_advisory_xact_lock`, mock-tested only — needs a real-Postgres
+     test); scoped run that plans 0 → NothingToDo (refunded). Web: "Plan with agents" dialog, entry points on /social
+     ("Create with agents"), calendar ("Generate with agents"), channel calendar, empty state.
+   - **Workflow card** (web `213a073`): next-action banner (blocked → waiting brief/draft "Run the chain" → shortlisted
+     → new ideas → approvals → create), five stage cards with run state separate from workload, Analyst separate.
+     Counts are brand-wide current queues. In flight at 17:05: stage clicks open a side peek on the same page
+     (branch `agent-peek`).
+   - **Product-aware workflow plan** `docs/superpowers/plans/2026-11-27-product-aware-content-workflow.md` with the
+     owner's answers at the end. Phase 1 done. **Phase 2** (ContentWorkflow table + workflowId/connectionId/productIds
+     columns, `server/content/workflow.ts`, routes, locked product ids in the Brief writer) in flight at 17:05 on branch
+     `workflow-p2` (`Desktop\sma-p2\server`); its migration needs the owner's OK before `migrate deploy` on dev.
+   - Owner still to confirm: whether Brief → Creator → Quality should pause for a person between stages (answer 2).
