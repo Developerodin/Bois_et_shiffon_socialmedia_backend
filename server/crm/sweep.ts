@@ -1,4 +1,5 @@
 import { queueFollowUps } from "@/server/crm/follow-ups";
+import { pruneCrm } from "@/server/crm/retention";
 
 /**
  * The CRM's one entry in the daily sweep (server/jobs/runner.ts), so the sweep list gains one item for all of it:
@@ -10,5 +11,11 @@ export async function crmDailySweep(now = new Date()) {
     if (made) console.log("[crm] follow-up tasks made", made);
   } catch (e) {
     console.error("[crm] follow-ups failed", e instanceof Error ? e.name : "error");
+  }
+  try {
+    const out = await pruneCrm(now);
+    if (Object.values(out).some(Boolean)) console.log("[crm] retention", out);
+  } catch (e) {
+    console.error("[crm] retention failed", e instanceof Error ? e.name : "error");
   }
 }
