@@ -1,7 +1,7 @@
 import type { IntegrationConnection } from "@prisma/client";
 import type { AnalyticsChannel, ChannelAnalyticsDto, ChannelDayDto, ChannelPostDto } from "@/shared";
 import { prisma } from "@/server/db/prisma";
-import { GRAPH, IG_GRAPH } from "@/server/integrations/providers";
+import { GRAPH, IG_GRAPH, THREADS_GRAPH } from "@/server/integrations/providers";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
 import { classify, insights, readPostMetrics, refusedMetric, send, type Answer } from "./post-metrics";
 
@@ -17,6 +17,10 @@ import { classify, insights, readPostMetrics, refusedMetric, send, type Answer }
  * and the call retried without it (that number is null). Instagram's "not enough viewers" and any other refusal → null.
  * A timeout (15 s per call) or rate limit → null and `partial`. 190 / 401 → the connection is marked "Needs reconnect".
  * Facebook per-post numbers need pages_read_user_content (app review), so only Instagram lists posts.
+ *
+ * Pinterest (api.pinterest.com/v5, user_accounts:read + pins:read) and Threads (graph.threads.net, threads_basic +
+ * threads_manage_insights) follow the same rules: 401 → reconnect, 429 → partial, any other refusal → null. Pinterest's
+ * errors are `{ code, message }` at the top level, so only the HTTP status classifies them.
  */
 
 type Fetch = typeof fetch;
@@ -32,6 +36,12 @@ const IG_TOTALS: Record<string, string> = {
   comments: "comments", shares: "shares", saves: "saves", profile_links_taps: "linkTaps",
 };
 const FB_METRICS = ["page_media_view", "page_post_engagements", "page_daily_follows_unique", "page_views_total"];
+export const PINTEREST_API = "https://api.pinterest.com/v5";
+const PIN_TOTALS: Record<string, string> = { IMPRESSION: "impressions", SAVE: "saves", PIN_CLICK: "pinClicks", OUTBOUND_CLICK: "outboundClicks", ENGAGEMENT: "engagements" };
+/** Pinterest's top pins asked for: the most seen over the period. */
+const TOP_PINS = 5;
+/** Threads' totals (views is a daily series, the rest total_value); followers_count refuses since/until, so it's asked alone. */
+const THREADS_TOTALS: Record<string, string> = { likes: "likes", replies: "comments", reposts: "shares", quotes: "quotes" };
 
 type Series = { name?: string; values?: { value?: unknown; end_time?: string }[] }[];
 type Read = { body: ChannelAnalyticsDto; reconnect: boolean };
@@ -81,7 +91,7 @@ export async function readChannelAnalytics(input: ReadInput): Promise<Read> {
   let partial = false;
   let reconnect = false;
   const headers = { authorization: `Bearer ${input.token}` };
-  const host = input.channel === "instagram" ? IG_GRAPH : GRAPH;
+  const host = { instagram: IG_GRAPH, facebook: GRAPH, pinterest: PINTEREST_API, threads: THREADS_GRAPH }[input.channel];
 
   /** Notes how a failed answer counts: a timeout or rate limit makes the answer partial; 190 / 401 needs reconnect. */
   const note = (a: Answer) => {
@@ -114,6 +124,72 @@ export async function readChannelAnalytics(input: ReadInput): Promise<Read> {
   };
   const range = `since=${w.since}&until=${w.until}`;
   const base = { channel: input.channel, state: "ok" as const, days: input.days, from: w.from, to: w.to, readAt: now.toISOString() };
+
+  if (input.channel === "pinterest") {
+    // Pinterest takes calendar days (UTC), both ends inclusive; recent days come back with data_status other than READY.
+    const dates = `start_date=${w.from}&end_date=${w.to}`;
+    const [acct, data, top] = await Promise.all([
+      get("/user_account"),
+      get(`/user_account/analytics?${dates}&metric_types=${Object.keys(PIN_TOTALS).join(",")}`),
+      get(`/user_account/analytics/top_pins?${dates}&sort_by=IMPRESSION&num_of_pins=${TOP_PINS}`),
+    ]);
+    type Day = { date?: unknown; data_status?: unknown; metrics?: Record<string, unknown> };
+    const all = (data?.all ?? null) as { daily_metrics?: unknown; summary_metrics?: Record<string, unknown> } | null;
+    const pinDays = (Array.isArray(all?.daily_metrics) ? all.daily_metrics : []) as Day[];
+    const daySeries = (metric: string): ChannelDayDto[] =>
+      pinDays
+        .filter((d) => typeof d.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d.date))
+        .map((d) => ({ day: d.date as string, value: d.data_status === "READY" ? num(d.metrics?.[metric]) : null }));
+    const summary = all?.summary_metrics;
+    type Pin = { pin_id?: unknown; metrics?: Record<string, unknown> };
+    const pins = ((Array.isArray(top?.pins) ? top.pins : []) as Pin[]).filter((p) => typeof p.pin_id === "string" && /^\d+$/.test(p.pin_id));
+    const monthlyViews = num(acct?.monthly_views);
+    return {
+      reconnect,
+      body: {
+        ...base,
+        account: { name: typeof acct?.username === "string" ? `@${acct.username}` : input.name, followers: num(acct?.follower_count), posts: num(acct?.pin_count) },
+        totals: { ...Object.fromEntries(Object.entries(PIN_TOTALS).map(([metric, key]) => [key, num(summary?.[metric])])), ...(monthlyViews !== null && { monthlyViews }) },
+        daily: daySeries("IMPRESSION"),
+        dailyEngagements: daySeries("ENGAGEMENT"),
+        followersDaily: [],
+        countries: null,
+        // Pins carry only their id and numbers here (no title, image or date): one more read per pin isn't worth it.
+        posts: top
+          ? pins.map((p) => ({
+              id: p.pin_id as string, mediaType: null, productType: null, postedAt: null, caption: null, permalink: `https://www.pinterest.com/pin/${p.pin_id}/`,
+              metrics: { views: num(p.metrics?.IMPRESSION), reach: null, likes: null, comments: null, shares: null, saves: num(p.metrics?.SAVE), interactions: num(p.metrics?.ENGAGEMENT), navigation: null },
+            }))
+          : null,
+        partial,
+      },
+    };
+  }
+
+  if (input.channel === "threads") {
+    const [acct, data, followers] = await Promise.all([
+      get("/me?fields=username"),
+      metrics((m) => `/me/threads_insights?metric=${m.join(",")}&${range}`, ["views", ...Object.keys(THREADS_TOTALS)]),
+      metrics(() => "/me/threads_insights?metric=followers_count", ["followers_count"]),
+    ]);
+    const t = insights(data);
+    // Threads stamps a day like Instagram is taken to (that day's Pacific midnight); not yet checked against a live read.
+    const views = series(data, "views", false);
+    return {
+      reconnect,
+      body: {
+        ...base,
+        account: { name: typeof acct?.username === "string" ? `@${acct.username}` : input.name, followers: insights(followers).get("followers_count") ?? null, posts: null },
+        totals: { views: total(views), ...Object.fromEntries(Object.entries(THREADS_TOTALS).map(([metric, key]) => [key, t.get(metric) ?? null])) },
+        daily: views,
+        dailyEngagements: null,
+        followersDaily: [],
+        countries: null,
+        posts: null,
+        partial,
+      },
+    };
+  }
 
   if (input.channel === "facebook") {
     const page = encodeURIComponent(input.pageId);
@@ -202,7 +278,7 @@ export function emptyAnswer(channel: AnalyticsChannel, state: "not_connected" | 
   return { channel, state, account: null, days, from: w.from, to: w.to, totals: {}, daily: [], dailyEngagements: null, followersDaily: [], countries: null, posts: null, partial: false, readAt: now.toISOString() };
 }
 
-const PROVIDER = { instagram: "INSTAGRAM", facebook: "META" } as const;
+const PROVIDER = { instagram: "INSTAGRAM", facebook: "META", pinterest: "PINTEREST", threads: "THREADS" } as const;
 const TTL_MS = 15 * 60_000;
 /**
  * ponytail: per-process cache by connection and days, so opening a calendar again doesn't cost ~18 Meta calls. Lost on

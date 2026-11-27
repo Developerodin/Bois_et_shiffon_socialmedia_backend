@@ -123,3 +123,112 @@ describe("readChannelAnalytics", () => {
     expect(f.mock.calls.every(([u]) => String(u).startsWith("https://graph.facebook.com/v23.0/123"))).toBe(true);
   });
 });
+
+describe("readChannelAnalytics: Pinterest", () => {
+  const pinterest = (override: (url: URL) => Response | null = () => null) =>
+    vi.fn(async (u: string) => {
+      const url = new URL(u);
+      const o = override(url);
+      if (o) return o;
+      if (url.pathname === "/v5/user_account") return json(200, { username: "shop", follower_count: 412, pin_count: 96, monthly_views: 15000 });
+      if (url.pathname === "/v5/user_account/analytics") {
+        const day = (date: string, data_status: string, n: number) => ({ date, data_status, metrics: { IMPRESSION: n, SAVE: 1, PIN_CLICK: 2, OUTBOUND_CLICK: 3, ENGAGEMENT: n / 10 } });
+        return json(200, {
+          all: {
+            daily_metrics: [day("2026-11-24", "READY", 100), day("2026-11-25", "READY", 200), day("2026-11-26", "PROCESSING", 50)],
+            summary_metrics: { IMPRESSION: 350, SAVE: 3, PIN_CLICK: 6, OUTBOUND_CLICK: 9, ENGAGEMENT: 35 },
+          },
+        });
+      }
+      if (url.pathname === "/v5/user_account/analytics/top_pins") {
+        return json(200, { pins: [{ pin_id: "987", metrics: { IMPRESSION: 120, SAVE: 4, ENGAGEMENT: 9, PIN_CLICK: 2 }, data_status: {} }, { pin_id: "../x", metrics: {} }], sort_by: "IMPRESSION" });
+      }
+      return json(404, { code: 404, message: "not found" });
+    });
+
+  it("reads the account, summary totals, daily impressions and engagements (unfinished days null) and top pins", async () => {
+    const f = pinterest();
+    const { body, reconnect } = await readChannelAnalytics(input(f, { channel: "pinterest", token: "pina_secret" }));
+    expect(reconnect).toBe(false);
+    expect(body.partial).toBe(false);
+    expect(body.account).toEqual({ name: "@shop", followers: 412, posts: 96 });
+    expect(body.totals).toEqual({ impressions: 350, saves: 3, pinClicks: 6, outboundClicks: 9, engagements: 35, monthlyViews: 15000 });
+    expect(body.daily).toEqual([{ day: "2026-11-24", value: 100 }, { day: "2026-11-25", value: 200 }, { day: "2026-11-26", value: null }]);
+    expect(body.dailyEngagements).toEqual([{ day: "2026-11-24", value: 10 }, { day: "2026-11-25", value: 20 }, { day: "2026-11-26", value: null }]);
+    expect(body.followersDaily).toEqual([]);
+    expect(body.countries).toBeNull();
+    expect(body.posts).toEqual([{
+      id: "987", mediaType: null, productType: null, postedAt: null, caption: null, permalink: "https://www.pinterest.com/pin/987/",
+      metrics: { views: 120, reach: null, likes: null, comments: null, shares: null, saves: 4, interactions: 9, navigation: null },
+    }]);
+    const urls = f.mock.calls.map(([u]) => String(u));
+    expect(urls.some((u) => u.includes("start_date=2026-10-30&end_date=2026-11-26") && u.includes("metric_types=IMPRESSION,SAVE,PIN_CLICK,OUTBOUND_CLICK,ENGAGEMENT"))).toBe(true);
+    for (const [url, init] of f.mock.calls as unknown as [string, RequestInit][]) {
+      expect(url.startsWith("https://api.pinterest.com/v5/")).toBe(true);
+      expect(url).not.toContain("pina_secret");
+      expect((init.headers as Record<string, string>).authorization).toBe("Bearer pina_secret");
+    }
+  });
+
+  it("asks for a reconnect on 401", async () => {
+    const f = pinterest((url) => (url.pathname === "/v5/user_account" ? json(401, { code: 2, message: "Authentication failed." }) : null));
+    expect((await readChannelAnalytics(input(f, { channel: "pinterest" }))).reconnect).toBe(true);
+  });
+
+  it("gives null numbers, partial, on a rate limit; a refused analytics read (not a business account) just nulls", async () => {
+    const limited = pinterest((url) => (url.pathname === "/v5/user_account/analytics" ? json(429, { code: 8, message: "rate limited" }) : null));
+    const a = (await readChannelAnalytics(input(limited, { channel: "pinterest" }))).body;
+    expect(a.partial).toBe(true);
+    expect(a.totals.impressions).toBeNull();
+    expect(a.daily).toEqual([]);
+    const refusedRead = pinterest((url) => (url.pathname.startsWith("/v5/user_account/analytics") ? json(403, { code: 1, message: "no" }) : null));
+    const b = await readChannelAnalytics(input(refusedRead, { channel: "pinterest" }));
+    expect(b.reconnect).toBe(false);
+    expect(b.body.partial).toBe(false);
+    expect(b.body.posts).toBeNull();
+    expect(b.body.account?.followers).toBe(412);
+  });
+});
+
+describe("readChannelAnalytics: Threads", () => {
+  const threads = (override: (url: URL) => Response | null = () => null) =>
+    vi.fn(async (u: string) => {
+      const url = new URL(u);
+      const o = override(url);
+      if (o) return o;
+      const metric = url.searchParams.get("metric");
+      if (url.pathname === "/v1.0/me") return json(200, { id: "1", username: "shop" });
+      if (metric === "followers_count") return json(200, { data: [{ name: "followers_count", period: "day", title: LOCAL[0], total_value: { value: 57 } }] });
+      if (url.pathname === "/v1.0/me/threads_insights") {
+        return json(200, {
+          data: metric!.split(",").map((name, i) =>
+            name === "views" ? titled("views", { values: days([30, 40], "2026-10-30T07:00:00Z") }) : { name, period: "day", title: LOCAL[2], total_value: { value: i } }),
+        });
+      }
+      return json(404, { error: { code: 803, message: "unknown" } });
+    });
+
+  it("reads the account, views per day and totals (replies as comments, reposts as shares)", async () => {
+    const f = threads();
+    const { body, reconnect } = await readChannelAnalytics(input(f, { channel: "threads", token: "THAA-secret" }));
+    expect(reconnect).toBe(false);
+    expect(body.account).toEqual({ name: "@shop", followers: 57, posts: null });
+    expect(body.totals).toEqual({ views: 70, likes: 1, comments: 2, shares: 3, quotes: 4 });
+    expect(body.daily).toEqual([{ day: "2026-10-30", value: 30 }, { day: "2026-10-31", value: 40 }]);
+    expect(body).toMatchObject({ dailyEngagements: null, followersDaily: [], countries: null, posts: null, partial: false });
+    expect(JSON.stringify(body)).not.toContain(LOCAL[0]);
+    const urls = f.mock.calls.map(([u]) => String(u));
+    expect(urls.every((u) => u.startsWith("https://graph.threads.net/v1.0/") && !u.includes("THAA-secret"))).toBe(true);
+    // followers_count refuses since/until.
+    expect(urls.find((u) => u.includes("followers_count"))).not.toContain("since=");
+    expect(urls.some((u) => u.includes("metric=views,likes,replies,reposts,quotes&since=1793318400&until=1795737600"))).toBe(true);
+  });
+
+  it("drops a refused metric and asks for a reconnect on an expired token", async () => {
+    const f = threads((url) => (url.searchParams.get("metric")?.startsWith("views,likes,replies,reposts,quotes") ? refused(4) : null));
+    const { body } = await readChannelAnalytics(input(f, { channel: "threads" }));
+    expect(body.totals).toEqual({ views: 70, likes: 1, comments: 2, shares: 3, quotes: null });
+    const g = threads((url) => (url.pathname === "/v1.0/me" ? json(400, { error: { code: 190, message: "expired" } }) : null));
+    expect((await readChannelAnalytics(input(g, { channel: "threads" }))).reconnect).toBe(true);
+  });
+});
