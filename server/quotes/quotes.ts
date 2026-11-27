@@ -110,6 +110,7 @@ export function toQuoteDto(q: Quote): QuoteDto {
     subtotalAccepted: differs && q.subtotalAccepted === q.shopifySubtotal,
     invoiceUrl: q.invoiceUrl,
     sentAt: q.sentAt?.toISOString() ?? null,
+    customerId: q.customerId,
     declinedReason: q.declinedReason,
     createdById: q.createdById,
     createdAt: q.createdAt.toISOString(),

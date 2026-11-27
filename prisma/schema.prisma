@@ -213,42 +213,46 @@ model Brand {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  workspace      Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  profile        BrandProfile?
-  members        BrandMember[]
-  agentRuns      AgentRun[]
-  agentEvents    AgentEvent[]
-  agentConfigs   BrandAgentConfig[]
-  contextDocs    BrandContextDoc[]
-  connections    IntegrationConnection[]
-  auditReports   AuditReport[]
-  chatThreads    ChatThread[]
-  opportunities  Opportunity[]
-  contentItems   ContentItem[]
-  learningNotes  LearningNote[]
-  competitors    Competitor[]
-  invitations    Invitation[]
-  photoShoots    PhotoShoot[]
-  reelAssets     ReelAsset[]
-  products       Product[]
-  catalogPages   CatalogPage[]
-  campaigns      Campaign[]
-  tasks          Task[]
-  workProjects   WorkProject[]
-  taskComments   TaskComment[]
-  notifications  Notification[]
-  dataSources    DataSource[]
-  postMetrics    PostMetric[]
-  shopOrders     ShopOrder[]
-  shopOrderLines ShopOrderLine[]
-  searchDays     SearchDay[]
-  adDays         AdDay[]
-  adBudgets      AdBudget[]
-  adAlerts       AdAlert[]
-  shopifyWrites  ShopifyWrite[]
-  blogArticles   BlogArticle[]
-  quotes         Quote[]
-  quoteVersions  QuoteVersion[]
+  workspace          Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  profile            BrandProfile?
+  members            BrandMember[]
+  agentRuns          AgentRun[]
+  agentEvents        AgentEvent[]
+  agentConfigs       BrandAgentConfig[]
+  contextDocs        BrandContextDoc[]
+  connections        IntegrationConnection[]
+  auditReports       AuditReport[]
+  chatThreads        ChatThread[]
+  opportunities      Opportunity[]
+  contentItems       ContentItem[]
+  learningNotes      LearningNote[]
+  competitors        Competitor[]
+  invitations        Invitation[]
+  photoShoots        PhotoShoot[]
+  reelAssets         ReelAsset[]
+  products           Product[]
+  catalogPages       CatalogPage[]
+  campaigns          Campaign[]
+  tasks              Task[]
+  workProjects       WorkProject[]
+  taskComments       TaskComment[]
+  notifications      Notification[]
+  dataSources        DataSource[]
+  postMetrics        PostMetric[]
+  shopOrders         ShopOrder[]
+  shopOrderLines     ShopOrderLine[]
+  searchDays         SearchDay[]
+  adDays             AdDay[]
+  adBudgets          AdBudget[]
+  adAlerts           AdAlert[]
+  shopifyWrites      ShopifyWrite[]
+  blogArticles       BlogArticle[]
+  quotes             Quote[]
+  quoteVersions      QuoteVersion[]
+  companies          Company[]
+  customers          Customer[]
+  customerIdentities CustomerIdentity[]
+  customerNotes      CustomerNote[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -2078,7 +2082,7 @@ model Quote {
   contactName      String?
   /// PII: sent to Shopify only on invoice send; never in audit metadata or logs
   contactEmail     String?
-  /// tier 2
+  /// the customer record (plan 2026-11-27-crm); contactName/contactEmail stay the snapshot the quote was written to
   customerId       String?
   /// tier 2
   conversationId   String?
@@ -2115,9 +2119,11 @@ model Quote {
 
   brand    Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   versions QuoteVersion[]
+  customer Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   @@unique([brandId, number])
   @@index([brandId, status, updatedAt])
+  @@index([customerId])
 }
 
 /// A quote as it was before an edit or a revise (plan 2026-11-27-crm, Decision 10). No contact name or email: they stay
@@ -2146,4 +2152,115 @@ model QuoteVersion {
   brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
 
   @@unique([quoteId, version])
+}
+
+// ---- CRM records (plan 2026-11-27-crm, Phase A) -----------------------------------------------------------------
+// Customer data: names, identity values, note text never go into logs, job payloads, audit metadata or errors.
+// User ids (ownerId, authorId, ...) are plain strings, as on Quote: a removed member's id stays and reads "Former member".
+
+/// A business customer (trade buyer, interior designer's studio). Optional parent of customers. Erasable (server/crm/erase.ts).
+model Company {
+  id          String   @id @default(cuid())
+  workspaceId String
+  brandId     String
+  /// <= 200
+  name        String
+  /// http(s) only
+  website     String?
+  /// a member holding crm.manage
+  ownerId     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  brand     Brand      @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customers Customer[]
+
+  @@index([brandId, name])
+  @@index([updatedAt])
+}
+
+enum CustomerSource {
+  MANUAL
+  QUOTE
+  SHOPIFY
+  INBOX
+}
+
+/// A person B&C deals with. Retention: deleted 24 months after the last activity (server/crm/retention.ts, Decision 18).
+model Customer {
+  id             String         @id @default(cuid())
+  workspaceId    String
+  brandId        String
+  companyId      String?
+  /// PII, <= 200
+  displayName    String
+  /// "Interior designer", free text <= 100
+  role           String?
+  /// BCP 47, for AI drafts
+  language       String?
+  source         CustomerSource @default(MANUAL)
+  /// a member holding crm.manage
+  ownerId        String?
+  /// <= 200
+  nextAction     String?
+  /// brand-local day
+  nextActionDue  DateTime?      @db.Date
+  /// bumped by writes to the customer, its notes, conversations, deals and quotes: the retention candidate hint only
+  lastActivityAt DateTime       @default(now())
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  brand      Brand              @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  company    Company?           @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  identities CustomerIdentity[]
+  notes      CustomerNote[]
+  quotes     Quote[]
+
+  @@index([brandId, lastActivityAt(sort: Desc), id])
+  @@index([brandId, ownerId])
+  @@index([companyId])
+  @@index([lastActivityAt])
+}
+
+enum IdentityKind {
+  EMAIL
+  PHONE
+  INSTAGRAM
+  MESSENGER
+  SHOPIFY
+}
+
+/// How a customer is reached or recognised. A value belongs to one customer per brand and kind (normalised: server/crm/identity.ts).
+model CustomerIdentity {
+  id          String       @id @default(cuid())
+  workspaceId String
+  brandId     String
+  customerId  String
+  kind        IdentityKind
+  /// PII, <= 254, normalised
+  value       String
+  createdAt   DateTime     @default(now())
+
+  brand    Brand    @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([brandId, kind, value])
+  @@index([customerId])
+}
+
+/// The team's note on a customer: append-only (the author may delete theirs within 24 h).
+model CustomerNote {
+  id          String   @id @default(cuid())
+  workspaceId String
+  brandId     String
+  customerId  String
+  authorId    String?
+  /// <= 4,000
+  text        String
+  createdAt   DateTime @default(now())
+
+  brand    Brand    @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt])
 }
