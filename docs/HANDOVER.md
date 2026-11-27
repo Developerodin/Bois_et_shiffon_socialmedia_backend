@@ -1856,3 +1856,40 @@ alerts reach the bell only in a workspace with tasks on. The digest and the chat
    labels.
 3. Live-check the rules and tune the thresholds once B&C's Meta Ads is connected.
 4. Decide whether ads alerts need the bell outside the `tasks` flag.
+
+## Overview: next 7 days and key numbers (branch `overview-gaps`, 2026-11-27, not merged)
+
+Plan: `docs/superpowers/plans/2026-11-27-overview.md` (feature-audit items 2 and 3). Worktrees in `../sma-overview`
+(server, web, mobile; mobile carries only the shared copy). Four-lens review on the plan and on the branch; fixes in.
+**Not checked in a browser.**
+
+**What people see (Home panel, "Today & agents"):**
+- **Next 7 days**, under Today: posts (the calendar's Next 7 days filter), open website-area tasks due in the brand's
+  next 7 days and milestones (not done) of active projects, in date order, 8 rows at most with "N more" links to the
+  calendar, `/tasks?area=website` and `/projects`. A post or task opens in the peek; a milestone opens its project.
+  Tasks and milestones need the `tasks` flag and tasks.read. It replaces Today's "Posts in the next 7 days" count row.
+- **Performance**, under that: Meta ad spend and ROAS (flag `ads` + ads.read) and Shopify net sales excl. VAT and
+  orders (flag `sales` + crm.read) for the Performance page's default 28 days; each figure links to its tab on the
+  same days. Not connected, not synced yet, synced-but-empty and a failed last sync are said in words; no zeros are
+  drawn for missing data. Customer follow-ups are left out: no follow-up data exists yet (features 25/26).
+
+**Server:** `GET brands/:b/upcoming` (tasks.read; `server/tasks/upcoming.ts`): the brand's zone, then four reads in
+parallel (website task rows and count on `visibleTaskSql`, milestone rows and count on `projectWhere`). Tasks come
+back as id, title and due day. An unknown stored zone falls back to UTC. Shared type in `shared/api/upcoming.ts`.
+`projectWhere` is exported; `dueSql` moved to server/tasks/sql.ts (list.ts keeps `DUE` as an alias).
+
+**Web:** `components/workspace/upcoming-week.tsx`, `performance-summary.tsx`, `lib/upcoming.ts`,
+`lib/performance-summary.ts` (also now home to `exVatNotes`, `roas` and `ADS_CURRENCY_NOTE`, used by the Sales and
+Ads tabs), `lib/data-api.ts` `defaultRange`. The Overview page passes `adsOn`/`salesOn` from `featureOn`.
+
+**Migrations:** none.
+
+**Open items:**
+- Browser check: the two sections with and without the tasks/ads/sales flags, a client reviewer, an empty week, a
+  brand with no Meta account and with orders off.
+- Performance figures are read once per Overview visit (no polling); an Overview left open past midnight keeps the
+  old 28 days until reload.
+- A currency with refunds but no orders in the range is left out of the sales figure (says "No orders").
+- Merge notes: `shared/.hash` and `shared/index.ts` (new export at the end): re-run `npm run sync:shared` after
+  merging other streams, never hand-merge `.hash`. Small edits in `server/tasks/list.ts`, `projects.ts`, `sql.ts`
+  (tasks-calendar stream territory) and in `components/workspace/workspace.tsx` Home.
