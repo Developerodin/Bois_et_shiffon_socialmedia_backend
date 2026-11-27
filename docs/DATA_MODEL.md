@@ -454,3 +454,17 @@ Additive migrations, from `20261126150000` on (docs/superpowers/plans/2026-11-26
   housekeeping, which deletes rows older than 400 days. Top 500 of each dimension per day (Google sorts by clicks and
   leaves anonymised queries out, so sums sit below the SITE total). A day's rows are replaced only when its query calls
   succeeded. Cascades with the brand. ~1,000 rows per brand per day.
+- `SiteCrawl` and `SiteCrawlUrl` (`20261126150100_site_crawl`): the weekly full-site link check (job `seo.links`,
+  server/seo/site-crawl.ts). `SiteCrawl` is one cycle of a brand: `origin` (websiteUrl's origin at the start),
+  `status` (`SiteCrawlStatus`: RUNNING, COMPLETE, STOPPED = robots.txt unreadable or a bot wall, nothing reported,
+  PARTIAL = out of days, reported but clearing nothing, ABANDONED = the website changed, never reported),
+  `startedOn` (`@db.Date`), `discoveryComplete`, `followLinks` (no sitemap: pages come from links off the home page),
+  `pausedUntil`, `runNo` (the chain's next job key `seo-links:<crawlId>:<runNo>` and its payload's number, so a retried
+  run never forks the chain), `stopReason`, counts `pages`, `targets`, `checked`, `overflow` (links past the caps, not
+  stored), `finishedAt`. Index `(brandId, status, finishedAt)`. Kept per brand: the latest COMPLETE/PARTIAL cycle and
+  the RUNNING one; the rest are deleted when a cycle starts. `SiteCrawlUrl` is a URL of a cycle: `kind`
+  (`SiteCrawlUrlKind`: PAGE read in full for its links, TARGET checked with a 1-byte GET), `url` (≤ 2,000 chars),
+  `checkedAt` (null = not yet; a crash resumes from these), `status`, `redirects`, `outcome` (ok, broken, server-error,
+  chain, loop, skipped, unknown; recheck = a first 5xx), `carryCount` and `sources` (pages linking here, up to 5),
+  `depth` (clicks from home when following links). Unique `(crawlId, url)`, index `(crawlId, checkedAt, kind,
+  carryCount)`. Both cascade (the brand, the cycle). At most 2,000 PAGE + 2,000 TARGET rows a cycle.

@@ -1861,15 +1861,33 @@ alerts reach the bell only in a workspace with tasks on. The digest and the chat
 
 Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (shared sync only) on `seo-depth`.
 
-- **Migrations to apply** (none applied to the dev DB yet, in order): `20261126150000_search_query_day`. Check each
-  keeps `SearchDay`'s and `SearchQueryDay`'s INCLUDE indexes.
+- **Migrations to apply** (none applied to the dev DB yet, in order): `20261126150000_search_query_day`,
+  `20261126150100_site_crawl`. Check each keeps `SearchDay`'s and `SearchQueryDay`'s INCLUDE indexes.
 - **Search Console queries** (Task 1): each day also reads the top 500 queries and top 500 query-page pairs into
   `SearchQueryDay` (400-day retention by housekeeping). Google's limits, read from its docs on 2026-11-26, are in the
   header of server/data/search-console.ts. Existing sources get queries from their next daily run; no query backfill.
 - **Top queries** (Task 2): `GET search/queries` (analytics.read), the Search tab's "Top queries" table with its
   coverage line, and the chat's `searchPerformance` (`topQueries`, `queryCoverage`, `queriesSince`; prompt v9).
-- Waits on Search Console verification for B&C: everything above ships tested against fixtures and stays empty until
-  then. Web components weren't browser-checked on the branch (no dev server or build was run).
+- **Broken links, full-site weekly crawl** (Task 4, job `seo.links`, server/seo/site-crawl.ts; tables `SiteCrawl`,
+  `SiteCrawlUrl`, DATA_MODEL §14). The weekly SEO agent starts a cycle (`startSiteCrawl`) and reports the last finished
+  one (`lastCompleteCrawl`: COMPLETE or PARTIAL, same site as today's websiteUrl, finished within 14 days) as
+  `links-broken` (high), `links-server-error` (medium) and `links-redirect-chain` (low) findings plus
+  `metrics.links`; a fix shows as cleared one to two weeks later. Link findings count in the audit score like any other.
+  A `links-*` task clears only when `metrics.links.complete` is true (a COMPLETE cycle), without the pagesChecked rule.
+  Discovery: every sitemap page (newest first, ≤ 2,000; day cache `site-all-pages:<host>:<day>`), else link-following
+  from the home page (≤ 500 pages, ≤ 3 clicks); ≤ 2,000 link targets, 1-byte GETs.
+  **Budgets:** shares the site reader's host lock, robots.txt day cache and host bucket `site-pages:<host>:<day>`: the
+  crawl stops for the day at 1,000 of the reader's 1,500, so the catalogue keeps ≥ 500; 1,000 requests per brand per
+  day (`site-crawl-brand:<brandId>:<day>`); ≥ 1 s apart (Crawl-delay up to 10 s); runs of ≤ 240 s, the next queued a
+  minute later; `catalog.pages` and `seo.links` share one queue slot (`PAGES_RUNNING_MAX`). A refused budget hit rolls
+  back, so it costs the reader nothing. 429, 503 with Retry-After or 5 server errors in a row pause the cycle
+  (Retry-After, ≤ a day, else 00:10 UTC tomorrow); robots.txt unreadable or a bot wall (16 of the last 20 answers
+  401/403) stop it with nothing reported; a cycle not done in 6 days ends PARTIAL; a changed website abandons it.
+  A lost chain (no write for a day, not paused) is re-queued by the next weekly start.
+  Live check still to do (plan's Verification): run the SEO agent on B&C, watch the rows fill and the bucket stay
+  ≤ 1,000 from the crawl, then spot-check three "broken" targets by hand.
+- Waits on Search Console verification for B&C: everything above but the link check ships tested against fixtures and
+  stays empty until then. Web components weren't browser-checked on the branch (no dev server or build was run).
 
 ### SEO depth: where it stopped (2026-11-26, 17:40)
 - Branch `seo-depth` in the worktrees `C:\Users\INTEL\Desktop\sma-seo\{server,web,mobile}` (not merged, not pushed). Plan: `docs/superpowers/plans/2026-11-26-seo-depth.md` (four-lens reviewed, owner answers recorded).
@@ -1878,3 +1896,4 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
 - Still to do: finish Task 3, then Task 4 (the full-site link crawl), 5 and 5b (declining-page alerts, bell included), 6 (AI briefs), then the four-lens branch review and merge.
 - The worktree's server `node_modules` is a folder of junctions plus private Prisma copies; remove the junctions with `cmd /c rmdir` before deleting the worktree. Its test DB is `sma_test_seo` in the `sma-testdb` container.
 - Update 17:45: Task 3 (URL history page) is now committed: server 88bf4ca, web a5d33ac, mobile 0108faf. Its typecheck, web tests and DB test (11/11) pass. Next is Task 4, the full-site link crawl.
+- Update 2026-11-27: Task 4 (the full-site weekly link crawl, `seo.links`) is done and committed on the server worktree (web and mobile untouched: no shared change). Migration `20261126150100_site_crawl` is NOT applied to the dev DB (only to the throwaway `sma_test_seo`); apply it with the owner's go-ahead. Next is Task 5 (declining pages), then 5b and 6.
