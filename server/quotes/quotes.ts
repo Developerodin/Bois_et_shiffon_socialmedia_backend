@@ -3,7 +3,8 @@ import type { Prisma, Quote, QuoteStatus } from "@prisma/client";
 import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { prisma } from "@/server/db/prisma";
-import { PublishingError } from "@/server/services/publishing";
+import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
+import { PublishingError, TX } from "@/server/services/publishing";
 import { writeInFlight } from "@/server/shopify/writes";
 import { OPEN_TASK_STATUSES, QUOTE_LIMITS, quoteNumber, type PermissionKey, type QuoteDiscount, type QuoteDto, type QuoteLine, type QuoteTotals } from "@/shared";
 
@@ -41,7 +42,14 @@ const fields = {
 /** Totals a client sends are not fields here: they are dropped and always worked out again. */
 export const QuoteCreate = z.object({ ...fields, lines: fields.lines.default([]), currency: z.string().regex(/^[A-Z]{3}$/).optional() });
 export const QuoteEdit = z.object({ ...fields, lines: fields.lines.optional(), version: z.number().int().positive() });
-export const QuoteAction = z.object({ action: z.enum(["revise", "acceptSubtotal"]), version: z.number().int().positive() });
+/**
+ * revise / acceptSubtotal (Shopify path); decline (a person records the customer's no); markSent / markAccepted: the
+ * hand path for a quote that isn't in Shopify (plan 2026-11-27-crm, Decision 16), while AskCart's writes don't exist.
+ */
+export const QuoteAction = z.discriminatedUnion("action", [
+  z.object({ action: z.enum(["revise", "acceptSubtotal", "markSent", "markAccepted"]), version: z.number().int().positive() }),
+  z.object({ action: z.literal("decline"), version: z.number().int().positive(), reason: z.string().trim().max(QUOTE_LIMITS.reason).nullable().optional() }),
+]);
 
 // ---- money, in the currency's minor unit -----------------------------------------------------------------------
 
@@ -102,6 +110,7 @@ export function toQuoteDto(q: Quote): QuoteDto {
     subtotalAccepted: differs && q.subtotalAccepted === q.shopifySubtotal,
     invoiceUrl: q.invoiceUrl,
     sentAt: q.sentAt?.toISOString() ?? null,
+    declinedReason: q.declinedReason,
     createdById: q.createdById,
     createdAt: q.createdAt.toISOString(),
     updatedAt: q.updatedAt.toISOString(),
@@ -110,6 +119,7 @@ export function toQuoteDto(q: Quote): QuoteDto {
 
 const notFound = () => new PublishingError("Quote not found", 404);
 const inFlight = () => new PublishingError("A change to this quote is being sent to Shopify or waits for Shopify to confirm it. Check it again, then edit.", 409, "quote.writeInFlight");
+const inShopify = () => new PublishingError("This quote is in Shopify: Shopify's invoice and payment move it along", 409, "quote.inShopify");
 const changed = () => new PublishingError("This quote changed since you opened it. Reload it and try again.", 409, "quote.changed");
 
 /** The brand's quote, or 404 (another brand's id included). */
@@ -242,20 +252,59 @@ export async function editQuote(scope: QuoteScope, id: string, patch: z.infer<ty
 }
 
 /**
- * revise: a SENT quote back to CREATED so it can be edited (its payment reminders close). acceptSubtotal: a person
- * accepts Shopify's subtotal where it differs from ours, which lets the invoice go.
+ * revise: a SENT quote back to editable (CREATED in Shopify, DRAFT when sent by hand; its payment reminders close).
+ * acceptSubtotal: a person accepts Shopify's subtotal where it differs from ours, which lets the invoice go.
+ * decline: CREATED, SENT or EXPIRED → DECLINED (Shopify's draft is left; status-sync.ts still notices a late payment).
+ * markSent / markAccepted: the hand path, only for a quote with no Shopify draft (refused once it has one).
  */
 export async function quoteAction(scope: QuoteScope, id: string, input: z.infer<typeof QuoteAction>) {
   const q = await loadQuote(scope, id);
   if (q.version !== input.version) throw changed();
+  // A Shopify write on its way (a create's onDone sets shopifyId by id alone) would make the two paths disagree.
+  if (input.action !== "acceptSubtotal" && input.action !== "revise" && (await writeInFlight(scope, "QUOTE", id))) throw inFlight();
+  const where = { id, workspaceId: scope.workspaceId, brandId: scope.brandId, version: q.version };
   if (input.action === "revise") {
     if (q.status !== "SENT") throw new PublishingError("Only a sent quote is revised", 409, "quote.notSent");
+    // In Shopify it goes back to CREATED (its draft order exists); a quote sent by hand back to DRAFT.
+    const to = q.shopifyId ? "CREATED" : "DRAFT";
     await prisma.$transaction(async (tx) => {
-      const { count } = await tx.quote.updateMany({ where: { id, workspaceId: scope.workspaceId, brandId: scope.brandId, version: q.version, status: "SENT" }, data: { status: "CREATED" } });
+      const { count } = await tx.quote.updateMany({ where: { ...where, status: "SENT" }, data: { status: to } });
       if (!count) throw changed();
       await closeQuoteReminders(tx, q, "The quote is being revised");
-      await audit(tx, scope, "quote.revised", id, { version: q.version });
-    });
+      await audit(tx, scope, "quote.revised", id, { version: q.version, to });
+    }, TX);
+  } else if (input.action === "decline") {
+    if (!DECLINABLE.includes(q.status)) throw new PublishingError("Only a quote in Shopify, sent or expired can be marked declined", 409, "quote.notDeclinable");
+    const reason = input.reason || null;
+    await prisma.$transaction(async (tx) => {
+      const { count } = await tx.quote.updateMany({ where: { ...where, status: q.status }, data: { status: "DECLINED", declinedReason: reason } });
+      if (!count) throw changed();
+      if (q.status === "SENT") await closeQuoteReminders(tx, q, "The customer declined the quote");
+      // The reason's length only: it is the customer's words, near enough.
+      await audit(tx, scope, "quote.declined", id, { from: q.status, reasonLength: reason?.length ?? 0 });
+    }, TX);
+  } else if (input.action === "markSent") {
+    if (q.shopifyId) throw inShopify();
+    if (q.status !== "DRAFT" && q.status !== "CREATED") throw new PublishingError("Only a draft quote is marked sent", 409, "quote.notDraft");
+    if (!quoteLines(q.lines).length) throw new PublishingError("Add a line to the quote first", 409, "quote.empty");
+    const zone = await brandTimeZone(scope);
+    const sentAt = new Date();
+    // As an invoice send: valid through the send day + 30 brand days; reminders on day 7 and 21 (status-sync.ts).
+    const validUntil = new Date(`${addDays(zoneToday(zone, sentAt), QUOTE_LIMITS.validDays)}T00:00:00Z`);
+    await prisma.$transaction(async (tx) => {
+      const { count } = await tx.quote.updateMany({ where: { ...where, status: q.status, shopifyId: null }, data: { status: "SENT", sentAt, validUntil, sentById: scope.userId } });
+      if (!count) throw changed();
+      await audit(tx, scope, "quote.marked-sent", id, { version: q.version });
+    }, TX);
+  } else if (input.action === "markAccepted") {
+    if (q.shopifyId) throw inShopify();
+    if (q.status !== "SENT" && q.status !== "EXPIRED") throw new PublishingError("Only a sent or expired quote is marked accepted", 409, "quote.notSent");
+    await prisma.$transaction(async (tx) => {
+      const { count } = await tx.quote.updateMany({ where: { ...where, status: q.status, shopifyId: null }, data: { status: "ACCEPTED" } });
+      if (!count) throw changed();
+      if (q.status === "SENT") await closeQuoteReminders(tx, q, "The customer accepted the quote");
+      await audit(tx, scope, "quote.marked-accepted", id, { from: q.status });
+    }, TX);
   } else {
     const dto = toQuoteDto(q);
     if (!dto.subtotalDiffers) throw new PublishingError("Shopify's subtotal matches this quote", 409, "quote.subtotalMatches");
@@ -268,6 +317,8 @@ export async function quoteAction(scope: QuoteScope, id: string, input: z.infer<
   }
   return toQuoteDto(await loadQuote(scope, id));
 }
+
+const DECLINABLE: QuoteStatus[] = ["CREATED", "SENT", "EXPIRED"];
 
 const CANCELLABLE: QuoteStatus[] = ["DRAFT", "CREATED", "SENT", "EXPIRED"];
 /** Told to whoever cancels a quote whose invoice went out: cancelling here doesn't stop the customer paying it. */
@@ -283,21 +334,23 @@ export async function deleteQuote(scope: QuoteScope, id: string): Promise<{ quot
   const q = await loadQuote(scope, id);
   if (!CANCELLABLE.includes(q.status)) throw new PublishingError("This quote is already closed", 409, "quote.closed");
   const where = { id, workspaceId: scope.workspaceId, brandId: scope.brandId, status: q.status };
-  const deleting = !q.shopifyId && q.status === "DRAFT";
+  // A DRAFT that was sent by hand and revised keeps its history: cancelled, not deleted.
+  const deleting = !q.shopifyId && q.status === "DRAFT" && !q.sentAt;
   if (deleting) {
     if (await writeInFlight(scope, "QUOTE", id, ["DRAFT_ORDER_CREATE"])) throw new PublishingError("Shopify hasn't confirmed this quote's draft order yet. Check it again before deleting the quote.", 409, "quote.createInFlight");
   }
   // ponytail: the in-flight check and the delete aren't one lock; a create confirmed in that instant leaves a draft in Shopify with no quote here (its tag names the id).
   await prisma.$transaction(async (tx) => {
     const { count } = deleting
-      ? await tx.quote.deleteMany({ where: { ...where, shopifyId: null } })
+      ? await tx.quote.deleteMany({ where: { ...where, shopifyId: null, sentAt: null } })
       : await tx.quote.updateMany({ where, data: { status: "CANCELLED" } });
     if (!count) throw changed();
     if (q.status === "SENT") await closeQuoteReminders(tx, q, "The quote was cancelled");
     await audit(tx, scope, deleting ? "quote.deleted" : "quote.cancelled", id, { number: q.number, from: q.status });
   });
   if (deleting) return null;
-  return { quote: toQuoteDto(await loadQuote(scope, id)), notice: q.status === "SENT" ? INVOICE_STAYS_PAYABLE : null };
+  // Sent by hand: there is no Shopify invoice to warn about.
+  return { quote: toQuoteDto(await loadQuote(scope, id)), notice: q.status === "SENT" && q.shopifyId ? INVOICE_STAYS_PAYABLE : null };
 }
 
 // ---- payment reminders ------------------------------------------------------------------------------------------

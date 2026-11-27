@@ -2059,6 +2059,8 @@ enum QuoteStatus {
   ACCEPTED
   EXPIRED
   CANCELLED
+  /// a person recorded the customer's no (CREATED, SENT or EXPIRED → DECLINED); Shopify's draft is left as it is
+  DECLINED
 }
 
 /// A quote drafted in our app (server/quotes/quotes.ts) and created in Shopify as a draft order (server/quotes/shopify-draft-orders.ts).
@@ -2101,6 +2103,8 @@ model Quote {
   subtotalAccepted String?
   invoiceUrl       String?
   orderId          String?
+  /// <= 500, why the customer said no (DECLINED); PII-adjacent: never in audit metadata, blanked on erasure
+  declinedReason   String?
   sentAt           DateTime?
   /// who sent the invoice last: owns the payment reminders
   sentById         String?

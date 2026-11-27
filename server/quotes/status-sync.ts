@@ -23,23 +23,29 @@ import { quoteNumber } from "@/shared";
  *     none and don't expire. The Shopify draft is left for a person.
  *  3. Payment reminders: a quote still SENT 7 (then 21) brand days after its invoice gets a CRM task owned by whoever
  *     sent it, made once per send (Task.requestId), closed when the quote leaves SENT or is sent again.
- * While AskCart's writes aren't connected, step 1 reads nothing (and open quotes in Shopify don't expire); 3 still runs.
+ * While AskCart's writes aren't connected (or the brand's Shopify is MCP-only), step 1 reads nothing and open quotes in
+ * Shopify don't expire; quotes sent by hand (no Shopify draft, plan 2026-11-27-crm Decision 16) still expire and get
+ * their reminders. DECLINED quotes in Shopify are watched like cancelled ones.
  * ponytail: 250 lookups per brand per day, oldest first; past that the run reports "partial" and the rest wait. Batch
  * the reads (`nodes(ids:)`) in the adapter and page by createdAt once a brand keeps more.
  */
 const OPEN = ["CREATED", "SENT"] as const;
+/** Closed here, but Shopify's invoice may still be paid: watched for CLOSED_WATCH_DAYS. */
+const WATCHED = ["CANCELLED", "EXPIRED", "DECLINED"] as const;
+const CLOSED_WORD = { CANCELLED: "cancelled", EXPIRED: "expired", DECLINED: "declined" } as const;
 const READS = 250;
 /** How long a cancelled or expired quote's Shopify invoice is still watched for a payment. */
 const CLOSED_WATCH_DAYS = 60;
 const REMINDER_DAYS = [21, 7] as const;
 
 type Scope = { workspaceId: string; brandId: string };
+const isWatched = (s: Quote["status"]) => (WATCHED as readonly string[]).includes(s);
 
 /** The quote leaves SENT/CREATED for `status`, its reminders closed, in one transaction; false when it had moved on. */
 async function settle(scope: Scope, q: Quote, status: "EXPIRED" | "ACCEPTED" | "CANCELLED", why: string, orderId: string | null = null) {
   // Paid after it was closed here: the team's note says so (the internal note is never sent).
-  const late = status === "ACCEPTED" && (q.status === "CANCELLED" || q.status === "EXPIRED");
-  const note = late ? [`Paid in Shopify after it was ${q.status === "CANCELLED" ? "cancelled" : "expired"} here.`, q.internalNote].filter(Boolean).join("\n").slice(0, 2000) : undefined;
+  const late = status === "ACCEPTED" && isWatched(q.status);
+  const note = late ? [`Paid in Shopify after it was ${CLOSED_WORD[q.status as (typeof WATCHED)[number]]} here.`, q.internalNote].filter(Boolean).join("\n").slice(0, 2000) : undefined;
   return prisma.$transaction(async (tx) => {
     const { count } = await tx.quote.updateMany({ where: { id: q.id, workspaceId: scope.workspaceId, brandId: scope.brandId, status: q.status }, data: { status, ...(orderId ? { orderId } : {}), ...(note ? { internalNote: note } : {}) } });
     if (!count) return false;
@@ -50,8 +56,12 @@ async function settle(scope: Scope, q: Quote, status: "EXPIRED" | "ACCEPTED" | "
 }
 
 /** A payment reminder for a SENT quote, made once per send and day count; false when it exists already. */
-async function remind(scope: Scope, q: Quote, sentDay: string, days: number) {
+async function remind(scope: Scope, q: Pick<Quote, "id" | "number" | "sentAt" | "sentById" | "shopifyId">, sentDay: string, days: number) {
   const title = `Quote ${quoteNumber(q.number)}: no payment after ${days} days`;
+  // Sent by hand, there is no Shopify invoice: the reminder says so.
+  const description = q.shopifyId
+    ? "The customer hasn't paid this quote's Shopify invoice yet. Open the quote in Sales & CRM to follow up."
+    : "The customer hasn't accepted this quote yet. Open the quote in Sales & CRM to follow up, or mark it accepted or declined.";
   try {
     return await prisma.$transaction(async (tx) => {
       // The sender owns it while they may (crm.manage or inbox.read, and tasks.read); else it waits for someone to take it.
@@ -59,7 +69,7 @@ async function remind(scope: Scope, q: Quote, sentDay: string, days: number) {
       const task = await tx.task.create({
         data: {
           workspaceId: scope.workspaceId, brandId: scope.brandId, title, areas: ["CRM"], ownerId: owner, dueOn: new Date(`${addDays(sentDay, days)}T00:00:00Z`),
-          description: "The customer hasn't paid this quote's Shopify invoice yet. Open the quote in Sales & CRM to follow up.", requestId: reminderKey(q.id, q.sentAt!, days),
+          description, requestId: reminderKey(q.id, q.sentAt!, days),
         },
         select: { id: true },
       });
@@ -73,17 +83,18 @@ async function remind(scope: Scope, q: Quote, sentDay: string, days: number) {
 }
 
 export async function syncQuoteStatus(scope: Scope, adapter: ShopifyWriteAdapter = askCartWriteAdapter, now = new Date()): Promise<SyncOutcome> {
-  // Shopify MCP reads the catalogue only: draft orders can't be read back, so nothing is asked and nothing expires.
-  if (await shopifyMcpOnly(scope)) return { count: 0, reason: "permission" };
+  // Shopify MCP reads the catalogue only: draft orders can't be read back, so nothing is asked there and quotes in
+  // Shopify don't expire; quotes sent by hand still expire and get their reminders below.
+  const mcpOnly = await shopifyMcpOnly(scope);
   const zone = await brandTimeZone(scope);
   const today = zoneToday(zone, now);
   const where = { workspaceId: scope.workspaceId, brandId: scope.brandId, shopifyId: { not: null } };
   let count = 0;
-  let reason: SyncOutcome["reason"] = null;
+  let reason: SyncOutcome["reason"] = mcpOnly ? "permission" : null;
 
-  const open = await prisma.quote.findMany({ where: { ...where, status: { in: [...OPEN] } }, orderBy: { createdAt: "asc" }, take: READS + 1 });
-  const closed = await prisma.quote.findMany({
-    where: { ...where, status: { in: ["CANCELLED", "EXPIRED"] }, updatedAt: { gte: new Date(now.getTime() - CLOSED_WATCH_DAYS * 86_400_000) } },
+  const open = mcpOnly ? [] : await prisma.quote.findMany({ where: { ...where, status: { in: [...OPEN] } }, orderBy: { createdAt: "asc" }, take: READS + 1 });
+  const closed = mcpOnly ? [] : await prisma.quote.findMany({
+    where: { ...where, status: { in: [...WATCHED] }, updatedAt: { gte: new Date(now.getTime() - CLOSED_WATCH_DAYS * 86_400_000) } },
     orderBy: { createdAt: "asc" },
     take: READS + 1,
   });
@@ -108,7 +119,7 @@ export async function syncQuoteStatus(scope: Scope, adapter: ShopifyWriteAdapter
     read.add(q.id);
     const d = found.value;
     if (!d) {
-      if (q.status !== "CANCELLED" && q.status !== "EXPIRED" && (await settle(scope, q, "CANCELLED", "The draft order was deleted in Shopify"))) count++;
+      if (!isWatched(q.status) && (await settle(scope, q, "CANCELLED", "The draft order was deleted in Shopify"))) count++;
     } else if (d.status === "COMPLETED") {
       if (await settle(scope, q, "ACCEPTED", "The customer paid: the quote is accepted", d.orderId)) count++;
     }
@@ -120,7 +131,10 @@ export async function syncQuoteStatus(scope: Scope, adapter: ShopifyWriteAdapter
     if (await settle(scope, q, "EXPIRED", "The quote expired")) count++;
   }
 
-  const sent = await prisma.quote.findMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, status: "SENT", sentAt: { not: null } } });
+  const sent = await prisma.quote.findMany({
+    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, status: "SENT", sentAt: { not: null } },
+    select: { id: true, workspaceId: true, brandId: true, number: true, sentAt: true, sentById: true, shopifyId: true },
+  });
   // The reminders that exist already, in one read: only the missing ones get a transaction.
   const made = new Set(
     sent.length
