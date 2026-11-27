@@ -5,7 +5,7 @@ import { taskProblem } from "@/server/tasks/errors";
 import { ListQuery, listTasks, todayTasks } from "@/server/tasks/list";
 import { createTask, limitTaskWrites, TaskInput } from "@/server/tasks/service";
 
-/** A view of the tasks the caller can see, 50 a page (tasks.read); `view=today` gives Today's counts and first rows. */
+/** A view of the tasks the caller can see, 50 a page or 200 with a due range (tasks.read); `view=today` gives Today's counts and first rows. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
     const scope = await authorizeBrandRoute(request, context.params, "tasks.read");

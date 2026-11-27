@@ -95,6 +95,24 @@ describe("task lists", () => {
     expect(pages[0]).toHaveLength(10);
     await prisma.task.deleteMany({ where: { brandId: plain } });
   });
+
+  it("a due range lists the tasks due on those days, still by the viewer's visibility", async () => {
+    const rows = await make(plain, [
+      { dueOn: day("2026-11-30"), reviewerId: client }, // in range, the client's
+      { dueOn: day("2026-12-01") }, // in range, staff only
+      { dueOn: day("2026-12-02") }, // after the range
+      { dueOn: null }, // undated
+      { dueOn: day("2026-11-01"), status: "CANCELLED" }, // in range, but no view lists it
+    ]);
+    const q = ListQuery.parse({ view: "open", dueFrom: "2026-11-01", dueTo: "2026-12-01" });
+    const s = scopeOf(plain);
+    expect((await listTasks(s, taskViewer(s), q)).tasks.map((t) => t.id)).toEqual([rows[0]!.id, rows[1]!.id]);
+    const c = scopeOf(plain, client, true, ["brand.read", "tasks.read"]);
+    const out = await listTasks(c, taskViewer(c), q);
+    expect(out.tasks.map((t) => t.id)).toEqual([rows[0]!.id]);
+    expect(out.nextCursor).toBeNull();
+    await prisma.task.deleteMany({ where: { brandId: plain } });
+  });
 });
 
 describe("Today", () => {
