@@ -89,7 +89,7 @@ export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.S
 }
 
 /** Rows for ids from a visibility-checked query, in that query's order. */
-export async function rowsFor(ids: string[]) {
+async function rowsFor(ids: string[]) {
   if (!ids.length) return [];
   const rows = await prisma.task.findMany({ where: { id: { in: ids } }, include: TASK_DTO_INCLUDE });
   const byId = new Map(rows.map((r) => [r.id, r]));

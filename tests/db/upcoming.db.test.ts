@@ -122,6 +122,14 @@ describe("upcomingWork", () => {
     expect(r.timeZone).toBe("UTC");
   });
 
+  it("falls back to UTC for a stored zone Intl doesn't know", async () => {
+    const odd = (await prisma.brand.create({ data: { workspaceId: ws, slug: "odd", displayName: "Odd" } })).id;
+    await prisma.brandProfile.create({ data: { workspaceId: ws, brandId: odd, timeZone: "Mars/Olympus" } });
+    const s = scopeOf(staff, ALL, false, odd);
+    const r = await upcomingWork(s, taskViewer(s), NOW);
+    expect([r.timeZone, r.from, r.to]).toEqual(["UTC", "2026-11-27", "2026-12-03"]);
+  });
+
   it("caps the rows at 10 and counts the rest", async () => {
     const extra = Array.from({ length: 12 }, (_, i) => ({ workspaceId: ws, brandId: other, title: `x${i}`, areas: ["WEBSITE" as const], dueOn: day("2026-11-28") }));
     await prisma.task.createMany({ data: extra });
