@@ -1882,7 +1882,8 @@ back as id, title and due day. An unknown stored zone falls back to UTC. Shared 
 `lib/performance-summary.ts` (also now home to `exVatNotes`, `roas` and `ADS_CURRENCY_NOTE`, used by the Sales and
 Ads tabs), `lib/data-api.ts` `defaultRange`. The Overview page passes `adsOn`/`salesOn` from `featureOn`.
 
-**Migrations:** none.
+**Migrations:** none. **Deploy server first or together with web:** without the `upcoming` route the web Overview
+shows "Couldn't load website tasks and milestones" on every visit.
 
 **Open items:**
 - Browser check: the two sections with and without the tasks/ads/sales flags, a client reviewer, an empty week, a
