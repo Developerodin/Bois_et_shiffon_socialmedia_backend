@@ -333,3 +333,40 @@ describe("A content workflow's stages", () => {
     expect((db.contentWorkflow.findFirst.mock.calls[0] as unknown as [object])[0]).toMatchObject({ where: { id: "wf1", workspaceId: "w1", brandId: "b1" } });
   });
 });
+
+describe("Runs without a workflow leave a workflow's posts to its gates", () => {
+  const item = (over: object = {}) => ({
+    id: "i1", title: "Post", channel: "INSTAGRAM_POST", status: "PLANNED", pillar: null, scheduledFor: null, brief: {}, opportunity: null, campaignId: null,
+    productIds: [], workflowId: null, versions: [], decisions: [], ...over,
+  });
+
+  it("the Brief writer's plain sweep and its waiting count take only posts outside a workflow", async () => {
+    db.contentItem.findMany.mockResolvedValue([item()]);
+    db.contentItem.count.mockResolvedValue(0);
+    await briefAgent.run(ctx, { chain: true });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).toMatchObject({ workflowId: null });
+    expect((db.contentItem.count.mock.calls[0] as unknown as [{ where: object }])[0].where).toMatchObject({ workflowId: null });
+  });
+
+  it("the Creator's plain sweep too, but one post asked for by id is written whatever its workflow", async () => {
+    db.contentItem.findMany.mockResolvedValue([item({ status: "BRIEF_READY" })]);
+    await creatorAgent.run(ctx, { chain: true });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).toMatchObject({ workflowId: null });
+    vi.clearAllMocks();
+    db.contentItem.findMany.mockResolvedValue([item({ status: "BRIEF_READY", workflowId: "wf1" })]);
+    await creatorAgent.run(ctx, { itemId: "i1" });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).not.toHaveProperty("workflowId");
+  });
+
+  it("a post whose locked products are all gone is briefed with none, never given a substitute", async () => {
+    linked.mockImplementation(async (_db: unknown, _scope: unknown, ids: string[]) => ids.map((id) => ({ id, row: null, group: [], name: "a removed product", state: "gone" })));
+    db.product.findMany.mockResolvedValue([catalogue.p9]);
+    db.contentItem.findMany.mockResolvedValue([item({ productIds: ["p1"] })]);
+    await briefAgent.run(ctx, {});
+    expect(prompt()).toContain("Products: none.");
+    expect(prompt()).not.toContain("Catalogue candidates");
+    const data = (db.contentItem.updateMany.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0].data;
+    expect(data).not.toHaveProperty("productIds");
+    expect((data.brief as { products: string[] }).products).toEqual([]);
+  });
+});

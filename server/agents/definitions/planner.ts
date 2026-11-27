@@ -111,13 +111,16 @@ async function plan(ctx: Parameters<AgentDefinition["run"]>[0], input: { chain?:
 
     // Manual products: the posts feature only these (checked against the brand when the workflow started).
     const chosenIds = wf?.input.productMode === "manual" ? wf.input.productIds : [];
-    const [knowledge, products, chosen] = await Promise.all([
+    const [knowledge, products, chosenLinks] = await Promise.all([
       brandKnowledge(brand.workspaceId, brand.brandId, 2500),
       linkedProducts(prisma, scope, wanted.flatMap((c) => c.productIds)),
       linkedProducts(prisma, scope, chosenIds),
     ]);
     const nameOf = new Map(products.map((p) => [p.id, p.name]));
-    const chosenSet = new Set(chosenIds);
+    // Only products still in the catalogue (one archived since the workflow started is left out, never put on a post).
+    const chosen = chosenLinks.filter((l) => !!l.row);
+    const liveIds = chosen.map((l) => l.id);
+    const chosenSet = new Set(liveIds);
     const productLines = chosen.map((p) => JSON.stringify({ id: p.id, name: p.name, category: p.row?.category ?? null, stock: p.state }));
     // Person-typed text as one-line JSON (no raw newline), times in the brand's zone.
     const campaignLines = wanted.map((c) =>
@@ -157,7 +160,7 @@ async function plan(ctx: Parameters<AgentDefinition["run"]>[0], input: { chain?:
               opportunityId: "", campaignId: c.id, title: `${c.name} (${n + 1})`, channel: mockChannel(n % 2 ? "FACEBOOK_POST" : "INSTAGRAM_POST"), pillar: "Produit", angle: c.offer ?? c.name,
             })),
           ),
-        ].map((p) => (chosen.length ? { ...p, productIds: chosenIds.slice(0, 1) } : p)),
+        ].map((p) => (chosen.length ? { ...p, productIds: liveIds.slice(0, 1) } : p)),
       },
     });
 
@@ -205,7 +208,7 @@ async function plan(ctx: Parameters<AgentDefinition["run"]>[0], input: { chain?:
       // Only the chosen products, whatever the model returned; none named = the first chosen ones, so every post of a
       // manual workflow features its products.
       const picked = [...new Set((p.productIds ?? []).filter((id) => chosenSet.has(id)))].slice(0, MAX_POST_PRODUCTS);
-      const productIds = chosenIds.length ? (picked.length ? picked : chosenIds.slice(0, MAX_POST_PRODUCTS)) : [];
+      const productIds = liveIds.length ? (picked.length ? picked : liveIds.slice(0, MAX_POST_PRODUCTS)) : [];
       const item = await prisma.contentItem.create({
         data: {
           workspaceId: brand.workspaceId,

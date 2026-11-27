@@ -223,6 +223,8 @@ export async function workflowStatus(scope: Scope, workflowId: string): Promise<
     if (runs.some((r) => ACTIVE.includes(r.status))) status = planner.state === "queued" || planner.state === "running" ? "PLANNING" : "RUNNING";
     else if (wf.status === "REVIEW_PLAN" || wf.status === "REVIEW_BRIEFS") status = wf.status;
     else if (planner.state === "failed") status = "FAILED";
+    // The Planner found nothing to plan: no posts came of it, which a person has to look at (pick other ideas).
+    else if (planner.state === "nothing-to-do" && !Object.keys(posts).length) status = "NEEDS_ATTENTION";
     else if (UNFINISHED.some((s) => posts[s])) status = "NEEDS_ATTENTION";
     else status = "DONE";
   }
@@ -274,16 +276,23 @@ const WAITING_FOR: Record<Exclude<WorkflowStage, "planner">, Prisma.ContentItemW
 export async function retryStage(scope: Scope, userId: string | undefined, workflowId: string, stage: WorkflowStage): Promise<{ workflow: WorkflowView; runId: string }> {
   const wf = await load(scope, workflowId);
   if (wf.status === "CANCELLED") throw new WorkflowError("This workflow was cancelled", 409);
-  if (await prisma.agentRun.count({ where: { workflowId, brandId: scope.brandId, status: { in: ACTIVE } } })) throw new WorkflowError("This workflow is still running", 409);
+  const running = () => prisma.agentRun.count({ where: { workflowId, brandId: scope.brandId, status: { in: ACTIVE } } });
+  if (await running()) throw new WorkflowError("This workflow is still running", 409);
 
   let runId: string;
   if (stage === "planner") {
-    const last = await prisma.agentRun.findFirst({ where: { workflowId, brandId: scope.brandId, agentKey: "planner" }, orderBy: { createdAt: "desc" }, select: { status: true } });
-    if (last && last.status !== "FAILED") throw new WorkflowError("The Planner already planned this workflow", 409);
-    const refs = await prisma.creditEntry.findMany({ where: { workspaceId: scope.workspaceId, reason: "agent-run:planner", refId: { startsWith: plannerRef(workflowId) } }, select: { refId: true } });
-    for (const r of refs) if (r.refId) await refundCharge(scope.workspaceId, r.refId);
-    // One more than every charge so far, so a refunded attempt's refId is never reused.
-    runId = (await startPlanner(scope, userId, workflowId, plannerRef(workflowId, refs.length + 1))).id;
+    // Under the workflow's lock, checked again inside it: a second retry at the same moment finds the first's run
+    // going and stops, so it never refunds the first's fresh charge and leaves that run unpaid.
+    runId = await withWorkflowLock(workflowId, async () => {
+      if (await running()) throw new WorkflowError("This workflow is still running", 409);
+      const last = await prisma.agentRun.findFirst({ where: { workflowId, brandId: scope.brandId, agentKey: "planner" }, orderBy: { createdAt: "desc" }, select: { status: true } });
+      if (last && last.status !== "FAILED") throw new WorkflowError("The Planner already planned this workflow", 409);
+      // Every earlier Planner charge belongs to a failed run or a start that died: give back any still held.
+      const refs = await prisma.creditEntry.findMany({ where: { workspaceId: scope.workspaceId, reason: "agent-run:planner", refId: { startsWith: plannerRef(workflowId) } }, select: { refId: true } });
+      for (const r of refs) if (r.refId) await refundCharge(scope.workspaceId, r.refId);
+      // One more than every charge so far, so a refunded attempt's refId is never reused.
+      return (await startPlanner(scope, userId, workflowId, plannerRef(workflowId, refs.length + 1))).id;
+    });
   } else {
     // A retry never skips a review gate: the Brief writer is retried only once the plan was approved (a brief run was
     // started for it), the Creator once the briefs were, Quality once drafts were written.
@@ -299,6 +308,18 @@ export async function retryStage(scope: Scope, userId: string | undefined, workf
   }
   // The status follows from the new run (workflowStatus derives it).
   return { workflow: await workflowStatus(scope, workflowId), runId };
+}
+
+/**
+ * Runs fn holding the workflow's advisory lock (approvals and Planner retries take turns). The lock lives in a
+ * transaction that holds one connection while fn starts a run in its own transactions. fn takes seconds; the
+ * timeout bounds the wait for the lock plus fn, and past it the request fails (the person can click again).
+ */
+function withWorkflowLock<T>(workflowId: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`content-workflow:${workflowId}`}))`;
+    return fn(tx);
+  }, { maxWait: 10_000, timeout: 30_000 });
 }
 
 /** Each review gate: the status it waits in, the agent its approval starts, and the posts it approves. */
@@ -317,8 +338,7 @@ const GATES: Record<WorkflowGate, { waits: "REVIEW_PLAN" | "REVIEW_BRIEFS"; next
  */
 export async function approveStage(scope: Scope, userId: string | undefined, workflowId: string, gate: WorkflowGate): Promise<{ workflow: WorkflowView; runId: string | null; repeated: boolean }> {
   const { waits, next, posts } = GATES[gate];
-  const result = await prisma.$transaction(async (tx) => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`content-workflow:${workflowId}`}))`;
+  const result = await withWorkflowLock(workflowId, async (tx) => {
     const wf = await tx.contentWorkflow.findFirst({ where: { id: workflowId, workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { status: true } });
     if (!wf) throw new WorkflowError("Workflow not found", 404);
     if (wf.status !== waits) {

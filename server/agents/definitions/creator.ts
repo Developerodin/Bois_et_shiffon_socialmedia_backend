@@ -58,7 +58,8 @@ export const creatorAgent: AgentDefinition = {
     const scope = { workspaceId: brand.workspaceId, brandId: brand.brandId };
     const { itemId, chain, round = 0, channels, workflowId } = input as { itemId?: string; chain?: boolean; round?: number; channels?: ContentChannel[]; workflowId?: string }; // parsed by the engine against inputSchema
     if (workflowId) await activeWorkflow(scope, workflowId); // gone or cancelled: nothing to do
-    const onChannels = { ...(channels ? { channel: { in: channels } } : {}), ...(workflowId ? { workflowId } : {}) };
+    // A run without a workflow leaves workflow posts to their workflow (its gates); one post asked for by id is taken.
+    const onChannels = { ...(channels ? { channel: { in: channels } } : {}), ...(workflowId ? { workflowId } : itemId ? {} : { workflowId: null }) };
     const items = await prisma.contentItem.findMany({
       // studio reels are written in the app
       where: { brandId: brand.brandId, status: { in: ["BRIEF_READY", "DRAFT_REVIEW"] }, studio: false, ...onChannels, ...(itemId ? { id: itemId } : {}) },

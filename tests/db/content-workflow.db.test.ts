@@ -15,6 +15,7 @@ import { plannerAgent } from "@/server/agents/definitions/planner";
 import { NothingToDoError } from "@/server/agents/engine";
 import { creditBalance } from "@/server/services/credits";
 import { linkedIds } from "@/server/content/product-checks";
+import { workflowStatus } from "@/server/content/workflow";
 
 /**
  * Content workflows on a real database: the API's checks, idempotency and charge, then the Planner → Brief writer →
@@ -229,6 +230,44 @@ describe("a workflow's posts through the chain", () => {
     expect(await creditBalance(ws)).toBe(balance); // +5 back, −5 again
     const stored = await prisma.contentWorkflow.findUniqueOrThrow({ where: { id: workflow.id } });
     expect(stored.chargeIds).toEqual([`workflow:${workflow.id}:planner`, `workflow:${workflow.id}:planner:2`]);
+  });
+});
+
+describe("review findings", () => {
+  it("a run without a workflow (the phone's Generate calendar, a plain Plan) leaves a workflow's posts at its gate", async () => {
+    const fresh = await prisma.opportunity.create({ data: { workspaceId: ws, brandId: brand, dedupeKey: "gate", title: "Gate idea", summary: "s", angle: "a", channels: [], decision: "RECOMMEND", reason: "r", score: 10 } });
+    const res = await post(request({ ideaIds: [fresh.id], productMode: "catalogue", productIds: [] }));
+    const { workflow } = (await res.json()) as { workflow: View };
+    await plannerAgent.run(ctx(async ({ mock }) => mock), { chain: true, workflowId: workflow.id });
+    await finish(workflow.id);
+    expect(await statusOf(workflow.id)).toBe("REVIEW_PLAN");
+    expect(await prisma.contentItem.count({ where: { brandId: brand, status: "PLANNED", workflowId: null } })).toBe(0);
+    await expect(briefAgent.run(ctx(async ({ mock }) => mock), { chain: true })).rejects.toThrow(NothingToDoError);
+    expect(await prisma.contentItem.count({ where: { workflowId: workflow.id, status: { not: "PLANNED" } } })).toBe(0);
+    expect((await act(workflow.id, { action: "approve", stage: "plan" })).status).toBe(202);
+  });
+
+  it("two Planner retries at once: one starts and is paid, the other is refused and refunds nothing", async () => {
+    const res = await post(request({ ideaIds: undefined, productMode: "none", productIds: [] }));
+    const { workflow } = (await res.json()) as { workflow: View };
+    await prisma.agentRun.updateMany({ where: { workflowId: workflow.id }, data: { status: "FAILED" } });
+    const balance = await creditBalance(ws);
+    const both = await Promise.all([act(workflow.id, { action: "retry", stage: "planner" }), act(workflow.id, { action: "retry", stage: "planner" })]);
+    expect(both.map((r) => r.status).sort()).toEqual([202, 409]);
+    const planners = await prisma.agentRun.findMany({ where: { workflowId: workflow.id, agentKey: "planner" }, orderBy: { createdAt: "asc" } });
+    expect(planners).toHaveLength(2);
+    const live = (planners[1]!.input as { chargeId: string }).chargeId;
+    expect(await prisma.creditEntry.count({ where: { workspaceId: ws, reason: "refund", refId: live } })).toBe(0);
+    expect(await creditBalance(ws)).toBe(balance); // the first charge back, one new charge
+  });
+
+  it("a Planner that found nothing to plan and made no posts needs attention, not done", async () => {
+    const res = await post(request({ ideaIds: undefined, productMode: "none", productIds: [] }));
+    const { workflow } = (await res.json()) as { workflow: View };
+    const run = await prisma.agentRun.findFirstOrThrow({ where: { workflowId: workflow.id } });
+    await prisma.agentRun.update({ where: { id: run.id }, data: { status: "FAILED" } });
+    await prisma.agentEvent.create({ data: { workspaceId: ws, brandId: brand, runId: run.id, agentKey: "planner", level: "INFO", message: "No ideas to plan" } });
+    expect((await workflowStatus({ workspaceId: ws, brandId: brand }, workflow.id)).status).toBe("NEEDS_ATTENTION");
   });
 });
 
