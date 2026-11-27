@@ -21,6 +21,7 @@ vi.mock("@/server/services/publishing", async (orig) => ({ ...(await orig<object
 
 import { POST } from "@/app/api/v1/workspaces/[workspaceId]/brands/[brandId]/content/route";
 import { itemForRequest } from "@/server/stories/service";
+import { NEW_POST_CHANNELS } from "@/shared";
 
 const RID = "6f1c2c1e-6a43-4c1b-9a3e-2f1d5b7c8a90";
 const body = (extra: object = {}) => ({ channel: "INSTAGRAM_POST", goal: "newArrival", product: { title: "Milo", photoKey: "w1/b1/a.jpg" }, ...extra });
@@ -70,7 +71,8 @@ describe("new post requests", () => {
     // A new post's repeat check asks for posts only.
     db.contentItem.findFirst.mockClear();
     await post(body({ requestId: RID }));
-    for (const [args] of db.contentItem.findFirst.mock.calls) expect(args.where.channel).toEqual({ in: ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL"] });
+    // Every channel New post makes (written ones too), so a retry finds its post whatever the channel; never a story.
+    for (const [args] of db.contentItem.findFirst.mock.calls) expect(args.where.channel).toEqual({ in: [...NEW_POST_CHANNELS] });
     expect(db.contentItem.findFirst).toHaveBeenCalled();
   });
 
