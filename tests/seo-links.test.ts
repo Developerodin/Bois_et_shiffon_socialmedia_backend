@@ -6,13 +6,14 @@ import { retryAfterMs } from "@/server/seo/site-crawl";
 const ok = (status: number, redirects = 0) => ({ status, redirects });
 
 describe("classifyLink", () => {
-  it("404, 410 and other 4xx are broken; 401/403 never are; 429 waits", () => {
+  it("404, 410 and other 4xx are broken; 401/403 never are; a first 429 waits, a second is unknown", () => {
     expect(classifyLink(ok(404))).toBe("broken");
     expect(classifyLink(ok(410))).toBe("broken");
     expect(classifyLink(ok(400))).toBe("broken");
     expect(classifyLink(ok(401))).toBe("unknown");
     expect(classifyLink(ok(403))).toBe("unknown");
     expect(classifyLink(ok(429))).toBe("wait");
+    expect(classifyLink(ok(429), true)).toBe("unknown");
   });
 
   it("a 5xx is re-checked once: 503 then 503 is a server error, 503 then 200 is fine", () => {

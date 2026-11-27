@@ -42,7 +42,11 @@ export const seoAgent: AgentDefinition = {
 
     const scope = { workspaceId: brand.workspaceId, brandId: brand.brandId };
     await startSiteCrawl(scope).catch((e: unknown) => ctx.log("WARN", `Link check not started: ${e instanceof Error ? e.message : String(e)}`));
-    const links = await lastCompleteCrawl(scope);
+    // The link check never fails the audit: unreadable, it reports as "none" (no link findings, nothing cleared).
+    const links = await lastCompleteCrawl(scope).catch(async (e: unknown) => {
+      await ctx.log("WARN", `Link check unavailable: ${e instanceof Error ? e.message : String(e)}`);
+      return { reason: "none" as const, running: null };
+    });
     const linked = "crawl" in links ? linkFindings(links.rows) : [];
     if (!("crawl" in links)) await ctx.log("INFO", "No finished link check to report yet; this week's runs in the background");
 

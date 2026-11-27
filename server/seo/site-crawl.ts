@@ -244,7 +244,8 @@ async function crawlRun(job: Job, scope: Scope, deps: Required<Deps>) {
       // The run's own deadline cut the fetch: not the link's fault, left for the next run.
       if (signal.aborted) return "time" as const;
       const outcome = classifyLink(fetched.check, row.outcome === "recheck");
-      if (outcome !== "wait") await saveRow(tx, crawl, row, fetched, outcome, rules, siteHostname, now());
+      // A first 429 waits for the re-checks at the end, as a first 5xx does (the run pauses below).
+      await saveRow(tx, crawl, row, fetched, outcome === "wait" ? "recheck" : outcome, rules, siteHostname, now());
       await sleep(delay);
       return { fetched, outcome };
     }).catch((e: unknown) => {
@@ -270,7 +271,12 @@ async function crawlRun(job: Job, scope: Scope, deps: Required<Deps>) {
     }
   }
 
-  if (stop === "done") return void (await end("COMPLETE", null));
+  if (stop === "done") {
+    // Not one page could be read (home behind a login or bot wall, 404s, time-outs): a "complete" check of nothing
+    // would clear every link task, so it ends STOPPED and is never reported.
+    const read = await prisma.siteCrawlUrl.count({ where: { crawlId: crawl.id, kind: "PAGE", outcome: { in: ["ok", "chain"] } } });
+    return void (await (read ? end("COMPLETE", null) : end("STOPPED", "unreadable")));
+  }
   if (stop === "bot-wall") return void (await end("STOPPED", "bot-wall"));
   if (stop === "budget") pausedUntil = tomorrow(now());
   const runAt = pausedUntil ?? new Date(now().getTime() + NEXT_RUN_MS);

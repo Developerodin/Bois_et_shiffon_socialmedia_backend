@@ -208,7 +208,7 @@ describe("resuming, stopping and pausing", () => {
     expect(m.fetched).toEqual([]);
   });
 
-  it("a 429 with Retry-After pauses the cycle and queues the next run then; the row stays unchecked", async () => {
+  it("a 429 with Retry-After pauses the cycle and queues the next run then; the row waits for the re-checks", async () => {
     m.discovered = [u("/a"), u("/b")];
     m.serve.set(u("/a"), { status: 429, headers: { "retry-after": "120" } });
     const before = Date.now();
@@ -217,8 +217,20 @@ describe("resuming, stopping and pausing", () => {
     expect(c.pausedUntil!.getTime() - before).toBeGreaterThanOrEqual(120_000);
     expect(c.pausedUntil!.getTime() - before).toBeLessThan(130_000);
     expect((await jobs()).at(-1)!.runAt.getTime()).toBe(c.pausedUntil!.getTime());
-    expect((await row(c.id, u("/a"))).checkedAt).toBeNull();
+    expect((await row(c.id, u("/a"))).outcome).toBe("recheck");
     expect(m.fetched.map((f) => f.url)).toEqual([u("/a")]);
+    // The next run: /b first, then /a again; a second 429 is unknown, so one URL can't hold the cycle up.
+    await runSiteCrawl((await jobs()).at(-1)!.payload, { sleep: noSleep });
+    expect(m.fetched.map((f) => f.url)).toEqual([u("/a"), u("/b"), u("/a")]);
+    expect((await row(c.id, u("/a"))).outcome).toBe("unknown");
+    expect((await crawlOf()).status).toBe("COMPLETE");
+  });
+
+  it("a site where not one page could be read ends STOPPED, never a complete check of nothing", async () => {
+    m.serve.set(u("/"), { status: 403 });
+    const c = await cycle();
+    expect(c).toMatchObject({ status: "STOPPED", stopReason: "unreadable", followLinks: true });
+    expect(await lastCompleteCrawl(scope())).toEqual({ reason: "none", running: null });
   });
 
   it("five server errors in a row pause the cycle until tomorrow, the rows waiting for their re-check", async () => {

@@ -14,8 +14,9 @@ export const LINK_FINDING_URLS = 20;
 
 /**
  * One fetch, classified. `rechecking`: the row already answered 5xx once. Returns "recheck" for a first 5xx (tried
- * again at the end of the cycle, so a blip isn't reported) and "wait" for a 429 (the site asks us to slow down: the
- * row stays unchecked and the run stops). 401/403 are never "broken": a login wall or a bot filter, not a missing page.
+ * again at the end of the cycle, so a blip isn't reported) and "wait" for a first 429 (the site asks us to slow down:
+ * the run pauses and the row is tried again at the end, like a 5xx; a second 429 is "unknown", so one URL that always
+ * answers 429 can't hold the cycle up). 401/403 are never "broken": a login wall or a bot filter, not a missing page.
  */
 export function classifyLink(check: LinkCheck, rechecking = false): LinkOutcome | "recheck" | "wait" {
   if ("error" in check) {
@@ -25,7 +26,7 @@ export function classifyLink(check: LinkCheck, rechecking = false): LinkOutcome 
     return "unknown";
   }
   const { status, redirects } = check;
-  if (status === 429) return "wait";
+  if (status === 429) return rechecking ? "unknown" : "wait";
   if (status === 401 || status === 403) return "unknown";
   if (status >= 400 && status < 500) return "broken";
   if (status >= 500) return rechecking ? "server-error" : "recheck";

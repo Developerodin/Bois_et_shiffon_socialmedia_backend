@@ -18,7 +18,7 @@ vi.mock("undici", async (orig) => {
   return { ...actual, fetch: (url: URL | string, init?: unknown) => (m.fetch ?? (actual.fetch as never as NonNullable<typeof m.fetch>))(url, init) };
 });
 
-import { CrawlError, crawlSite, extractPage, fetchRobots, jsonLdNodes, pageLinks, pinnedLookup, ROBOTS_AGENT, robotsAllows, robotsGroups, robotsRules, robotsSitemaps, safeFetch, safeFetchBytes, sameSite } from "@/server/research/crawl";
+import { CrawlError, crawlSite, extractPage, fetchRobots, jsonLdNodes, pageLinks, pinnedLookup, ROBOTS_AGENT, robotsAllows, robotsGroups, robotsRules, robotsSitemaps, safeFetch, safeFetchBytes, sameSite, USER_AGENT } from "@/server/research/crawl";
 
 afterEach(() => {
   m.fetch = null;
@@ -177,12 +177,19 @@ describe("safeFetchBytes redirects", () => {
     };
   };
 
-  it("says how many hops it followed", async () => {
+  it("says how many hops it followed, sending our user agent on every hop", async () => {
     hops(0);
     expect((await safeFetchBytes("https://shop.example/", "*/*", 10)).redirects).toBe(0);
     hops(2);
+    const agents: string[] = [];
+    const follow = m.fetch!;
+    m.fetch = async (url, init) => {
+      agents.push((init as { headers: Record<string, string> }).headers["user-agent"]!);
+      return follow(url, init);
+    };
     const res = await safeFetchBytes("https://shop.example/", "*/*", 10);
     expect([res.redirects, res.url.pathname, res.status]).toEqual([2, "/2", 200]);
+    expect(agents).toEqual([USER_AGENT, USER_AGENT, USER_AGENT]);
   });
 
   it("throws Too many redirects past 4 hops, and refuses another site with sameSite", async () => {
@@ -214,6 +221,12 @@ describe("pageLinks", () => {
   it("keeps www. and the bare host with sameSite; drops other hosts, non-http, fragments and queries", () => {
     const html = '<a href="https://www.shop.example/x?y=1#z">a</a><a href="https://other.example/">b</a><a href="mailto:a@b.c">c</a><a href="javascript:void(0)">d</a><a href="rel">e</a><a href="#top">f</a>';
     expect(pageLinks(html, base, site)).toEqual(["https://www.shop.example/x", "https://shop.example/a/rel"]);
+  });
+
+  it("stays fast on a page of unclosed <a tags", () => {
+    const t = Date.now();
+    expect(pageLinks("<a ".repeat(1_000_000), base, site)).toEqual([]);
+    expect(Date.now() - t).toBeLessThan(2_000);
   });
 
   it("extractPage keeps its same-origin rule (www. differs, files skipped)", () => {

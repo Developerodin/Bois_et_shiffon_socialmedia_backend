@@ -302,7 +302,8 @@ const TEMPLATED = /\{\{|\}\}|\$\{|\{%|%7B%7B|%7D%7D|\$%7B|%7B%25/i;
  */
 export function pageLinks(html: string, base: URL, keep: (u: URL) => boolean): string[] {
   const links = new Set<string>();
-  for (const m of withoutBlocks(html, "script|template").matchAll(/<a[^>]+href=["']([^"'#]+)/gi)) {
+  // A tag can't contain "<": a run of unclosed "<a" (hostile HTML) costs one step each, not a scan to the end.
+  for (const m of withoutBlocks(html, "script|template").matchAll(/<a[^<>]+href=["']([^"'#]+)/gi)) {
     if (TEMPLATED.test(m[1])) continue;
     try {
       const u = new URL(m[1], base);

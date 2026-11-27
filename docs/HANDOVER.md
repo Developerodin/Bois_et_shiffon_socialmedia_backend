@@ -1881,8 +1881,12 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
   day (`site-crawl-brand:<brandId>:<day>`); ≥ 1 s apart (Crawl-delay up to 10 s); runs of ≤ 240 s, the next queued a
   minute later; `catalog.pages` and `seo.links` share one queue slot (`PAGES_RUNNING_MAX`). A refused budget hit rolls
   back, so it costs the reader nothing. 429, 503 with Retry-After or 5 server errors in a row pause the cycle
-  (Retry-After, ≤ a day, else 00:10 UTC tomorrow); robots.txt unreadable or a bot wall (16 of the last 20 answers
-  401/403) stop it with nothing reported; a cycle not done in 6 days ends PARTIAL; a changed website abandons it.
+  (Retry-After, ≤ a day, else 00:10 UTC tomorrow); a URL's first 429 or 5xx is tried again at the end of the cycle
+  (a second 429 is "unknown"). robots.txt unreadable, a bot wall (16 of the last 20 answers 401/403) or not one page
+  readable (`unreadable`) stop it with nothing reported; a cycle not done in 6 days ends PARTIAL; a changed website
+  abandons it. Not enforced weekly: any SEO agent run with no RUNNING cycle starts one (bounded by the budgets).
+  Ceiling: the five-in-a-row pause counts re-checks too, so a site with ~30 persistently failing targets keeps pausing
+  a day per five and may end PARTIAL.
   A lost chain (no write for a day, not paused) is re-queued by the next weekly start.
   Live check still to do (plan's Verification): run the SEO agent on B&C, watch the rows fill and the bucket stay
   ≤ 1,000 from the crawl, then spot-check three "broken" targets by hand.
