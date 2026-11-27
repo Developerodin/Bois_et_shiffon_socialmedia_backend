@@ -14,13 +14,20 @@ import { OPEN_TASK_STATUSES, safeHttpUrl, type TaskDto } from "@/shared";
 
 /**
  * Findings a report may not have measured, whose absence says nothing: PageSpeed's (`pagespeed-*`) when PageSpeed
- * didn't run (metrics.pageSpeed null), and GEO's "not-recommended" when no real AI answered unbranded questions
- * (metrics.visibilityMeasured not true; reports from before it was stored count as not measured).
+ * didn't run (metrics.pageSpeed null), GEO's "not-recommended" when no real AI answered unbranded questions
+ * (metrics.visibilityMeasured not true; reports from before it was stored count as not measured), and the link check's
+ * (`links-*`) unless the report read a complete, fresh link-check cycle of the current site (metrics.links.complete
+ * true; a PARTIAL cycle's findings are reported but clear nothing).
  */
 function notMeasured(metrics: Prisma.JsonValue, findingId: string) {
-  const m = metrics as { pageSpeed?: unknown; visibilityMeasured?: unknown } | null;
-  return (findingId.startsWith("pagespeed-") && m?.pageSpeed == null) || (findingId === "not-recommended" && m?.visibilityMeasured !== true);
+  const m = metrics as { pageSpeed?: unknown; visibilityMeasured?: unknown; links?: { complete?: unknown } | null } | null;
+  return (findingId.startsWith("pagespeed-") && m?.pageSpeed == null)
+    || (findingId === "not-recommended" && m?.visibilityMeasured !== true)
+    || (isLinkFinding(findingId) && m?.links?.complete !== true);
 }
+
+/** The link check's findings (server/seo/links.ts): their urls are link targets, never in pagesChecked. */
+const isLinkFinding = (id: string) => id.startsWith("links-");
 
 /** Runs after each SEO or GEO report is saved: closes the tasks of findings that audit no longer reports. */
 export const FINDING_CLEAR_JOB = "tasks.clear-findings";
@@ -116,7 +123,7 @@ const ReportPayload = z.object({ workspaceId: z.string().min(1), brandId: z.stri
 
 /**
  * FINDING_CLEAR_JOB: open tasks of the report's kind whose finding (one isAutoClearable) the report no longer lists, and whose
- * pages it re-read (all of `findingUrls` in metrics.pagesChecked; a site-wide finding needs none), move to DONE with a
+ * pages it re-read (all of `findingUrls` in metrics.pagesChecked; a site-wide or links-* finding needs none), move to DONE with a
  * SYSTEM comment and an audit event, in one transaction. Each task is locked (the lock runTaskAction and patchTask
  * take, in id order) and its status and reviewer read again under the lock, so a task moved to review since the first
  * read is left alone and told the right thing. Tasks in review, and tasks with a reviewer, get the comment only: a
@@ -135,7 +142,10 @@ export async function clearFindings(payload: unknown): Promise<void> {
     where: { workspaceId, brandId, findingKind: report.kind, findingId: { not: null }, status: { in: OPEN } },
     select: { id: true, title: true, status: true, reviewerId: true, findingId: true, findingUrls: true },
   });
-  const cleared = open.filter((t) => isAutoClearable(t.findingId!) && !notMeasured(report.metrics, t.findingId!) && !present.has(t.findingId!) && t.findingUrls.every((u) => pages.has(u)));
+  // A measured links-* finding clears without the pages rule: its findingUrls are link targets, which the whole-site
+  // link check covered, not pages the audit read.
+  const cleared = open.filter((t) => isAutoClearable(t.findingId!) && !notMeasured(report.metrics, t.findingId!) && !present.has(t.findingId!)
+    && (isLinkFinding(t.findingId!) || t.findingUrls.every((u) => pages.has(u))));
   if (!cleared.length) return;
   const day = report.createdAt.toISOString().slice(0, 10);
   const titleOf = new Map(cleared.map((t) => [t.id, t.title]));

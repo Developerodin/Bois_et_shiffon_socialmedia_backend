@@ -243,6 +243,7 @@ model Brand {
   shopOrderLines  ShopOrderLine[]
   searchDays      SearchDay[]
   searchQueryDays SearchQueryDay[]
+  siteCrawls      SiteCrawl[]
   adDays          AdDay[]
   adBudgets       AdBudget[]
   adAlerts        AdAlert[]
@@ -1883,6 +1884,83 @@ model SearchQueryDay {
   @@unique([brandId, siteUrl, dimension, day, query, page])
   /// housekeeping's delete
   @@index([day])
+}
+
+enum SiteCrawlStatus {
+  RUNNING
+  COMPLETE
+  /// robots.txt unreadable or disallows us, or a bot wall: nothing reported
+  STOPPED
+  /// ran out of days (CYCLE_MAX_DAYS): its findings are reported, nothing is cleared
+  PARTIAL
+  /// websiteUrl changed: never reported
+  ABANDONED
+}
+
+enum SiteCrawlUrlKind {
+  /// read in full for its links (from the sitemap, or link-following when there is none)
+  PAGE
+  /// a same-site link target that isn't a PAGE: 1-byte GET
+  TARGET
+}
+
+/// One weekly full-site link check (server/seo/site-crawl.ts). Resumes from its rows; the job payload names it (and
+/// its run number) only. Kept: the brand's latest COMPLETE/PARTIAL cycle and the RUNNING one; older ones deleted when
+/// a cycle starts.
+model SiteCrawl {
+  id                String          @id @default(cuid())
+  workspaceId       String
+  brandId           String
+  /// websiteUrl's origin when the cycle started; a run that finds another site stops the cycle
+  origin            String
+  status            SiteCrawlStatus @default(RUNNING)
+  startedOn         DateTime        @db.Date
+  discoveryComplete Boolean         @default(false)
+  /// true when no sitemap was found and pages come from following links from the home page
+  followLinks       Boolean         @default(false)
+  /// next run not before (Retry-After, or tomorrow after a budget stop)
+  pausedUntil       DateTime?
+  /// runs queued so far: the next job's key (seo-links:<crawlId>:<runNo>) and its payload's runNo
+  runNo             Int             @default(0)
+  stopReason        String?
+  pages             Int             @default(0)
+  targets           Int             @default(0)
+  checked           Int             @default(0)
+  /// links seen past TARGETS_MAX (or LINK_FOLLOW_MAX) and not stored: reported as unchecked (a link on two pages counts twice)
+  overflow          Int             @default(0)
+  finishedAt        DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  brand Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  urls  SiteCrawlUrl[]
+
+  @@index([brandId, status, finishedAt])
+}
+
+/// A URL of a SiteCrawl: a page read for its links, or a link target checked. ≤ ~4,000 rows a cycle.
+model SiteCrawlUrl {
+  id         String           @id @default(cuid())
+  crawlId    String
+  /// ≤ 2,000 chars (URL-encoded, so ASCII: inside the btree limit)
+  url        String
+  kind       SiteCrawlUrlKind
+  /// null = not checked yet
+  checkedAt  DateTime?
+  status     Int?
+  redirects  Int              @default(0)
+  /// ok | broken | server-error | chain | loop | skipped | unknown; "recheck" = 5xx waiting for its second try
+  outcome    String?
+  /// pages of this cycle linking here, and up to 5 of them (for the finding's "on N pages, e.g. …")
+  carryCount Int              @default(0)
+  /// clicks from the home page (link-following only; 0 for sitemap pages)
+  depth      Int              @default(0)
+  sources    String[]
+
+  crawl SiteCrawl @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  @@unique([crawlId, url])
+  @@index([crawlId, checkedAt, kind, carryCount])
 }
 
 /// GOOGLE is added in its own migration (20261126120000): Postgres can't use a value added by ALTER TYPE … ADD VALUE

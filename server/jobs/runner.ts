@@ -34,6 +34,7 @@ import "@/server/reels/presenters"; // registers its asset kind
 import { QUERY_RETENTION_DAYS } from "@/server/data/search-sync"; // also registers the SEARCH_CONSOLE sync
 import { purgeOldRecordings } from "@/server/reels/recordings";
 import { clearFindings, FINDING_CLEAR_JOB, FINDING_TASKS_JOB, tasksFromReport } from "@/server/seo/finding-tasks";
+import { runSeoLinks, SEO_LINKS_JOB } from "@/server/seo/site-crawl";
 import { purgeStaleUploads } from "@/server/stories/uploads";
 import { onStoryRenderFailure, runStoryRender, STORY_RENDER_JOB } from "@/server/stories/service";
 import { onVoiceDeleteFailure, reclaimAbandonedClones, runVoiceDelete, VOICE_DELETE_JOB } from "@/server/reels/clones";
@@ -68,6 +69,7 @@ const HANDLERS: Record<string, Handler> = {
   [PUBLISH_JOB]: { run: executePublication, onFailure: onPublishJobLost },
   [REEL_ASSET_JOB]: { run: runAsset, onFailure: onAssetFailure },
   [REEL_RENDER_JOB]: { run: advanceRender, onFailure: failRender },
+  [SEO_LINKS_JOB]: { run: runSeoLinks },
   [STORY_READ_JOB]: { run: runStoryRead },
   [STORY_RENDER_JOB]: { run: runStoryRender, onFailure: onStoryRenderFailure },
   [VOICE_DELETE_JOB]: { run: runVoiceDelete, onFailure: onVoiceDeleteFailure },
