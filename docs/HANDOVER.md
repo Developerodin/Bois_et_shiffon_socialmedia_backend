@@ -2047,7 +2047,7 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
 - The worktree's server `node_modules` is a folder of junctions plus private Prisma copies; remove the junctions with
   `cmd /c rmdir` before deleting the worktree. Its test DB is `sma_test_seo` in the `sma-testdb` container.
 
-## CRM Phase A (branch `crm-phase-a`, 2026-11-27, merged to main the same day; migrations not yet applied to the dev DB)
+## CRM Phase A (branch `crm-phase-a`, 2026-11-27, merged to main and its 6 migrations applied to the dev DB the same day)
 
 The plan is `docs/superpowers/plans/2026-11-27-crm.md`. It records the owner's answers O1–O6, the four-lens plan
 review, the "As built" notes and the branch-review fixes. The server, web and mobile worktrees are in `../sma-crm`.
