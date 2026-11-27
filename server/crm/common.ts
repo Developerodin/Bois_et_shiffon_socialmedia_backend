@@ -45,11 +45,13 @@ export async function checkOwner(db: Db, s: { workspaceId: string; brandId: stri
  * Every id a write links to is this brand's (Security 3 of the plan review): a missing or another brand's id is 404,
  * the same answer for both.
  */
-export async function checkCrmLinks(db: Db, s: { workspaceId: string; brandId: string }, ids: { customerId?: string | null; companyId?: string | null }) {
+export async function checkCrmLinks(db: Db, s: { workspaceId: string; brandId: string }, ids: { customerId?: string | null; companyId?: string | null; conversationId?: string | null; dealId?: string | null }) {
   const w = brandWhere(s);
   const select = { id: true } as const;
   if (ids.customerId && !(await db.customer.findFirst({ where: { id: ids.customerId, ...w }, select }))) throw notFound("Customer");
   if (ids.companyId && !(await db.company.findFirst({ where: { id: ids.companyId, ...w }, select }))) throw notFound("Company");
+  if (ids.conversationId && !(await db.conversation.findFirst({ where: { id: ids.conversationId, ...w }, select }))) throw notFound("Conversation");
+  if (ids.dealId && !(await db.deal.findFirst({ where: { id: ids.dealId, ...w }, select }))) throw notFound("Deal");
 }
 
 /** Bumps the customer's activity (the retention hint) inside the caller's transaction; never moves it back. */

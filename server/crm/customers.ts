@@ -3,6 +3,7 @@ import { z } from "zod";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { brandWhere, changed, checkCrmLinks, checkOwner, crmAudit, type CrmScope, type Db, dayOf, dayString, invalid, notFound } from "@/server/crm/common";
 import { customerConversations } from "@/server/crm/conversations";
+import { customerDeals } from "@/server/crm/deals";
 import { normaliseIdentity } from "@/server/crm/identity";
 import { prisma } from "@/server/db/prisma";
 import { quoteTotals, quoteDiscount, quoteLines, loadQuote } from "@/server/quotes/quotes";
@@ -124,7 +125,7 @@ export async function getCustomer(s: CrmScope, customerId: string): Promise<Cust
     identities: c.identities.map((i) => ({ id: i.id, kind: i.kind, value: i.value })),
     notes: c.notes.map((n) => toNoteDto(n, s.userId)),
     quotes: c.quotes.map((q) => ({ id: q.id, number: quoteNumber(q.number), status: q.status, total: quoteTotals(quoteLines(q.lines), quoteDiscount(q.discount), q.currency).total, currency: q.currency, updatedAt: q.updatedAt.toISOString() })),
-    deals: [],
+    deals: await customerDeals(s, c.id),
     conversations,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),

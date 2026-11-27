@@ -1,5 +1,6 @@
 import type { Quote, ShopifyWriteAction } from "@prisma/client";
 import { AccessDeniedError } from "@/server/auth/errors";
+import { advanceDealForQuote } from "@/server/crm/deal-moves";
 import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { closeQuoteReminders, loadQuote, minorDigits, quoteDiscount, quoteLines, quoteTotals, toMinor, toQuoteDto, type QuoteScope } from "@/server/quotes/quotes";
@@ -82,6 +83,7 @@ export async function completedInShopify(scope: QuoteScope, q: Quote, adapter: S
     });
     if (!count) return;
     if (q.status === "SENT") await closeQuoteReminders(tx, q, "The customer paid: the quote is accepted");
+    await advanceDealForQuote(tx, q, "accepted", scope.userId);
     await tx.auditEvent.create({ data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "quote.accepted", entityType: "Quote", entityId: q.id, metadata: { from: q.status, orderId, source: "update-refused" } } });
   });
   return true;
@@ -225,6 +227,7 @@ export async function confirmInvoice(scope: QuoteScope, quoteId: string, email: 
           where: { ...where, status: { in: ["CREATED", "SENT"] } },
           data: { status: "SENT", sentAt, validUntil, sentById: write.actorUserId, invoiceUrl: result.invoiceUrl },
         });
+        await advanceDealForQuote(tx, q, "sent", write.actorUserId);
       },
     },
     adapter,

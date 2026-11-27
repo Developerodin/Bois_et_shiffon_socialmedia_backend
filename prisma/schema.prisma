@@ -249,6 +249,7 @@ model Brand {
   blogArticles         BlogArticle[]
   quotes               Quote[]
   quoteVersions        QuoteVersion[]
+  deals                Deal[]
   conversations        Conversation[]
   conversationMessages ConversationMessage[]
   companies            Company[]
@@ -2088,6 +2089,8 @@ model Quote {
   customerId       String?
   /// the conversation it came from (plan 2026-11-27-crm)
   conversationId   String?
+  /// the pipeline deal it belongs to: its sends and acceptance move the deal forward (server/crm/deals.ts)
+  dealId           String?
   /// the shop's currency
   currency         String
   /// QuoteLine[] snapshot (shared/quotes.ts): title, variant and unit price frozen when added; <= 100
@@ -2121,6 +2124,7 @@ model Quote {
 
   brand        Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   versions     QuoteVersion[]
+  deal         Deal?          @relation(fields: [dealId], references: [id], onDelete: SetNull)
   conversation Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
   customer     Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
@@ -2128,6 +2132,7 @@ model Quote {
   @@index([brandId, status, updatedAt])
   @@index([customerId])
   @@index([conversationId])
+  @@index([dealId])
 }
 
 /// A quote as it was before an edit or a revise (plan 2026-11-27-crm, Decision 10). No contact name or email: they stay
@@ -2178,6 +2183,7 @@ model Company {
 
   brand     Brand      @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   customers Customer[]
+  deals     Deal[]
 
   @@index([brandId, name])
   @@index([updatedAt])
@@ -2220,6 +2226,7 @@ model Customer {
   notes         CustomerNote[]
   quotes        Quote[]
   conversations Conversation[]
+  deals         Deal[]
 
   @@index([brandId, lastActivityAt(sort: Desc), id])
   @@index([brandId, ownerId])
@@ -2326,6 +2333,7 @@ model Conversation {
   customer Customer?             @relation(fields: [customerId], references: [id], onDelete: SetNull)
   messages ConversationMessage[]
   quotes   Quote[]
+  deals    Deal[]
 
   @@unique([connectionId, externalThreadId])
   @@index([brandId, closedAt, lastMessageAt(sort: Desc), id])
@@ -2362,4 +2370,56 @@ model ConversationMessage {
   @@unique([conversationId, externalId])
   @@index([conversationId, sentAt])
   @@index([sentAt])
+}
+
+/// O2 (owner, 2026-11-27): New → Contacted → Proposal → Negotiation → Won / Lost.
+enum DealStage {
+  NEW
+  CONTACTED
+  PROPOSAL
+  NEGOTIATION
+  WON
+  LOST
+}
+
+/// An enquiry or sales opportunity on the pipeline (plan 2026-11-27-crm, Task A7). Quotes move it forward only
+/// (server/crm/deals.ts advanceDealForQuote). Not "Opportunity": that name is content ideas.
+model Deal {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  brandId        String
+  stage          DealStage @default(NEW)
+  /// <= 200; the form warns against personal data; replaced on erasure
+  title          String
+  customerId     String?
+  companyId      String?
+  conversationId String?
+  value          Decimal?  @db.Decimal(14, 2)
+  /// ISO 4217, required with value; totals never mix currencies
+  currency       String?
+  /// a member holding crm.manage
+  ownerId        String?
+  nextAction     String?
+  nextActionDue  DateTime? @db.Date
+  /// DealCloseReason (shared/crm.ts) when WON or LOST
+  closedReason   String?
+  /// <= 500
+  closedNote     String?
+  stageChangedAt DateTime  @default(now())
+  closedAt       DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  brand        Brand         @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  company      Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  quotes       Quote[]
+
+  @@index([brandId, stage, updatedAt])
+  @@index([brandId, ownerId])
+  @@index([customerId, updatedAt])
+  @@index([companyId])
+  @@index([conversationId])
+  @@index([updatedAt])
 }

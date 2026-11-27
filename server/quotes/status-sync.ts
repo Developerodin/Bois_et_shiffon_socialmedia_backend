@@ -1,4 +1,5 @@
 import type { Quote } from "@prisma/client";
+import { advanceDealForQuote } from "@/server/crm/deal-moves";
 import { addDays, brandTimeZone, registerSync, type SyncOutcome, zoneToday } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { closeQuoteReminders, reminderKey } from "@/server/quotes/quotes";
@@ -50,6 +51,8 @@ async function settle(scope: Scope, q: Quote, status: "EXPIRED" | "ACCEPTED" | "
     const { count } = await tx.quote.updateMany({ where: { id: q.id, workspaceId: scope.workspaceId, brandId: scope.brandId, status: q.status }, data: { status, ...(orderId ? { orderId } : {}), ...(note ? { internalNote: note } : {}) } });
     if (!count) return false;
     if (q.status === "SENT") await closeQuoteReminders(tx, q, why);
+    // Paid (even after being closed here): the deal is won unless a person already closed it (then lostButPaid shows).
+    if (status === "ACCEPTED") await advanceDealForQuote(tx, q, "accepted");
     await tx.auditEvent.create({ data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: null, action: `quote.${status.toLowerCase()}`, entityType: "Quote", entityId: q.id, metadata: { from: q.status, orderId, ...(late ? { late: true } : {}) } } });
     return true;
   }, TX);

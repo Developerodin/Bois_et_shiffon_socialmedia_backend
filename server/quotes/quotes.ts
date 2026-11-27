@@ -3,6 +3,7 @@ import type { Prisma, Quote, QuoteStatus } from "@prisma/client";
 import { z } from "zod";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { prisma } from "@/server/db/prisma";
+import { advanceDealForQuote } from "@/server/crm/deal-moves";
 import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
 import { PublishingError, TX } from "@/server/services/publishing";
 import { writeInFlight } from "@/server/shopify/writes";
@@ -111,6 +112,7 @@ export function toQuoteDto(q: Quote): QuoteDto {
     invoiceUrl: q.invoiceUrl,
     sentAt: q.sentAt?.toISOString() ?? null,
     customerId: q.customerId,
+    dealId: q.dealId,
     declinedReason: q.declinedReason,
     createdById: q.createdById,
     createdAt: q.createdAt.toISOString(),
@@ -314,6 +316,7 @@ export async function quoteAction(scope: QuoteScope, id: string, input: z.infer<
       // The version the customer saw, marked sent (an edit after this snapshots the same version again: skipped).
       await snapshotVersion(tx, scope, q, true);
       await closeQuoteReminders(tx, q, "The quote is being revised");
+      await advanceDealForQuote(tx, q, "revised", scope.userId);
       await audit(tx, scope, "quote.revised", id, { version: q.version, to });
     }, TX);
   } else if (input.action === "decline") {
@@ -338,6 +341,7 @@ export async function quoteAction(scope: QuoteScope, id: string, input: z.infer<
       const { count } = await tx.quote.updateMany({ where: { ...where, status: q.status, shopifyId: null }, data: { status: "SENT", sentAt, validUntil, sentById: scope.userId } });
       if (!count) throw changed();
       await audit(tx, scope, "quote.marked-sent", id, { version: q.version });
+      await advanceDealForQuote(tx, q, "sent", scope.userId);
     }, TX);
   } else if (input.action === "markAccepted") {
     if (q.shopifyId) throw inShopify();
@@ -347,6 +351,7 @@ export async function quoteAction(scope: QuoteScope, id: string, input: z.infer<
       if (!count) throw changed();
       if (q.status === "SENT") await closeQuoteReminders(tx, q, "The customer accepted the quote");
       await audit(tx, scope, "quote.marked-accepted", id, { from: q.status });
+      await advanceDealForQuote(tx, q, "accepted", scope.userId);
     }, TX);
   } else {
     const dto = toQuoteDto(q);
