@@ -69,7 +69,9 @@ const IMAGES: Record<ContentChannel, [number, number]> = {
   X_POST: [0, 1],
 };
 const TEXT_LIMIT: Partial<Record<ContentChannel, number>> = CHANNEL_TEXT_MAX;
-const LIVE: Prisma.EnumPublicationStatusFilter = { in: ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PENDING_VERIFY", "PARTIAL"] };
+/** An attempt that is scheduled, going out or out (the post's account is taken). */
+export const LIVE_STATUSES = ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PENDING_VERIFY", "PARTIAL"] as const;
+const LIVE: Prisma.EnumPublicationStatusFilter = { in: [...LIVE_STATUSES] };
 
 export function publishRequirements(channel: ContentChannel) {
   const [minImages, maxImages] = IMAGES[channel];
@@ -294,6 +296,27 @@ export async function setOwner(scope: { workspaceId: string; brandId: string; us
     await tx.contentItem.update({ where: { id: item.id }, data: { ownerId: userId } });
     await tx.auditEvent.create({
       data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "content.owner", entityType: "ContentItem", entityId: item.id, metadata: { from: item.ownerId, to: userId } },
+    });
+  }, TX);
+}
+
+/**
+ * Plan (or clear, null) the board a Pinterest Pin goes to, ahead of scheduling. Anyone who can edit the post can; the
+ * board comes from the boards the post view lists (GET content/[id]). Its name is stored as given, so cards never call
+ * Pinterest: the server can't check it without a Pinterest call, and a stale or wrong name only labels the card (the
+ * board actually used is the one chosen when scheduling, which moves the plan to it).
+ */
+export async function setPlannedBoard(scope: { workspaceId: string; brandId: string; userId: string }, itemId: string, board: { id: string; name: string } | null) {
+  await prisma.$transaction(async (tx) => {
+    await lock(tx, itemId);
+    const item = await tx.contentItem.findFirst({ where: { id: itemId, workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { id: true, channel: true, status: true, plannedBoardId: true, plannedBoardName: true } });
+    if (!item) throw new PublishingError("Post not found", 404);
+    if (item.channel !== "PINTEREST_PIN") throw new PublishingError("Only a Pinterest Pin has a board", 400, "board.notPin");
+    if (!EDITABLE.includes(item.status)) throw new PublishingError(item.status === "SCHEDULED" ? "Cancel the schedule first to change the board." : "This post can't be changed any more.", 409);
+    if (item.plannedBoardId === (board?.id ?? null) && item.plannedBoardName === (board?.name ?? null)) return;
+    await tx.contentItem.update({ where: { id: item.id }, data: { plannedBoardId: board?.id ?? null, plannedBoardName: board?.name ?? null } });
+    await tx.auditEvent.create({
+      data: { workspaceId: scope.workspaceId, brandId: scope.brandId, actorUserId: scope.userId, action: "content.board", entityType: "ContentItem", entityId: item.id, metadata: { from: item.plannedBoardId, to: board?.id ?? null } },
     });
   }, TX);
 }
@@ -529,6 +552,7 @@ export async function schedulePublication(input: {
   version: number;
   connectionId: string;
   boardId?: string;
+  boardName?: string; // the chosen board's name as listed, kept as the post's planned board
   imageUrl?: string; // a public link (one-image channels)
   imageLinks?: string[];
   mediaKeys?: string[]; // files uploaded to this brand's media storage
@@ -601,8 +625,11 @@ export async function schedulePublication(input: {
         target, runAt, createdByUserId: input.userId,
       },
     });
-    // Scheduling a story ends its Post by hand.
-    await tx.contentItem.update({ where: { id: item.id }, data: { status: "SCHEDULED", scheduledFor: runAt, ...(story ? { byHand: false } : {}) } });
+    // Scheduling a story ends its Post by hand. A pin scheduled on another board than planned takes that board as its
+    // plan, so its card names the board it goes to (no name given, e.g. an older app: the plan is cleared, not left wrong).
+    const boardName = input.boardName?.trim() || null;
+    const replan = req.needsBoard && input.boardId !== item.plannedBoardId ? { plannedBoardId: boardName ? input.boardId : null, plannedBoardName: boardName } : {};
+    await tx.contentItem.update({ where: { id: item.id }, data: { status: "SCHEDULED", scheduledFor: runAt, ...(story ? { byHand: false } : {}), ...replan } });
     await enqueueJob({ type: PUBLISH_JOB, workspaceId: input.workspaceId, brandId: input.brandId, payload: { attemptId: a.id }, runAt, maxAttempts: 1, idempotencyKey: `publish:${a.id}` }, tx);
     return a;
   }, TX);
@@ -1083,6 +1110,8 @@ export async function releaseState(scope: { workspaceId: string; brandId: string
     latestVersion: latest?.version ?? null,
     byHand: item.byHand,
     postUrl: item.postUrl,
+    // A Pinterest Pin's planned board (the schedule step starts on it); null when none is planned or for other channels.
+    plannedBoard: item.plannedBoardId && item.plannedBoardName ? { id: item.plannedBoardId, name: item.plannedBoardName } : null,
     scheduledFor: item.scheduledFor,
     approvedVersionId: approval?.contentVersionId ?? null,
     approvalValid: Boolean(approval),

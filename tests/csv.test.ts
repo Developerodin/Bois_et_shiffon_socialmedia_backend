@@ -81,6 +81,35 @@ describe("GET /content/export", () => {
   });
 });
 
+describe("GET /content/export?channel=", () => {
+  const where = () => (m.contentItem.findMany.mock.calls[0] as unknown as [{ where: { channel?: unknown } }])[0].where;
+  it("keeps one channel and names it in the file", async () => {
+    const res = await call("?channel=FACEBOOK_POST");
+    expect(res.status).toBe(200);
+    expect(where().channel).toEqual({ in: ["FACEBOOK_POST"] });
+    expect(res.headers.get("Content-Disposition")).toMatch(/calendar-facebook-post-\d{4}-\d{2}-\d{2}\.csv/);
+    expect((m.auditEvent.create.mock.calls[0] as unknown as [{ data: { metadata: { channel?: string } } }])[0].data.metadata.channel).toBe("FACEBOOK_POST");
+  });
+  it("takes the meta and instagram groups", async () => {
+    await call("?channel=meta");
+    expect(where().channel).toEqual({ in: ["FACEBOOK_POST", "INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "INSTAGRAM_REEL", "INSTAGRAM_STORY"] });
+    vi.clearAllMocks();
+    await call("?channel=instagram");
+    expect(where().channel).toEqual({ in: ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "INSTAGRAM_REEL", "INSTAGRAM_STORY"] });
+  });
+  it("without a channel exports every channel", async () => {
+    const res = await call();
+    expect(where().channel).toBeUndefined();
+    expect(res.headers.get("Content-Disposition")).toMatch(/calendar-\d{4}-\d{2}-\d{2}\.csv/);
+  });
+  it.each(["TIKTOK", "facebook_post", "", "constructor", "toString"])("refuses an unknown channel %j before counting an export", async (v) => {
+    const res = await call(`?channel=${v}`);
+    expect(res.status).toBe(400);
+    expect(m.hit).not.toHaveBeenCalled();
+    expect(m.contentItem.findMany).not.toHaveBeenCalled();
+  });
+});
+
 describe("CSV owner names", () => {
   it("give a nameless owner's email local part only to people who manage members", async () => {
     m.perms = new Set(["content.download", "project.members.manage"]);
