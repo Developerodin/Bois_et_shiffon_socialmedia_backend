@@ -122,11 +122,24 @@ function checkMoney(value: string | null | undefined, currency: string | null | 
   if (value && !currency) throw invalid("Give the deal's currency with its value", "crm.currency");
 }
 
+/**
+ * A deal's conversation is one of its customer's: a linked conversation whose customer isn't the deal's is refused.
+ * A conversation with no customer (none today: a logged one always has one) can be linked to any deal.
+ * A conversation moved to another customer afterwards keeps its deal links; the check runs only when this deal's link
+ * or customer changes, so an unrelated edit of such a deal still saves.
+ */
+async function checkConversationCustomer(db: Db, conversationId: string | null, customerId: string | null) {
+  if (!conversationId) return;
+  const c = await db.conversation.findFirst({ where: { id: conversationId }, select: { customerId: true } });
+  if (c?.customerId && c.customerId !== customerId) throw invalid("The deal's conversation belongs to another customer: pick one of its customer's conversations, or remove the link", "crm.conversationCustomer");
+}
+
 export async function createDeal(s: CrmScope, input: z.infer<typeof DealCreate>) {
   checkMoney(input.value, input.currency);
   if (input.conversationId && !s.perms.has("inbox.read")) throw invalid("Linking a conversation needs access to customer messages", "crm.needsInbox");
   const d = await prisma.$transaction(async (tx) => {
     await checkCrmLinks(tx, s, { customerId: input.customerId, companyId: input.companyId, conversationId: input.conversationId });
+    await checkConversationCustomer(tx, input.conversationId ?? null, input.customerId ?? null);
     await checkOwner(tx, s, input.ownerId, "crm.manage");
     const row = await tx.deal.create({
       data: {
@@ -144,12 +157,16 @@ export async function createDeal(s: CrmScope, input: z.infer<typeof DealCreate>)
 /** Field edits and stage moves on the `updatedAt` read. Lost needs a reason (the reasons are why a deal was lost; a win by hand has none); reopening clears it. */
 export async function updateDeal(s: CrmScope, dealId: string, patch: z.infer<typeof DealPatch>, now = new Date()) {
   const { updatedAt, stage, closedReason, closedNote, ...rest } = patch;
-  if (rest.conversationId && !s.perms.has("inbox.read")) throw invalid("Linking a conversation needs access to customer messages", "crm.needsInbox");
+  // Any conversationId, null included: a role without inbox.read reads the link as null and must not clear one it can't see.
+  if (rest.conversationId !== undefined && !s.perms.has("inbox.read")) throw invalid("Linking a conversation needs access to customer messages", "crm.needsInbox");
   await prisma.$transaction(async (tx) => {
     const d = await tx.deal.findFirst({ where: { id: dealId, ...brandWhere(s) } });
     if (!d) throw notFound("Deal");
     if (d.updatedAt.toISOString() !== new Date(updatedAt).toISOString()) throw changed("This deal");
     await checkCrmLinks(tx, s, { customerId: rest.customerId, companyId: rest.companyId, conversationId: rest.conversationId });
+    if (rest.conversationId !== undefined || (rest.customerId !== undefined && rest.customerId !== d.customerId)) {
+      await checkConversationCustomer(tx, rest.conversationId === undefined ? d.conversationId : rest.conversationId, rest.customerId === undefined ? d.customerId : rest.customerId);
+    }
     await checkOwner(tx, s, rest.ownerId, "crm.manage");
     const value = rest.value === undefined ? d.value?.toFixed(2) ?? null : rest.value;
     const currency = rest.currency === undefined ? d.currency : rest.currency;

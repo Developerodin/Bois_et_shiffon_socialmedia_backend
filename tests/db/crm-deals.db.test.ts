@@ -32,6 +32,30 @@ const act = (id: string, version: number, action: string, extra = {}) => quoteAc
 const stage = async (id: string) => (await getDeal(s, id)).stage;
 
 describe("deals", () => {
+  it("links a conversation only for inbox.read, never clears one without it, and only one of the deal's customer's", async () => {
+    const inbox: CrmScope = { ...s, perms: new Set<PermissionKey>(["brand.read", "crm.manage", "inbox.read"]) };
+    const cust = (name: string) => prisma.customer.create({ data: { workspaceId: s.workspaceId, brandId: s.brandId, displayName: name } });
+    const [ann, bob] = [await cust("Ann"), await cust("Bob")];
+    const conv = (customerId: string) =>
+      prisma.conversation.create({ data: { workspaceId: s.workspaceId, brandId: s.brandId, channel: "LOGGED", lastMessageAt: new Date(), lastFromCustomer: true, customerId } });
+    const [annConv, bobConv] = [await conv(ann.id), await conv(bob.id)];
+
+    await expect(createDeal(inbox, DealCreate.parse({ title: "x", customerId: ann.id, conversationId: bobConv.id }))).rejects.toMatchObject({ status: 400, code: "crm.conversationCustomer" });
+    const d = await createDeal(inbox, DealCreate.parse({ title: "Ann's sofas", customerId: ann.id, conversationId: annConv.id }));
+    expect((await getDeal(inbox, d.id)).conversationId).toBe(annConv.id);
+
+    // crm.manage alone: a null it sends would drop a link it reads as null, so any conversationId is refused.
+    await expect(updateDeal(s, d.id, { updatedAt: d.updatedAt, conversationId: null })).rejects.toMatchObject({ status: 400, code: "crm.needsInbox" });
+    // Moving the deal to another customer while the old customer's conversation stays linked is refused...
+    await expect(updateDeal(inbox, d.id, { updatedAt: d.updatedAt, customerId: bob.id })).rejects.toMatchObject({ status: 400, code: "crm.conversationCustomer" });
+    // ...and allowed with the new customer's conversation (or none).
+    const moved = await updateDeal(inbox, d.id, { updatedAt: d.updatedAt, customerId: bob.id, conversationId: bobConv.id });
+    expect(moved).toMatchObject({ customer: { id: bob.id }, conversationId: bobConv.id });
+    // An edit that touches neither the link nor the customer saves, even if the conversation moved customer since.
+    await prisma.conversation.update({ where: { id: bobConv.id }, data: { customerId: ann.id } });
+    expect(await updateDeal(s, d.id, { updatedAt: moved.updatedAt, title: "Bob's sofas" })).toMatchObject({ title: "Bob's sofas" });
+  });
+
   it("a value needs a currency; lost needs a reason, a win by hand doesn't; reopening clears it", async () => {
     await expect(createDeal(s, DealCreate.parse({ title: "x", value: "10" }))).rejects.toMatchObject({ status: 400, code: "crm.currency" });
     const d = await deal();

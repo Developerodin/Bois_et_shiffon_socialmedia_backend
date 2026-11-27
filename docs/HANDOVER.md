@@ -2114,8 +2114,9 @@ removed from any future `prisma migrate dev` diff.
   Customers tab), moving a conversation to another customer, and linking a deal to one of its customer's
   conversations. Still open: creating or erasing a company from the Companies view, a `?company=` link, a
   conversation list/search endpoint (the deal's picker reads the customer, latest 50, and audits a `customer.viewed`).
-- Server gaps found then, not fixed: a deal PATCH from a role without inbox.read still accepts `conversationId: null`
-  (the web leaves the field out), and the server doesn't check that a deal's conversation belongs to its customer.
+- Fixed the same day: a deal PATCH from a role without inbox.read is refused any `conversationId`, null included
+  (400 `crm.needsInbox`), and a deal's conversation must be one of its customer's (400 `crm.conversationCustomer`),
+  checked only when the link or the customer changes. The web clears the link when the deal's customer changes.
 - Accepted risk (owner's 2026-11-24 decision): a client reviewer given crm.manage or inbox.read in the permission
   matrix sees every customer record and message.
 - Phases B (Meta), C (AskCart customers) and D (Gmail; Google restricted-scope verification plus a CASA assessment, or
