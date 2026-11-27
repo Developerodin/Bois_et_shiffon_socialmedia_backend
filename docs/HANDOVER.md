@@ -2159,5 +2159,19 @@ Re-run `npm run sync:shared` after the merge so every `.hash` matches.
    Instagram format, a picture, a carousel's picture count and a pin's link. Meta = the META (Facebook Pages) and
    INSTAGRAM connections together. Would need server data: Pinterest board, Facebook Page, X thread, LinkedIn document
    on the post; a per-channel CSV export. Limits: the Scheduled figure and lists come from the calendar list (open posts
-   + 30 days, 200 rows); New post can only make an Instagram post or carousel (the composer and NewPostInput). Later
-   passes: channel-specific composer, channel-aware assistant suggestions, channel analytics.
+   + 30 days, 200 rows). (Update 15:10: batch 1 and 2 below supersede the "would need server data" and New post parts.)
+6. **Channel batches (2026-11-27 afternoon, merged on `main`, unpushed):**
+   - Batch 1 (server `57f32cb`): `GET content/export?channel=` (a channel or group), the Facebook Page on cards
+     (`publishConnectionId`), a planned Pinterest board (`planBoard`; migration `20261127150000_content_planned_board`,
+     applied to dev). Open owner question: a board plan follows the board a pin is actually scheduled on — OK?
+   - Batch 2 (server `d32e020`, web `ac81afd`, no migration): New post per channel. Facebook, Pinterest, Threads,
+     LinkedIn and X are written by hand (`WrittenPostInput` → `createWrittenPost`, quality check then approval); Instagram
+     post/carousel still drafted by AI; Reel points to /reels; story says the mobile app. A channel calendar offers only
+     its channel(s). Limits shared in `shared/content-limits.ts`. Web publish form now starts with the draft's pictures.
+     Skipped: picking a Pinterest board inside New post (needs a boards list endpoint; the post's Planned board covers
+     it). Browser-checked the dialog on Pinterest, X and Meta calendars (no post created).
+   - Fix (web `2464282`): the month calendar crashed "Too many re-renders" on any post without a picture
+     (`useStableSignedUrl` compared null with undefined).
+   - Batch 3 (assistant suggestions per channel) running from 15:10; batch 4 (channel analytics) after it.
+   - Throwaway-DB recipe: set BOTH `DATABASE_URL` and `DATABASE_URL_UNPOOLED` to the test URL for `prisma migrate
+     deploy`; the schema's directUrl is the unpooled one, so setting only the first points the deploy at the dev DB.
