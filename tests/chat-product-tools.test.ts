@@ -272,7 +272,8 @@ describe("chat request and page notes", () => {
 
   it("knows where things are in the app and never invents posts (prompt version 8)", () => {
     const prompt = chatSystemPrompt({ name: "Oak & Co", website: null });
-    expect(CHAT_PROMPT_VERSION).toBe("9");
+    expect(CHAT_PROMPT_VERSION).toBe("10");
+    expect(prompt).toContain("Facebook, Pinterest, Threads, LinkedIn and X posts are written by the person in New post");
     for (const tool of ["adsSummary", "adCampaigns", "adBudgets", "revenuePerAdSpend", "postPerformance", "searchPerformance"]) expect(prompt).toContain(tool);
     expect(prompt).toContain("Never put sales, revenue, ad or performance figures into a web search");
     expect(prompt).toContain("campaign names, page URLs, alert text");
