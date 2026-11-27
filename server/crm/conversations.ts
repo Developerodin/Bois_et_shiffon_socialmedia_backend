@@ -1,6 +1,7 @@
 import type { Conversation, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { brandWhere, changed, checkCrmLinks, checkOwner, crmAudit, type CrmScope, type Db, dayOf, dayString, invalid, notFound } from "@/server/crm/common";
+import { syncFollowUp } from "@/server/crm/follow-up-tasks";
 import { brandTimeZone, zoneToday } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { AccessDeniedError } from "@/server/auth/errors";
@@ -43,17 +44,17 @@ export const ConversationPatch = z.object({
   closed: z.boolean().optional(),
 });
 
-type Stored = Pick<Conversation, "closedAt" | "waitingSince" | "lastMessageAt" | "lastFromCustomer" | "nextActionDue">;
+type Stored = Pick<Conversation, "closedAt" | "waitingSince" | "lastMessageAt" | "lastFromCustomer" | "nextActionDue" | "episodeAt">;
 
 /**
  * Decision 5: CLOSED when closed; WAITING when waiting is set (overdue after 7 days); else NEEDS_REPLY (overdue 24 h
- * after the latest message). A next action whose day has passed is overdue too. `today`: the brand's day "YYYY-MM-DD".
+ * after the episode's first unanswered message). A next action whose day has passed is overdue too. `today`: the brand's day "YYYY-MM-DD".
  */
 export function followUpState(c: Stored, now: Date, today: string): { state: FollowUpState; overdue: boolean } {
   if (c.closedAt) return { state: "CLOSED", overdue: false };
   const actionLate = !!c.nextActionDue && dayString(c.nextActionDue)! < today;
   if (c.waitingSince) return { state: "WAITING", overdue: actionLate || now.getTime() - c.waitingSince.getTime() > WAITING_MS };
-  return { state: "NEEDS_REPLY", overdue: actionLate || now.getTime() - c.lastMessageAt.getTime() > NEEDS_REPLY_MS };
+  return { state: "NEEDS_REPLY", overdue: actionLate || now.getTime() - (c.episodeAt ?? c.lastMessageAt).getTime() > NEEDS_REPLY_MS };
 }
 
 export type ConversationWithCustomer = Conversation & { customer: { id: string; displayName: string } | null };
@@ -72,6 +73,7 @@ export function toConversationRow(c: ConversationWithCustomer, now: Date, today:
     lastFromCustomer: c.lastFromCustomer,
     waitingSince: c.waitingSince?.toISOString() ?? null,
     closedAt: c.closedAt?.toISOString() ?? null,
+    updatedAt: c.updatedAt.toISOString(),
     ...followUpState(c, now, today),
   };
 }
@@ -129,12 +131,10 @@ export async function recompute(tx: Prisma.TransactionClient, conversationId: st
   await tx.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: latest.sentAt, lastFromCustomer: true, waitingSince: null, closedAt: null, episodeAt: first?.sentAt ?? latest.sentAt } });
 }
 
-/** Follow-up hooks (server/crm/follow-ups.ts registers them): open or close the conversation's follow-up task. */
-type Hook = (tx: Prisma.TransactionClient, s: { workspaceId: string; brandId: string }, conversationId: string, now: Date) => Promise<void>;
-let afterChange: Hook = async () => {};
-export function registerFollowUpHook(fn: Hook) {
-  afterChange = fn;
-}
+/** After every change: the conversation's follow-up task follows its state (server/crm/follow-up-tasks.ts). */
+const afterChange = async (tx: Prisma.TransactionClient, s: { workspaceId: string; brandId: string }, conversationId: string, now: Date) => {
+  await syncFollowUp(tx, s, conversationId, now);
+};
 
 export async function getConversation(s: CrmScope, conversationId: string, now = new Date()): Promise<ConversationDto> {
   const c = await prisma.conversation.findFirst({ where: { id: conversationId, ...brandWhere(s) }, include: withCustomer });

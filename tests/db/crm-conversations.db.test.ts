@@ -33,7 +33,7 @@ const start = (fromCustomer: boolean, sentAt: string, text = "Do you have the oa
   createConversation(s, ConversationCreate.parse({ customerId: customer, subject: "Oak table", message: { fromCustomer, medium: "EMAIL", text, sentAt } }));
 
 describe("follow-up state", () => {
-  const base = { closedAt: null, waitingSince: null, nextActionDue: null, lastFromCustomer: true };
+  const base = { closedAt: null, waitingSince: null, nextActionDue: null, lastFromCustomer: true, episodeAt: null };
   const now = new Date("2026-11-27T12:00:00Z");
   it("needs a reply, overdue after 24 h; waiting, overdue after 7 days; a passed next action is overdue; closed is never overdue", () => {
     expect(followUpState({ ...base, lastMessageAt: new Date(now.getTime() - 23 * H) }, now, "2026-11-27")).toEqual({ state: "NEEDS_REPLY", overdue: false });
