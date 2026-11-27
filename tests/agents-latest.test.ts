@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const db = vi.hoisted(() => ({ brandAgentConfig: { findMany: vi.fn(async () => [] as unknown[]) }, agentRun: { findMany: vi.fn() }, $queryRaw: vi.fn() }));
+const db = vi.hoisted(() => ({ brandAgentConfig: { findMany: vi.fn(async () => [] as unknown[]) }, agentRun: { findMany: vi.fn() }, agentEvent: { findMany: vi.fn<(q: unknown) => Promise<unknown[]>>(async () => []) }, $queryRaw: vi.fn() }));
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: async () => ({ userId: "u1", workspaceId: "w1", brandId: "b1", perms: new Set(["agents.read"]) }) }));
 vi.mock("@/server/jobs/runner", () => ({ kickIfDue: vi.fn(async () => {}) }));
@@ -34,5 +34,19 @@ describe("GET /agents latest runs", () => {
     expect(creator.lastRun).toEqual({ id: "r1", status: "FAILED", startedAt: t.toISOString(), finishedAt: t.toISOString(), error: "x".repeat(300) });
     expect(agents.find((a) => a.key === "quality")!.lastRun).toEqual({ id: "r2", status: "RUNNING", startedAt: t.toISOString(), finishedAt: null, error: null });
     expect(agents.every((a) => a.key === "creator" || a.key === "quality" ? true : a.lastRun === null)).toBe(true);
+  });
+
+  it("marks a failed run that had nothing to do (its last event INFO) and says whether LinkedIn and X can be planned", async () => {
+    const t = new Date("2026-11-20T10:00:00Z");
+    db.$queryRaw.mockResolvedValue([
+      { id: "r1", agentKey: "brief", status: "FAILED", startedAt: t, finishedAt: t, error: "No posts to brief" },
+      { id: "r2", agentKey: "creator", status: "FAILED", startedAt: t, finishedAt: t, error: "boom" },
+    ]);
+    db.agentEvent.findMany.mockResolvedValue([{ runId: "r1", level: "INFO" }, { runId: "r2", level: "ERROR" }]);
+    const body = (await (await call()).json()) as { agents: (Agent & { lastRun: { nothingToDo?: boolean } | null })[]; plannerHandChannels: boolean };
+    expect(db.agentEvent.findMany.mock.calls[0]![0]).toMatchObject({ where: { runId: { in: ["r1", "r2"] } }, distinct: ["runId"] });
+    expect(body.agents.find((a) => a.key === "brief")!.lastRun!.nothingToDo).toBe(true);
+    expect(body.agents.find((a) => a.key === "creator")!.lastRun!.nothingToDo).toBeUndefined();
+    expect(body.plannerHandChannels).toBe(false);
   });
 });

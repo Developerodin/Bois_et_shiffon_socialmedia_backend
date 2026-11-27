@@ -2,6 +2,7 @@ import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { paidStart } from "@/server/api/client";
 import { AgentStartError, startAgentRun } from "@/server/agents/engine";
+import { runInput } from "@/server/agents/chain";
 import { getAgent } from "@/server/agents/registry";
 import { prisma } from "@/server/db/prisma";
 import { kickIfDue, kickRunner } from "@/server/jobs/runner";
@@ -67,7 +68,7 @@ export async function POST(request: Request, context: { params: Promise<Params> 
         agentKey,
         trigger: "manual",
         userId: scope.userId,
-        input: (body as { input?: unknown }).input,
+        input: runInput(agentKey, (body as { input?: unknown }).input),
       });
       kickRunner();
       return Response.json({ run: { id: run.id, status: run.status } }, { status: 202 });

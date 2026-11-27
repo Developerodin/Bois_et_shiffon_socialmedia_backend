@@ -156,3 +156,41 @@ describe("Planner and campaigns", () => {
     }
   });
 });
+
+describe("Planner channel scope", () => {
+  it("accepts known channels, deduped, and refuses unknown ones or other keys", () => {
+    expect(plannerAgent.inputSchema.parse({ chain: true, channels: ["PINTEREST_PIN", "PINTEREST_PIN"] })).toEqual({ chain: true, channels: ["PINTEREST_PIN"] });
+    expect(plannerAgent.inputSchema.safeParse({ channels: ["MYSPACE_POST"] }).success).toBe(false);
+    expect(plannerAgent.inputSchema.safeParse({ channels: [] }).success).toBe(false);
+    expect(plannerAgent.inputSchema.safeParse({ chain: true, other: 1 }).success).toBe(false);
+    expect(plannerAgent.inputSchema.parse({ chain: true })).toEqual({ chain: true });
+  });
+
+  it("drops the model's posts on channels outside the chosen ones and names them in the prompt", async () => {
+    ai = vi.fn(async () => ({ posts: [post(), post({ channel: "PINTEREST_PIN" })] }));
+    await plannerAgent.run(ctx(), { channels: ["PINTEREST_PIN"] });
+    expect(created().map((p) => p.channel)).toEqual(["PINTEREST_PIN"]);
+    expect(String((ai.mock.calls[0] as unknown as [{ prompt: string }])[0].prompt)).toContain("Use only these channels: PINTEREST_PIN.");
+  });
+
+  it("has nothing to do when no chosen channel can be planned", async () => {
+    vi.stubEnv("PLANNER_HAND_CHANNELS", "");
+    try {
+      await expect(plannerAgent.run(ctx(), { channels: ["LINKEDIN_POST"] })).rejects.toThrow("None of the chosen channels");
+      expect(ai).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("Planner channel scope and ideas", () => {
+  it("marks only the ideas a scoped run planned a post for", async () => {
+    planning.mockResolvedValue({ campaigns: [], timeZone: "Europe/Paris" });
+    const idea = (id: string) => ({ id, title: id, angle: "a", channels: [], timing: null });
+    db.opportunity.findMany.mockResolvedValue([idea("o1"), idea("o2")]);
+    ai = vi.fn(async () => ({ posts: [post({ opportunityId: "o1", campaignId: "", channel: "PINTEREST_PIN" }), post({ opportunityId: "o2", campaignId: "", channel: "FACEBOOK_POST" })] }));
+    await plannerAgent.run(ctx(), { channels: ["PINTEREST_PIN"] });
+    expect(db.opportunity.updateMany).toHaveBeenCalledWith({ where: { id: { in: ["o1"] } }, data: { status: "PLANNED" } });
+  });
+});
