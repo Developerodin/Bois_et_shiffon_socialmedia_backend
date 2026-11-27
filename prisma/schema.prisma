@@ -942,6 +942,11 @@ model ContentItem {
   byHand        Boolean        @default(false) // a story the person posts themselves from a downloaded package
   // Who the post is for: whoever made it (or started the Planner run), else unassigned; the team can reassign it.
   ownerId       String?
+  // A Pinterest Pin's planned board: set ahead of scheduling (the schedule step starts on it), both or neither. The name
+  // is kept so cards don't call Pinterest; it is as the person's board list named it when they picked it and goes stale
+  // if the board is renamed. Scheduling on another board moves the plan to that board.
+  plannedBoardId   String?
+  plannedBoardName String?
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
 

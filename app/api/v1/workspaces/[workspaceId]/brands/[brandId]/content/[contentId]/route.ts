@@ -7,7 +7,7 @@ import { pinterestBoards } from "@/server/integrations/publishers";
 import { kickRunner } from "@/server/jobs/runner";
 import { accessToken } from "@/server/services/connections";
 import { autoPublish } from "@/server/services/automations";
-import { decide, markDone, postAiAllowed, postRest, PublishingError, releaseState, saveDraft, schedulePublication, setOwner, settleFrame, settlePublication } from "@/server/services/publishing";
+import { decide, markDone, postAiAllowed, postRest, PublishingError, releaseState, saveDraft, schedulePublication, setOwner, setPlannedBoard, settleFrame, settlePublication } from "@/server/services/publishing";
 import { registerManualPost } from "@/server/services/manual-post";
 import { setByHand } from "@/server/stories/by-hand";
 import { parseStoryInput } from "@/server/stories/body";
@@ -35,6 +35,8 @@ const Action = z.discriminatedUnion("action", [
     version: z.number().int(),
     connectionId: z.string().min(1),
     boardId: z.string().max(100).optional(),
+    // The board's name as listed: a pin scheduled on another board than planned keeps it as its plan.
+    boardName: z.string().max(200).optional(),
     imageUrl: z.string().max(2000).optional(),
     imageLinks: z.array(z.string().max(2000)).max(10).optional(),
     mediaKeys: z.array(z.string().max(300)).max(10).optional(),
@@ -57,11 +59,13 @@ const Action = z.discriminatedUnion("action", [
   z.object({ action: z.literal("postedByHand"), url: z.string().max(2000).optional() }),
   // Give the post to someone who works on the brand, or to nobody (null).
   z.object({ action: z.literal("setOwner"), userId: z.string().min(1).max(100).nullable() }),
+  // A Pinterest Pin's planned board, from the boards this view lists (null clears it).
+  z.object({ action: z.literal("planBoard"), board: z.object({ id: z.string().trim().min(1).max(100), name: z.string().trim().min(1).max(200) }).nullable() }),
   z.object({ action: z.literal("duplicate") }),
   z.object({ action: z.literal("delete") }),
 ]);
 
-const PERMISSION = { rewrite: "content.create", edit: "content.create", editStory: "content.create", duplicate: "content.create", setOwner: "content.create", delete: "content.create", decide: "content.approve", publish: "publish.execute", postRest: "publish.execute", markDone: "publish.execute", byHand: "publish.execute", postedByHand: "publish.execute", settleFrame: "publish.execute", cancel: "publish.execute", posted: "publish.execute", "not-posted": "publish.execute" } as const;
+const PERMISSION = { rewrite: "content.create", edit: "content.create", editStory: "content.create", duplicate: "content.create", setOwner: "content.create", planBoard: "content.create", delete: "content.create", decide: "content.approve", publish: "publish.execute", postRest: "publish.execute", markDone: "publish.execute", byHand: "publish.execute", postedByHand: "publish.execute", settleFrame: "publish.execute", cancel: "publish.execute", posted: "publish.execute", "not-posted": "publish.execute" } as const;
 
 /** Approval history, publishing history, and where this post can go (with Pinterest boards). */
 export async function GET(request: Request, context: Params) {
@@ -107,6 +111,10 @@ export async function POST(request: Request, context: Params) {
     if (body.action === "setOwner") {
       await setOwner(scope, itemId, body.userId);
       return new Response(null, { status: 204 });
+    }
+    if (body.action === "planBoard") {
+      await setPlannedBoard(scope, itemId, body.board);
+      return Response.json(await releaseState(scope, itemId, scope.perms));
     }
     if (body.action === "duplicate") {
       const copy = await duplicateStory(scope, itemId);
@@ -172,7 +180,7 @@ export async function POST(request: Request, context: Params) {
         kickRunner();
       }
     } else if (body.action === "publish") {
-      const a = await schedulePublication({ ...scope, itemId, version: body.version, connectionId: body.connectionId, boardId: body.boardId, imageUrl: body.imageUrl, imageLinks: body.imageLinks, mediaKeys: body.mediaKeys, videoUrl: body.videoUrl, runAt: body.runAt ? new Date(body.runAt) : undefined });
+      const a = await schedulePublication({ ...scope, itemId, version: body.version, connectionId: body.connectionId, boardId: body.boardId, boardName: body.boardName, imageUrl: body.imageUrl, imageLinks: body.imageLinks, mediaKeys: body.mediaKeys, videoUrl: body.videoUrl, runAt: body.runAt ? new Date(body.runAt) : undefined });
       if (a.runAt.getTime() <= Date.now() + 5_000) kickRunner();
     } else if (body.action === "postRest") {
       await postRest({ ...scope, itemId, attemptId: body.attemptId, confirm: body.confirm });
