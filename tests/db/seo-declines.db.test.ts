@@ -90,6 +90,21 @@ describe("runSeoDeclines", () => {
   });
 });
 
+describe("another Search Console site", () => {
+  it("starts its own episode instead of extending the old site's row", async () => {
+    const old = await source();
+    await decline();
+    await run(old);
+    await prisma.dataSource.update({ where: { id: old.id }, data: { status: "OFF" } });
+    const next = await prisma.dataSource.create({
+      data: { workspaceId: ws, brandId: A, kind: "SEARCH_CONSOLE", externalId: "sc-domain:shop.test", label: "x", syncedThrough: day(addDays(S, 20)), settings: { backfill: { start: "2026-06-01" } } },
+    });
+    await prisma.searchDay.updateMany({ data: { siteUrl: "sc-domain:shop.test" } });
+    await runSeoDeclines({ workspaceId: ws, brandId: A, dataSourceId: next.id, day: addDays(S, 1) });
+    expect((await alerts()).map((a) => [a.siteUrl, ymd(a.firstDay)])).toEqual([[SITE, addDays(S, -3)], ["sc-domain:shop.test", addDays(S, -2)]]);
+  });
+});
+
 describe("listSeoAlerts and the hook", () => {
   it("open alerts are the chosen site's, within 7 days of its last synced day, with a server-built url and path", async () => {
     const s = await source(A, S);
@@ -97,7 +112,10 @@ describe("listSeoAlerts and the hook", () => {
     await run(s);
     const { alerts: open } = await listSeoAlerts({ workspaceId: ws, brandId: A }, { open: true }, 50);
     expect(open).toMatchObject([{ kind: "CLICKS_DOWN", url: "https://shop.test/a", path: "/a", open: true, text: expect.stringContaining("Clicks down 100% on /a") }]);
-    await prisma.dataSource.update({ where: { id: s.id }, data: { syncedThrough: day(addDays(S, 5)) } });
+    // Still open 7 days after its window's end (S − 3); closed the day after.
+    await prisma.dataSource.update({ where: { id: s.id }, data: { syncedThrough: day(addDays(S, 7)) } });
+    expect((await listSeoAlerts({ workspaceId: ws, brandId: A }, { open: true }, 50)).alerts).toHaveLength(1);
+    await prisma.dataSource.update({ where: { id: s.id }, data: { syncedThrough: day(addDays(S, 8)) } });
     expect((await listSeoAlerts({ workspaceId: ws, brandId: A }, { open: true }, 50)).alerts).toEqual([]);
     expect((await listSeoAlerts({ workspaceId: ws, brandId: B }, { open: true }, 50)).alerts).toEqual([]);
   });

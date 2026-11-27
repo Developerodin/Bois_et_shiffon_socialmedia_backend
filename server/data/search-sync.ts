@@ -61,7 +61,10 @@ export async function replaceDays(tx: Prisma.TransactionClient, source: SourceKe
     await tx.searchDay.createMany({ data: rows });
     count += rows.length;
     if (!d.queriesComplete) continue;
-    await tx.searchQueryDay.deleteMany({ where: { brandId, siteUrl, day, workspaceId } });
+    // Per dimension, as SearchDay above: (brandId, siteUrl, dimension, day) is then a range on the unique index.
+    for (const dimension of ["QUERY", "QUERY_PAGE"] as const) {
+      await tx.searchQueryDay.deleteMany({ where: { brandId, siteUrl, dimension, day, workspaceId } });
+    }
     const queryRows: Prisma.SearchQueryDayCreateManyInput[] = [
       ...d.queries.map((q) => ({ ...base, dimension: "QUERY" as const, query: q.query, page: "", clicks: q.clicks, impressions: q.impressions, positionSum: q.positionSum })),
       ...d.queryPages.map((q) => ({ ...base, dimension: "QUERY_PAGE" as const, query: q.query, page: q.page, clicks: q.clicks, impressions: q.impressions, positionSum: q.positionSum })),

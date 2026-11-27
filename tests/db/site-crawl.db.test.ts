@@ -39,6 +39,7 @@ import { hitRateLimit } from "@/server/auth/rate-limit";
 import { discoverSiteUrls } from "@/server/catalog/sitemap";
 import { claimNextJob } from "@/server/jobs/queue";
 import { CRAWL_HOST_SHARE, lastCompleteCrawl, runSiteCrawl, SEO_LINKS_JOB, startSiteCrawl } from "@/server/seo/site-crawl";
+import { linkMetrics } from "@/server/seo/links";
 
 let ws: string;
 const A = "sc-a";
@@ -134,6 +135,22 @@ describe("a cycle from the sitemap", () => {
     expect((await row(c.id, u("/private/page"))).outcome).toBe("skipped");
     expect((await rows(c.id)).map((r) => r.url)).not.toContain(u("/private/other"));
     expect(m.fetched.map((f) => f.url)).not.toContain(u("/private/page"));
+  });
+});
+
+describe("whole-site coverage", () => {
+  it("a sitemap list that was cut makes a COMPLETE cycle that clears no link task", async () => {
+    m.discovered = [u("/a")];
+    vi.mocked(discoverSiteUrls).mockResolvedValueOnce({ urls: [{ url: u("/a"), lastmod: null }], complete: false, capped: false });
+    const c = await cycle();
+    expect(c).toMatchObject({ status: "COMPLETE", coverageCut: true });
+    const got = await lastCompleteCrawl(scope());
+    expect("crawl" in got && linkMetrics(got.crawl, got.rows).complete).toBe(false);
+  });
+
+  it("an empty discovery isn't kept for the day", async () => {
+    await cycle();
+    expect(await prisma.transientEntry.count({ where: { key: { startsWith: "site-all-pages:" } } })).toBe(0);
   });
 });
 

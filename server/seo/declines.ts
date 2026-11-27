@@ -3,6 +3,7 @@ import { z } from "zod";
 import { urlKey, urlPath, type DateRange, type SeoAlertKind, type SeoAlertView } from "@/shared";
 import { recordEpisode } from "@/server/alerts/episode";
 import { PAGES_PER_DAY } from "@/server/data/search-console";
+import { chosenSource } from "@/server/data/search-read";
 import { addDays, dayDate, dayOf, type SyncOutcome } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
@@ -157,8 +158,9 @@ export function seoAlertText(a: AlertFields): string {
 }
 
 /**
- * A bell notice's line: the lead alert's own line when its run raised one alert, else how many pages and the lead's
- * path ("3 pages losing search traffic, e.g. /a"). A run raises SITE_DOWN alone, so a group is always pages.
+ * A bell notice's line: the lead alert's own line when its run raised alerts on one page, else how many pages (counted
+ * by pageKey: a page down in clicks and position is one page) and the lead's path ("3 pages losing search traffic,
+ * e.g. /a"). A run raises SITE_DOWN alone, so a group is always pages.
  */
 export function seoAlertGroupText(lead: AlertFields, count: number): string {
   if (count <= 1) return seoAlertText(lead);
@@ -166,8 +168,12 @@ export function seoAlertGroupText(lead: AlertFields, count: number): string {
   return `${count} pages losing search traffic${path ? `, e.g. ${path}` : ""}`;
 }
 
-/** Is the alert open for a source synced through `syncedThrough`? */
-export const isOpen = (lastDay: string, syncedThrough: string | null) => !!syncedThrough && lastDay >= addDays(syncedThrough, -OPEN_DAYS);
+/**
+ * Is the alert open for a source synced through `syncedThrough`? Its lastDay is a recent window's end (syncedThrough −
+ * DECLINE_LAG_DAYS when raised), so open = a new evaluation would still join it (within OPEN_DAYS of that end).
+ */
+export const openFrom = (syncedThrough: string) => addDays(syncedThrough, -(DECLINE_LAG_DAYS + OPEN_DAYS));
+export const isOpen = (lastDay: string, syncedThrough: string | null) => !!syncedThrough && lastDay >= openFrom(syncedThrough);
 
 /** The page's URL as the server rebuilds it from its key (never Google's raw text): safe as a link. */
 export const seoAlertUrl = (pageKey: string) => (pageKey ? `https://${pageKey}` : null);
@@ -189,15 +195,6 @@ export function seoAlertView(a: AlertRow, syncedThrough: string | null): SeoAler
   };
 }
 
-/** The brand's chosen Search Console source (not OFF): its site and how far it is synced. */
-async function liveSource(scope: { workspaceId: string; brandId: string }) {
-  const s = await prisma.dataSource.findFirst({
-    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SEARCH_CONSOLE", status: { not: "OFF" } },
-    select: { externalId: true, syncedThrough: true },
-  });
-  return s ? { siteUrl: s.externalId, syncedThrough: dayOf(s.syncedThrough) } : null;
-}
-
 /**
  * The brand's decline alerts, newest episode first, at most `limit`, and how many more. `open`: the chosen site's open
  * ones (the Search tab, the chat; index (brandId, lastDay)). `createdFrom/createdBefore`: raised in that window (the
@@ -208,13 +205,13 @@ export async function listSeoAlerts(
   by: { open: true } | { createdFrom: Date; createdBefore: Date },
   limit: number,
 ): Promise<{ alerts: SeoAlertView[]; more: number }> {
-  const source = await liveSource(scope);
+  const source = await chosenSource(scope);
   if ("open" in by && !source?.syncedThrough) return { alerts: [], more: 0 };
   const where: Prisma.SeoAlertWhereInput = {
     workspaceId: scope.workspaceId,
     brandId: scope.brandId,
     ...("open" in by
-      ? { siteUrl: source!.siteUrl, lastDay: { gte: dayDate(addDays(source!.syncedThrough!, -OPEN_DAYS)) } }
+      ? { siteUrl: source!.siteUrl, lastDay: { gte: dayDate(openFrom(source!.syncedThrough!)) } }
       : { createdAt: { gte: by.createdFrom, lt: by.createdBefore } }),
   };
   const [rows, count] = await Promise.all([
@@ -232,7 +229,7 @@ export async function listSeoAlerts(
 /** One page's decline alerts of the last year (the URL history page), newest first, at most 20 (index (brandId, pageKey)). */
 export async function pageSeoAlerts(scope: { workspaceId: string; brandId: string }, pageKey: string): Promise<SeoAlertView[]> {
   const [source, rows] = await Promise.all([
-    liveSource(scope),
+    chosenSource(scope),
     prisma.seoAlert.findMany({
       where: { workspaceId: scope.workspaceId, brandId: scope.brandId, pageKey, lastDay: { gte: new Date(Date.now() - 366 * 86_400_000) } },
       orderBy: [{ firstDay: "desc" }, { id: "asc" }],
@@ -317,6 +314,9 @@ export async function runSeoDeclines(payload: unknown) {
     day: p.day, brandId: scope.brandId, backfillStart, capFloors: new Map(floors.map((f) => [f.day, f.floor])),
   });
   const runKey = runKeyOf(source.id, p.day);
+  // The site is part of the episode's subject: a brand that picks another Search Console property starts fresh
+  // episodes on it instead of extending the old site's rows (which the Search tab no longer lists).
+  const subjectOf = (c: DeclineCandidate) => `${c.subjectKey}@${siteUrl}`;
   const seen = settings.declinesSeenFor === siteUrl;
   const recipients = seen && candidates.length ? await seoAlertRecipients(scope) : [];
   await prisma.$transaction(async (tx) => {
@@ -325,15 +325,15 @@ export async function runSeoDeclines(payload: unknown) {
       const { insertedId } = await recordEpisode(tx, {
         table: "SeoAlert",
         scope,
-        subjectKey: c.subjectKey,
+        subjectKey: subjectOf(c),
         day: w.recent.to,
         values: c.values,
         join: { before: OPEN_DAYS, after: 1 },
         insert: async (t) => (await t.seoAlert.createManyAndReturn({
           data: [{
             ...scope, kind: c.kind, siteUrl, page: c.page.slice(0, 2_000), pageKey: c.pageKey, runKey,
-            firstDay: dayDate(w.recent.to), lastDay: dayDate(w.recent.to), values: c.values, subjectKey: c.subjectKey,
-            dedupeKey: `${c.subjectKey}:${w.recent.to}`,
+            firstDay: dayDate(w.recent.to), lastDay: dayDate(w.recent.to), values: c.values, subjectKey: subjectOf(c),
+            dedupeKey: `${subjectOf(c)}:${w.recent.to}`,
           }],
           skipDuplicates: true,
           select: { id: true },

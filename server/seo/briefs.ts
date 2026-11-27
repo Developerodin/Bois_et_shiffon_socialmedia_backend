@@ -7,7 +7,8 @@ import { hitRateLimit } from "@/server/auth/rate-limit";
 import { addDays, dayDate, dayOf } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import type { Finding } from "@/server/seo/checks";
-import { isOpen, seoAlertText, seoAlertUrl } from "@/server/seo/declines";
+import { DECLINE_LAG_DAYS, DECLINE_WINDOW_DAYS, declineWindows, isOpen, seoAlertText, seoAlertUrl } from "@/server/seo/declines";
+import { chosenSource } from "@/server/data/search-read";
 import { createFindingTask, findingsOf, isPositionalFindingId, openFindingTask } from "@/server/seo/finding-tasks";
 import { CREDIT_COSTS, InsufficientCreditsError, refundCharge, spendCredits } from "@/server/services/credits";
 import { lockRow, postAiAllowed, TX } from "@/server/services/publishing";
@@ -57,8 +58,11 @@ type Source =
   | { from: "finding"; report: AuditReport; finding: Finding; urls: string[]; openTaskId: string | null }
   | { from: "declines"; urls: string[]; alerts: { url: string; text: string }[] };
 
-/** The tag our data block is delimited by, removed from anything inside it so the content can't close it. */
-const stripDelims = (s: string) => s.replace(/<\/?\s*data\s*>/gi, "");
+/**
+ * The data block's JSON with every "<" and ">" escaped (\u003c, \u003e: the same text once parsed), so nothing inside
+ * it, however nested ("</da<data>ta>"), can close the block or open another tag.
+ */
+const inBlock = (json: string) => json.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
 const NOT_FOR_BRIEF = "This task is in review or finished; write the brief once it's back to do.";
 
 /** POST seo/briefs. The caller holds analytics.read and tasks.manage (the route checks both). */
@@ -110,14 +114,10 @@ async function briefSource(scope: Scope, request: SeoBriefRequest): Promise<Sour
   }
   const [rows, source] = await Promise.all([
     prisma.seoAlert.findMany({ where: { id: { in: request.alertIds }, workspaceId: scope.workspaceId, brandId: scope.brandId } }),
-    prisma.dataSource.findFirst({
-      where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SEARCH_CONSOLE", status: { not: "OFF" } },
-      select: { externalId: true, syncedThrough: true },
-    }),
+    chosenSource(scope),
   ]);
   if (rows.length !== request.alertIds.length) throw new TaskError("Alert not found", 404);
-  const synced = dayOf(source?.syncedThrough ?? null);
-  if (rows.some((a) => a.siteUrl !== source?.externalId || !isOpen(dayOf(a.lastDay), synced))) {
+  if (rows.some((a) => a.siteUrl !== source?.siteUrl || !isOpen(dayOf(a.lastDay), source?.syncedThrough ?? null))) {
     throw new TaskError("One of these pages isn't losing traffic any more. Reload and pick again.", 409, "seo.alertClosed");
   }
   if (rows.some((a) => !a.pageKey)) throw new TaskError("Pick pages, not the whole-site alert.", 400);
@@ -137,28 +137,28 @@ async function checkTask(scope: Scope, v: TaskViewer, taskId: string) {
 }
 const takesBrief = (status: Task["status"]) => status !== "IN_REVIEW" && (OPEN_TASK_STATUSES as readonly string[]).includes(status);
 
-/** Each page's last 28 synced days on the chosen site (all spellings together) and its top 5 queries; empty without a site. */
-async function pageFacts(scope: Scope, urls: string[]): Promise<Map<string, PageFacts>> {
+/**
+ * Each page's 28 days on the chosen site (all spellings together) and its top 5 queries; empty without a site. The
+ * window is the decline check's recent window for declining pages (the numbers the drop was measured on), else the
+ * last 28 synced days.
+ */
+async function pageFacts(scope: Scope, urls: string[], declines: boolean): Promise<Map<string, PageFacts>> {
   const out = new Map<string, PageFacts>();
-  const source = await prisma.dataSource.findFirst({
-    where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SEARCH_CONSOLE", status: { not: "OFF" } },
-    select: { externalId: true, syncedThrough: true },
-  });
+  const source = await chosenSource(scope);
   if (!source?.syncedThrough) return out;
-  const to = dayOf(source.syncedThrough);
-  const from = addDays(to, -27);
+  const { from, to } = declines ? declineWindows(source.syncedThrough).recent : { from: addDays(source.syncedThrough, -27), to: source.syncedThrough };
   const variants = urls.flatMap(urlVariants);
   const [pages, queries] = await Promise.all([
     prisma.$queryRaw<{ page: string; clicks: number; impressions: number; positionSum: number }[]>`
       SELECT page, sum(clicks)::int AS clicks, sum(impressions)::int AS impressions, sum("positionSum")::float8 AS "positionSum"
       FROM "SearchDay"
-      WHERE "brandId" = ${scope.brandId} AND "siteUrl" = ${source.externalId} AND dimension = 'PAGE'
+      WHERE "brandId" = ${scope.brandId} AND "siteUrl" = ${source.siteUrl} AND dimension = 'PAGE'
         AND day BETWEEN ${dayDate(from)}::date AND ${dayDate(to)}::date AND page = ANY(${variants}::text[])
       GROUP BY page`,
     prisma.$queryRaw<{ page: string; query: string; clicks: number }[]>`
       SELECT page, query, sum(clicks)::int AS clicks
       FROM "SearchQueryDay"
-      WHERE "brandId" = ${scope.brandId} AND "siteUrl" = ${source.externalId} AND dimension = 'QUERY_PAGE'
+      WHERE "brandId" = ${scope.brandId} AND "siteUrl" = ${source.siteUrl} AND dimension = 'QUERY_PAGE'
         AND day BETWEEN ${dayDate(from)}::date AND ${dayDate(to)}::date AND page = ANY(${variants}::text[])
       GROUP BY page, query ORDER BY clicks DESC LIMIT 5000`,
   ]);
@@ -192,12 +192,12 @@ async function pageFacts(scope: Scope, urls: string[]): Promise<Map<string, Page
 
 /** The AI's brief over the cleaned data block (mock: one item per page from the finding's own fix). */
 async function draft(scope: Scope, source: Source, urls: string[]) {
-  const [brand, facts] = await Promise.all([loadBrandContext(scope.workspaceId, scope.brandId), pageFacts(scope, urls)]);
+  const [brand, facts] = await Promise.all([loadBrandContext(scope.workspaceId, scope.brandId), pageFacts(scope, urls, source.from === "declines")]);
   const alertOf = new Map(source.from === "declines" ? source.alerts.map((a) => [urlKey(a.url), a.text]) : []);
   const data = {
     ...(source.from === "finding"
       ? { finding: { title: cleanText(source.finding.title, 200), detail: cleanText(source.finding.detail, 2_000), fix: cleanText(source.finding.fix, 2_000) } }
-      : { reason: "These pages are losing Google search traffic: the 28 days ending 3 days before the last synced day against the 28 before." }),
+      : { reason: `These pages are losing Google search traffic: the ${DECLINE_WINDOW_DAYS} days ending ${DECLINE_LAG_DAYS} days before the last synced day (last28Days) against the ${DECLINE_WINDOW_DAYS} before.` }),
     pages: urls.map((u) => {
       const f = facts.get(urlKey(u)!);
       return {
@@ -212,7 +212,7 @@ async function draft(scope: Scope, source: Source, urls: string[]) {
   const prompt = [
     `Brand: ${cleanText(brand.displayName, 200)}`,
     `Write in: ${language ?? "English"}`,
-    `<data>\n${stripDelims(JSON.stringify(data))}\n</data>`,
+    `<data>\n${inBlock(JSON.stringify(data))}\n</data>`,
   ].join("\n");
   const fallback = source.from === "finding"
     ? { why: cleanText(source.finding.detail, 400), fix: cleanText(source.finding.fix, 600) }
@@ -294,7 +294,9 @@ async function writeTask(scope: Scope, v: TaskViewer, source: Source, brief: str
     recheckOn: addDays(new Date().toISOString().slice(0, 10), 28),
   });
   const task = await createTask(scope, v, input);
-  // findingUrls isn't a task input: the pages the brief covers, for the URL page and the blog writer.
-  await prisma.task.updateMany({ where: { id: task.id, workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { findingUrls: source.urls } });
+  // findingUrls isn't a task input: the pages the brief covers, for the URL page and the blog writer. The task exists
+  // (and the brief is in its text) whatever happens here, so a failure is logged, never refunded.
+  await prisma.task.updateMany({ where: { id: task.id, workspaceId: scope.workspaceId, brandId: scope.brandId }, data: { findingUrls: source.urls } })
+    .catch((e: unknown) => console.error("[seo] brief task pages not saved", task.id, e instanceof Error ? e.name : "error"));
   return { taskId: task.id, existed: false };
 }

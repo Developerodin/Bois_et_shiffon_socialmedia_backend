@@ -55,7 +55,7 @@ describe("linkFindings", () => {
     expect(f[0]!.detail).toContain("https://shop.test/gone (404) — on 2 pages, e.g. https://shop.test/from");
     expect(f[2]!.urls).toEqual(["https://shop.test/hop", "https://shop.test/loop"]);
     expect(f[2]!.detail).toContain("(3 redirects)");
-    expect(f[2]!.detail).toContain("(redirect loop)");
+    expect(f[2]!.detail).toContain("(redirect loop or 4+ redirects)");
   });
 
   it("lists the 20 most-linked targets and counts the rest", () => {
@@ -78,14 +78,15 @@ describe("linkFindings", () => {
 });
 
 describe("linkMetrics", () => {
-  it("counts outcomes; unchecked includes re-checks and links past the caps; complete only for COMPLETE", () => {
+  it("counts outcomes; unchecked includes re-checks and links past the caps; complete only for a COMPLETE whole-site cycle", () => {
     const rows = [row("a", "broken", 1), row("b", null, 1), row("c", "recheck", 1), row("d", "chain", 1), row("e", "skipped", 0)];
-    const crawl = { id: "c1", finishedAt: new Date("2026-11-20T10:00:00Z"), status: "PARTIAL", pages: 3, targets: 2, checked: 4, overflow: 7 };
+    const crawl = { id: "c1", finishedAt: new Date("2026-11-20T10:00:00Z"), status: "PARTIAL", pages: 3, targets: 2, checked: 4, overflow: 7, coverageCut: false };
     expect(linkMetrics(crawl, rows)).toEqual({
       crawlId: "c1", finishedAt: "2026-11-20T10:00:00.000Z", pages: 3, targets: 2, checked: 4, broken: 1, serverErrors: 0, chains: 1,
-      loops: 0, unknown: 0, skipped: 1, unchecked: 9, complete: false,
+      loops: 0, unknown: 0, skipped: 1, unchecked: 9, complete: false, coverageCut: false,
     });
     expect(linkMetrics({ ...crawl, status: "COMPLETE" }, rows).complete).toBe(true);
+    expect(linkMetrics({ ...crawl, status: "COMPLETE", coverageCut: true }, rows).complete).toBe(false);
   });
 });
 

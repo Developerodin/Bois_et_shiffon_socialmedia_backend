@@ -1874,7 +1874,7 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
   one (`lastCompleteCrawl`: COMPLETE or PARTIAL, same site as today's websiteUrl, finished within 14 days) as
   `links-broken` (high), `links-server-error` (medium) and `links-redirect-chain` (low) findings plus
   `metrics.links`; a fix shows as cleared one to two weeks later. Link findings count in the audit score like any other.
-  A `links-*` task clears only when `metrics.links.complete` is true (a COMPLETE cycle), without the pagesChecked rule.
+  A `links-*` task clears only when `metrics.links.complete` is true (a COMPLETE cycle that covered the whole site: `coverageCut` false), without the pagesChecked rule.
   Discovery: every sitemap page (newest first, ≤ 2,000; day cache `site-all-pages:<host>:<day>`), else link-following
   from the home page (≤ 500 pages, ≤ 3 clicks); ≤ 2,000 link targets, 1-byte GETs.
   **Budgets:** shares the site reader's host lock, robots.txt day cache and host bucket `site-pages:<host>:<day>`: the
@@ -1916,11 +1916,31 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
 - Waits on Search Console verification for B&C: everything above but the link check ships tested against fixtures and
   stays empty until then. Web components weren't browser-checked on the branch (no dev server or build was run).
 
-### SEO depth: where it stopped (2026-11-26, 17:40)
-- Branch `seo-depth` in the worktrees `C:\Users\INTEL\Desktop\sma-seo\{server,web,mobile}` (not merged, not pushed). Plan: `docs/superpowers/plans/2026-11-26-seo-depth.md` (four-lens reviewed, owner answers recorded).
-- Done and committed: Task 0 (one same-page URL rule, `cleanText`), Task 1 (Search Console queries and query-page pairs, kept 400 days), Task 2 (top queries on the Search tab and in the chat).
-- In progress, uncommitted on disk: Task 3, the URL history page. Server: `server/seo/url-history.ts`, `app/api/v1/.../seo/`, `tests/db/url-history.db.test.ts`, `shared/seo-url.ts`. Web: `app/(shell)/performance/url/`, `components/performance/url-history.tsx`, `lib/seo-links.ts` and edits to the Search tab, the audit board and the task view.
-- Still to do: finish Task 3, then Task 4 (the full-site link crawl), 5 and 5b (declining-page alerts, bell included), 6 (AI briefs), then the four-lens branch review and merge.
-- The worktree's server `node_modules` is a folder of junctions plus private Prisma copies; remove the junctions with `cmd /c rmdir` before deleting the worktree. Its test DB is `sma_test_seo` in the `sma-testdb` container.
-- Update 17:45: Task 3 (URL history page) is now committed: server 88bf4ca, web a5d33ac, mobile 0108faf. Its typecheck, web tests and DB test (11/11) pass. Next is Task 4, the full-site link crawl.
-- Update 2026-11-27: Task 4 (the full-site weekly link crawl, `seo.links`) is done and committed on the server worktree (web and mobile untouched: no shared change). Migration `20261126150100_site_crawl` is NOT applied to the dev DB (only to the throwaway `sma_test_seo`); apply it with the owner's go-ahead. Next is Task 5 (declining pages), then 5b and 6.
+### SEO depth: where it stopped (2026-11-27): ready to merge
+- Branch `seo-depth` in the worktrees `C:\Users\INTEL\Desktop\sma-seo\{server,web,mobile}`, not merged, not pushed. Plan:
+  `docs/superpowers/plans/2026-11-26-seo-depth.md`. Tasks 0–6 are done and committed (5b's bell included), and the
+  four-lens branch review (correctness, security, performance, maintainability) is done with its Critical and Important
+  findings fixed (none Critical). Server tsc, unit tests, DB tests (on the throwaway `sma_test_seo`), web tsc, tests
+  and eslint pass. Mobile only receives `shared/` copies (no node_modules in its worktree, so its tsc wasn't run).
+- **Deploy notes:**
+  - Migrations, in order, none applied to the dev DB yet (apply with the owner's go-ahead): `20261126150000_search_query_day`,
+    `20261126150100_site_crawl`, `20261126150200_seo_alert`, `20261126150300_notification_seo_alert_kind` (enum value
+    alone), `20261126150400_notification_seo_alert`. Check SearchDay's and SearchQueryDay's INCLUDE indexes survive.
+  - Merge server, web and mobile together (shared types changed: `.hash` must match). Merge hotspot: the bell
+    (`NotificationKind.SEO_ALERT`, server/notifications/list.ts, server/tasks/access.ts `visibleNotificationsSql`, web
+    components/shell/notification-bell.tsx and top-bar.tsx), and server/tasks/service.ts `patchTask` (new optional
+    `opts.edit`).
+  - Flags: everything search-related is behind the `data` web flag; Make a task / Write a brief behind `tasks`; Write
+    an article behind `blog`. The bell links to the URL page only with `data` on.
+  - New jobs: `seo.links` (started by the weekly SEO agent; shares one queue slot with `catalog.pages`) and
+    `seo.declines` (after each complete daily Search Console sync). No new poller.
+- **Still to do after merge:** the live crawl check on B&C (plan's Verification: run the SEO agent, watch SiteCrawl
+  rows and the `site-pages:<host>:<day>` bucket, spot-check three "broken" targets by hand); the fixture browser check
+  of the Search tab's queries and declines panel, the URL page, the digest and the bell (no dev server was run on the
+  branch); Search Console verification for B&C before any of the search features show real data.
+- Review findings left as ceilings: a sitemap that fails outright reads like "no sitemap" (link-following, still
+  counted as full coverage); a day with skipped over-long page URLs stores fewer than 500 rows and gets no cap floor;
+  the brief's query read is one LIMIT 5000 across its pages; the URL page reads the chosen source several times per
+  view; small duplications (web formatters, Open task buttons, hardcoded "2 credits" in the brief button).
+- The worktree's server `node_modules` is a folder of junctions plus private Prisma copies; remove the junctions with
+  `cmd /c rmdir` before deleting the worktree. Its test DB is `sma_test_seo` in the `sma-testdb` container.

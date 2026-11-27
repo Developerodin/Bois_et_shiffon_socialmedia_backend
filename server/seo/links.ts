@@ -72,7 +72,8 @@ const KINDS = [
 ];
 
 const label = (r: LinkRow) =>
-  r.outcome === "loop" ? "redirect loop" : r.outcome === "chain" ? `${r.redirects} redirects` : String(r.status ?? "no answer");
+  // "loop": a loop, or more redirects than the fetch follows (4+).
+  r.outcome === "loop" ? "redirect loop or 4+ redirects" : r.outcome === "chain" ? `${r.redirects} redirects` : String(r.status ?? "no answer");
 
 /**
  * The audit findings of a cycle's rows (category "Links"): broken (high), server errors (medium), redirect chains and
@@ -108,7 +109,7 @@ export function linkFindings(rows: LinkRow[]): Finding[] {
 
 /** A finished cycle's numbers for the report's metrics.links (finding-tasks.ts clears links-* tasks only when complete). */
 export function linkMetrics(
-  crawl: { id: string; finishedAt: Date | null; status: string; pages: number; targets: number; checked: number; overflow: number },
+  crawl: { id: string; finishedAt: Date | null; status: string; pages: number; targets: number; checked: number; overflow: number; coverageCut: boolean },
   rows: LinkRow[],
 ) {
   const count = (...outcomes: string[]) => rows.filter((r) => r.outcome !== null && outcomes.includes(r.outcome)).length;
@@ -125,6 +126,8 @@ export function linkMetrics(
     unknown: count("unknown"),
     skipped: count("skipped"),
     unchecked: rows.filter((r) => r.checkedAt === null || r.outcome === "recheck").length + crawl.overflow,
-    complete: crawl.status === "COMPLETE",
+    // Only a whole-site check may clear link tasks: COMPLETE and nothing left out.
+    complete: crawl.status === "COMPLETE" && !crawl.coverageCut,
+    coverageCut: crawl.coverageCut,
   };
 }

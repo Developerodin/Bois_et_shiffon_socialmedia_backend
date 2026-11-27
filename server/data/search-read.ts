@@ -22,13 +22,18 @@ const asDate = (day: string) => new Date(`${day}T00:00:00Z`);
 type Scope = { workspaceId: string; brandId: string };
 const SUM = { clicks: true, impressions: true, positionSum: true } as const;
 
-/** The brand's chosen site (its source that isn't OFF), or null. */
-export async function chosenSite(scope: Scope) {
+/** The brand's chosen Search Console source (the one that isn't OFF): its site and the last day it holds, or null. */
+export async function chosenSource(scope: Scope): Promise<{ siteUrl: string; syncedThrough: string | null } | null> {
   const source = await prisma.dataSource.findFirst({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SEARCH_CONSOLE", status: { not: "OFF" } },
-    select: { externalId: true },
+    select: { externalId: true, syncedThrough: true },
   });
-  return source?.externalId ?? null;
+  return source ? { siteUrl: source.externalId, syncedThrough: source.syncedThrough?.toISOString().slice(0, 10) ?? null } : null;
+}
+
+/** The brand's chosen site (its source that isn't OFF), or null. */
+export async function chosenSite(scope: Scope) {
+  return (await chosenSource(scope))?.siteUrl ?? null;
 }
 // No workspaceId filter: the brand is already the route's (scoped with its workspace by chosenSite), and the
 // (brandId, siteUrl, dimension, day) INCLUDE index then answers index-only.

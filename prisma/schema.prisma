@@ -1935,6 +1935,9 @@ model SiteCrawl {
   checked           Int             @default(0)
   /// links seen past TARGETS_MAX (or LINK_FOLLOW_MAX) and not stored: reported as unchecked (a link on two pages counts twice)
   overflow          Int             @default(0)
+  /// the cycle didn't cover the whole site (sitemap list cut or capped, link-following hit its page cap, links past
+  /// TARGETS_MAX): its findings are reported, but it clears no link task (metrics.links.complete false)
+  coverageCut       Boolean         @default(false)
   finishedAt        DateTime?
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt

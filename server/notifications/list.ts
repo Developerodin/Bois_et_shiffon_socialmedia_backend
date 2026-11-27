@@ -46,7 +46,7 @@ const COLUMNS = (n: Prisma.Sql) => Prisma.sql`n.id, n.kind::text AS kind, n."bra
            ${n} AS "actorClient", n."readAt", n."createdAt", al.kind::text AS "alertKind", al."accountId" AS "alertAccountId",
            al."campaignName" AS "alertCampaignName", al.currency AS "alertCurrency", al."values" AS "alertValues",
            sa.kind::text AS "seoKind", sa."pageKey" AS "seoPageKey", sa."values" AS "seoValues",
-           (SELECT count(*)::int FROM "SeoAlert" x WHERE x."brandId" = sa."brandId" AND x."runKey" = sa."runKey") AS "seoRunCount"`;
+           (SELECT count(DISTINCT x."pageKey")::int FROM "SeoAlert" x WHERE x."brandId" = sa."brandId" AND x."runKey" = sa."runKey") AS "seoRunCount"`;
 /**
  * An alert notice's alert, for its text: AD_ALERT's AdAlert (same brand), SEO_ALERT's lead SeoAlert (same workspace and
  * brand), so a notice can't show another brand's alert. A SEO notice counts its run's alerts by runKey.

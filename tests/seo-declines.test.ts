@@ -101,9 +101,9 @@ describe("seoAlertText and isOpen", () => {
     expect(seoAlertText({ kind: "POSITION_DOWN", pageKey: "shop.test/%E2%80%AEevil", values: { now: "13.0", before: "10.0", to: "2026-11-20" } })).not.toMatch(/[‮\n]/);
   });
 
-  it("open while lastDay is within 7 days of syncedThrough", () => {
-    expect(isOpen("2026-11-13", "2026-11-20")).toBe(true);
-    expect(isOpen("2026-11-12", "2026-11-20")).toBe(false);
+  it("open while a new evaluation would still join it: lastDay within 7 days of the recent window's end (3 before syncedThrough)", () => {
+    expect(isOpen("2026-11-10", "2026-11-20")).toBe(true);
+    expect(isOpen("2026-11-09", "2026-11-20")).toBe(false);
     expect(isOpen("2026-11-20", null)).toBe(false);
   });
 });

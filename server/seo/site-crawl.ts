@@ -94,12 +94,18 @@ export function retryAfterMs(value: string | null | undefined, now: Date): numbe
   return Number.isFinite(ms) ? Math.min(RETRY_AFTER_MAX_MS, Math.max(0, ms)) : null;
 }
 
-/** Under the brand's crawl lock (transaction-scoped, as the reader's `pages:` lock), or nothing when it's held. */
-function withBrandLock(brandId: string, fn: (tx: Prisma.TransactionClient) => Promise<void>) {
+/**
+ * Under the brand's crawl lock (transaction-scoped, as the reader's `pages:` lock). Held elsewhere: `onBusy` "skip"
+ * does nothing; "retry" throws, so the job is tried again later instead of the chain ending quietly (a run that met the
+ * weekly start holding it for a moment).
+ */
+class CrawlBusy extends Error {}
+function withBrandLock(brandId: string, fn: (tx: Prisma.TransactionClient) => Promise<void>, onBusy: "skip" | "retry" = "skip") {
   // ponytail: a run holds one pooled connection idle for its length (≤ ~5 min); the timeout only bounds a stuck run.
   return prisma.$transaction(async (tx) => {
     const [{ locked }] = await tx.$queryRaw<{ locked: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtext('site-crawl:' || ${brandId})) AS locked`;
     if (locked) await fn(tx);
+    else if (onBusy === "retry") throw new CrawlBusy("Another link-check run of this brand holds its lock");
   }, { maxWait: 10_000, timeout: 10 * 60_000 });
 }
 
@@ -181,7 +187,7 @@ export const runSeoLinks = (payload: unknown) => runSiteCrawl(payload);
 export async function runSiteCrawl(payload: unknown, deps: Deps = {}): Promise<void> {
   const job = Payload.parse(payload);
   const scope = { workspaceId: job.workspaceId, brandId: job.brandId };
-  await withBrandLock(scope.brandId, () => crawlRun(job, scope, { sleep: deps.sleep ?? realSleep, now: deps.now ?? (() => new Date()) }));
+  await withBrandLock(scope.brandId, () => crawlRun(job, scope, { sleep: deps.sleep ?? realSleep, now: deps.now ?? (() => new Date()) }), "retry");
 }
 
 type Job = z.infer<typeof Payload>;
@@ -275,7 +281,11 @@ async function crawlRun(job: Job, scope: Scope, deps: Required<Deps>) {
     // Not one page could be read (home behind a login or bot wall, 404s, time-outs): a "complete" check of nothing
     // would clear every link task, so it ends STOPPED and is never reported.
     const read = await prisma.siteCrawlUrl.count({ where: { crawlId: crawl.id, kind: "PAGE", outcome: { in: ["ok", "chain"] } } });
-    return void (await (read ? end("COMPLETE", null) : end("STOPPED", "unreadable")));
+    if (!read) return void (await end("STOPPED", "unreadable"));
+    // Links past the target cap, or link-following stopped at its page cap: not the whole site (clears no task).
+    const now = await prisma.siteCrawl.findUniqueOrThrow({ where: { id: crawl.id }, select: { overflow: true, pages: true, followLinks: true } });
+    if (now.overflow > 0 || (now.followLinks && now.pages >= LINK_FOLLOW_MAX)) await prisma.siteCrawl.updateMany({ where: { id: crawl.id }, data: { coverageCut: true } });
+    return void (await end("COMPLETE", null));
   }
   if (stop === "bot-wall") return void (await end("STOPPED", "bot-wall"));
   if (stop === "budget") pausedUntil = tomorrow(now());
@@ -311,9 +321,12 @@ type Fetched = { check: LinkCheck; retryAfter: string | null; html: string | nul
 /** A page read in full (its links wanted); a target with a 1-byte GET. Errors are the check's answer, not thrown. */
 async function fetchRow(row: Row, signal: AbortSignal): Promise<Fetched> {
   const page = row.kind === "PAGE";
+  const timeout = page ? PAGE_TIMEOUT_MS : TARGET_TIMEOUT_MS;
   try {
+    // safeFetchBytes times each redirect hop on its own (up to 4); this bounds the whole fetch, so it ends well inside
+    // the host lock's transaction (PAGE_TIMEOUT_MS + 30 s) with the pause and the save after it.
     const res = await safeFetchBytes(
-      row.url, page ? "text/html" : "*/*", page ? PAGE_BYTES : 1, signal, page ? PAGE_TIMEOUT_MS : TARGET_TIMEOUT_MS, { sameSite: true },
+      row.url, page ? "text/html" : "*/*", page ? PAGE_BYTES : 1, AbortSignal.any([signal, AbortSignal.timeout(timeout)]), timeout, { sameSite: true },
     );
     const html = page && res.status === 200 && /html/i.test(res.contentType) ? Buffer.from(res.bytes).toString("utf8") : null;
     return { check: { status: res.status, redirects: res.redirects ?? 0 }, retryAfter: res.headers?.get("retry-after") ?? null, html, finalUrl: res.url };
@@ -390,20 +403,24 @@ async function addLinks(tx: Prisma.TransactionClient, crawl: SiteCrawl, row: Row
  */
 async function discover(crawl: SiteCrawl, robotsTxt: string, day: string, signal: AbortSignal) {
   const key = `site-all-pages:${siteHost(crawl.origin)}:${day}`;
-  const cached = await getTransient<{ urls: { url: string }[] }>(key);
-  let found: { urls: { url: string }[] } | null = cached;
+  const cached = await getTransient<{ urls: { url: string }[]; complete?: boolean; capped?: boolean }>(key);
+  let found: { urls: { url: string }[]; complete?: boolean; capped?: boolean } | null = cached;
   if (!found) {
     found = await discoverSiteUrls(crawl.origin, robotsTxt, signal, SITE_PAGES_MAX);
-    await putTransient(key, found, DAY_MS);
+    // An empty list (no sitemap, or one that failed) isn't kept: the next cycle that day asks again.
+    if (found.urls.length) await putTransient(key, found, DAY_MS);
   }
   const urls = found.urls.map((u) => u.url).filter((u) => u.length <= MAX_URL);
   const home = `${crawl.origin}/`;
   const follow = urls.length === 0;
+  // A sitemap list that was cut (a file failed, time ran out) or capped leaves pages unread: the cycle can't clear tasks.
+  // ponytail: a sitemap that failed outright reads like no sitemap (link-following); that cycle still counts as full.
+  const cut = !follow && (found.complete === false || found.capped === true);
   const rows = (follow ? [home] : urls).map((url) => ({ crawlId: crawl.id, url, kind: "PAGE" as const, sources: [] }));
   await prisma.$transaction(async (tx) => {
     await tx.siteCrawlUrl.createMany({ data: rows, skipDuplicates: true });
     const pages = await tx.siteCrawlUrl.count({ where: { crawlId: crawl.id, kind: "PAGE" } });
-    await tx.siteCrawl.update({ where: { id: crawl.id }, data: { discoveryComplete: true, followLinks: follow, pages } });
+    await tx.siteCrawl.update({ where: { id: crawl.id }, data: { discoveryComplete: true, followLinks: follow, pages, ...(cut && { coverageCut: true }) } });
   });
   crawl.discoveryComplete = true;
   crawl.followLinks = follow;

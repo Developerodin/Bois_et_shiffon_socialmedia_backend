@@ -21,6 +21,7 @@ CREATE TABLE "SiteCrawl" (
     "targets" INTEGER NOT NULL DEFAULT 0,
     "checked" INTEGER NOT NULL DEFAULT 0,
     "overflow" INTEGER NOT NULL DEFAULT 0,
+    "coverageCut" BOOLEAN NOT NULL DEFAULT false,
     "finishedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
