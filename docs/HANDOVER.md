@@ -1856,3 +1856,31 @@ alerts reach the bell only in a workspace with tasks on. The digest and the chat
    labels.
 3. Live-check the rules and tune the thresholds once B&C's Meta Ads is connected.
 4. Decide whether ads alerts need the bell outside the `tasks` flag.
+
+## Social & Content landing and Meta/Instagram calendar groups (branch `social-landing`, 2026-11-27, not merged)
+
+Plan: `docs/superpowers/plans/2026-11-27-social.md` (decisions, plan and branch review changes). Server and web
+worktrees in `C:\Users\INTEL\Desktop\sma-social`; no mobile change. Feature audit items 6 and 7.
+
+**What was built:**
+- **`/social` (Social & Content).** Wave's sidebar slot opens it (role line now "Social & Content"); More's
+  "Content calendar" still opens `/calendar`. One row each for Meta, Instagram, Pinterest, LinkedIn, X and Threads:
+  connection badges (from `GET connections`, only for roles holding `CONNECTIONS_READ`; LinkedIn and X read "Posted
+  by hand"), the next planned post (title, date, status; opens it in the calendar) and posts awaiting approval (opens
+  the calendar on `cf_status=awaiting`). A row opens `/calendar?cf_channel=<channel or group>`. The Blog row shows
+  only with the `blog` flag on (off in production) and links to `/blog` (no dates or counts: articles aren't calendar
+  posts yet, item 9).
+- **`GET content/summary`** (server, `brand.read`): per channel, posts awaiting approval and the next open, unblocked
+  post dated from now. Two reads; polled every 30 s by the page.
+- **Calendar channel groups.** `cf_channel` takes `meta` (Facebook + the four Instagram formats) and `instagram`;
+  the Channel filter lists the groups and always the current value; unknown `cf_channel` values are dropped.
+  `calendarHref` (lib/calendar-filter.ts) is the one builder of calendar links; channel icons moved to
+  lib/post-labels.ts; `connectionBadge` (lib/status.ts) shared with the Connections tab.
+
+**Migrations:** none.
+
+**Next / open:**
+1. Merge `social-landing` in server and web (server first: the page reads the new route).
+2. Browser-check `/social` (rows at phone width, the row-wide link with the Next and approvals links inside it) and
+   the calendar's Meta and Instagram filters; not browser-checked on the branch (dev servers run on the main checkouts).
+3. Owner questions: keep the Threads row? keep Wave's role line as "Social & Content"?
