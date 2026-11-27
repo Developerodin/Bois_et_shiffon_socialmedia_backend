@@ -124,8 +124,13 @@ describe("starting a workflow", () => {
   });
 });
 
+/** What the engine does when a run's job ends: here the agents are run by hand, so their queued runs are closed. */
+const finish = (workflowId: string) => prisma.agentRun.updateMany({ where: { workflowId, status: { in: ["QUEUED", "RUNNING"] } }, data: { status: "SUCCEEDED" } });
+const runsOf = async (workflowId: string) => (await prisma.agentRun.findMany({ where: { workflowId }, orderBy: { createdAt: "asc" } })).map((r) => r.agentKey);
+const statusOf = async (workflowId: string) => (await prisma.contentWorkflow.findUniqueOrThrow({ where: { id: workflowId } })).status;
+
 describe("a workflow's posts through the chain", () => {
-  it("keeps the chosen products from the Planner through the Brief writer to the Creator's draft, on the chosen account", async () => {
+  it("waits for one approval after the Planner and the Brief writer, and keeps the chosen products to the draft", async () => {
     const res = await post(request({ ideaIds: [ideas[1]] }));
     const { workflow } = (await res.json()) as { workflow: View };
     // The model names one chosen product, and one it wasn't given.
@@ -133,17 +138,38 @@ describe("a workflow's posts through the chain", () => {
       ctx(async ({ mock }) => ({ posts: (mock as { posts: object[] }).posts.map((p) => ({ ...p, productIds: [products[1], products[2]] })) })),
       { chain: true, workflowId: workflow.id },
     );
+    await finish(workflow.id);
     const planned = await prisma.contentItem.findMany({ where: { workflowId: workflow.id } });
     expect(planned.length).toBeGreaterThan(0);
     for (const item of planned) {
       expect(item).toMatchObject({ channel: "INSTAGRAM_POST", connectionId: ig, productIds: [products[1]], status: "PLANNED" });
     }
-    // The Brief writer's model picks another product: the post keeps its own.
-    await briefAgent.run(ctx(async ({ mock }) => ({ ...(mock as object), productIds: [products[2]] })), { workflowId: workflow.id });
+    // Gate 1: the plan waits for a person; nothing was chained.
+    expect(await statusOf(workflow.id)).toBe("REVIEW_PLAN");
+    expect(await runsOf(workflow.id)).toEqual(["planner"]);
+    expect((await act(workflow.id, { action: "approve", stage: "briefs" })).status).toBe(409);
+    // A double click approves once: one Brief writer run.
+    const clicks = await Promise.all([act(workflow.id, { action: "approve", stage: "plan" }), act(workflow.id, { action: "approve", stage: "plan" })]);
+    expect(clicks.map((r) => r.status).sort()).toEqual([200, 202]);
+    expect(await runsOf(workflow.id)).toEqual(["planner", "brief"]);
+    expect(await statusOf(workflow.id)).toBe("RUNNING");
+
+    // The Brief writer's model picks another product: the post keeps its own. Gate 2: no Creator until approved.
+    await briefAgent.run(ctx(async ({ mock }) => ({ ...(mock as object), productIds: [products[2]] })), { chain: true, workflowId: workflow.id });
+    await finish(workflow.id);
     for (const item of await prisma.contentItem.findMany({ where: { workflowId: workflow.id } })) {
       expect(item).toMatchObject({ status: "BRIEF_READY", productIds: [products[1]] });
       expect((item.brief as { products: string[] }).products).toEqual(["Oak chair"]);
     }
+    expect(await statusOf(workflow.id)).toBe("REVIEW_BRIEFS");
+    expect(await runsOf(workflow.id)).toEqual(["planner", "brief"]);
+    const approved = await act(workflow.id, { action: "approve", stage: "briefs" });
+    expect(approved.status).toBe(202);
+    expect(((await approved.json()) as { workflow: View }).workflow.status).toBe("RUNNING");
+    expect(await runsOf(workflow.id)).toEqual(["planner", "brief", "creator"]);
+    expect((await act(workflow.id, { action: "approve", stage: "briefs" })).status).toBe(200);
+    expect(await runsOf(workflow.id)).toEqual(["planner", "brief", "creator"]);
+
     await creatorAgent.run(ctx(async ({ mock }) => mock), { workflowId: workflow.id });
     const drafted = await prisma.contentItem.findMany({ where: { workflowId: workflow.id }, include: { versions: true } });
     for (const item of drafted) {
@@ -152,35 +178,44 @@ describe("a workflow's posts through the chain", () => {
     }
   });
 
-  it("a cancel cancels the posts not yet written and stops the next stage", async () => {
+  it("a cancel at a gate cancels the posts not yet written, and the gate can't be approved after", async () => {
     const res = await post(request({ ideaIds: undefined, productMode: "catalogue", productIds: [] }));
     const { workflow } = (await res.json()) as { workflow: View };
     await prisma.opportunity.updateMany({ where: { id: ideas[0] }, data: { status: "SHORTLISTED" } });
     await plannerAgent.run(ctx(async ({ mock }) => mock), { chain: true, workflowId: workflow.id });
+    await finish(workflow.id);
+    expect(await statusOf(workflow.id)).toBe("REVIEW_PLAN");
     expect(await prisma.contentItem.count({ where: { workflowId: workflow.id, status: "PLANNED" } })).toBeGreaterThan(0);
     const cancelled = await act(workflow.id, { action: "cancel" });
     expect(((await cancelled.json()) as { workflow: View }).workflow.status).toBe("CANCELLED");
     expect(await prisma.contentItem.count({ where: { workflowId: workflow.id, status: { not: "CANCELLED" } } })).toBe(0);
+    expect((await act(workflow.id, { action: "approve", stage: "plan" })).status).toBe(409);
+    expect(await runsOf(workflow.id)).toEqual(["planner"]);
     await expect(briefAgent.run(ctx(async ({ mock }) => mock), { chain: true, workflowId: workflow.id })).rejects.toThrow(NothingToDoError);
     expect((await act(workflow.id, { action: "retry", stage: "brief" })).status).toBe(409);
   });
 
-  it("retrying a stage restarts only that stage, with posts waiting for it; the Planner only after it failed", async () => {
+  it("retrying a stage restarts only that stage, never past a gate; the Planner only after it failed", async () => {
     const res = await post(request({ ideaIds: undefined, productMode: "none", productIds: [] }));
     const { workflow } = (await res.json()) as { workflow: View };
     // Still running: nothing can be retried.
     expect((await act(workflow.id, { action: "retry", stage: "brief" })).status).toBe(409);
-    await prisma.agentRun.updateMany({ where: { workflowId: workflow.id }, data: { status: "SUCCEEDED" } });
-    // The Planner planned (a post written by hand here); its brief stage died.
+    await finish(workflow.id);
+    // The Planner planned (a post written by hand here) and waits at the plan's gate.
     await prisma.contentItem.create({ data: { workspaceId: ws, brandId: brand, title: "t", channel: "INSTAGRAM_POST", workflowId: workflow.id } });
+    await prisma.contentWorkflow.update({ where: { id: workflow.id }, data: { status: "REVIEW_PLAN" } });
     expect((await act(workflow.id, { action: "retry", stage: "planner" })).status).toBe(409);
-    expect((await act(workflow.id, { action: "retry", stage: "creator" })).status).toBe(409); // nothing briefed yet
+    expect((await act(workflow.id, { action: "retry", stage: "brief" })).status).toBe(409); // the plan isn't approved
+    expect((await act(workflow.id, { action: "approve", stage: "plan" })).status).toBe(202);
+    // Its Brief writer run died; the retry starts that stage again, and nothing else.
+    await prisma.agentRun.updateMany({ where: { workflowId: workflow.id, agentKey: "brief" }, data: { status: "FAILED" } });
+    expect((await act(workflow.id, { action: "retry", stage: "creator" })).status).toBe(409); // the briefs aren't approved
     const retried = await act(workflow.id, { action: "retry", stage: "brief" });
     expect(retried.status).toBe(202);
     const { runId } = (await retried.json()) as { runId: string };
     const runs = await prisma.agentRun.findMany({ where: { workflowId: workflow.id }, orderBy: { createdAt: "asc" } });
-    expect(runs.map((r) => r.agentKey)).toEqual(["planner", "brief"]);
-    expect(runs[1]).toMatchObject({ id: runId, trigger: "event", input: { chain: true, workflowId: workflow.id } });
+    expect(runs.map((r) => r.agentKey)).toEqual(["planner", "brief", "brief"]);
+    expect(runs[2]).toMatchObject({ id: runId, trigger: "event", input: { chain: true, workflowId: workflow.id } });
   });
 
   it("a failed Planner is retried with a new charge, the earlier one given back", async () => {

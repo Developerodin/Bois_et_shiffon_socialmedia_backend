@@ -235,18 +235,23 @@ async function plan(ctx: Parameters<AgentDefinition["run"]>[0], input: { chain?:
       const names = [...allowed].map((c) => c.replace(/_/g, " ").toLowerCase()).join(", ");
       throw new NothingToDoError(`Nothing to plan on ${names}: the ideas left don't suit these channels. Pick more channels, or plan on all of them.`);
     }
-    // A workflow that planned nothing (its ideas were planned already) ends as nothing to do, refunded.
-    if (wf && !planned) throw new NothingToDoError("Nothing to plan: the chosen ideas already have posts");
     if (unscheduled) await ctx.log("WARN", `${unscheduled} post(s) had no free slot in the next 30 days`);
-    if (wf && (await workflowCancelled(brand, wf.id))) {
-      // Cancelled while planning: the posts just written go the way cancel sent the others, and nothing is chained.
-      if (created.length) await prisma.contentItem.updateMany({ where: { id: { in: created }, status: "PLANNED", versions: { none: {} } }, data: { status: "CANCELLED" } });
-      await ctx.log("WARN", "The workflow was cancelled: the posts just planned are cancelled too");
-      return { planned: 0, unscheduled };
+    if (wf) {
+      if (await workflowCancelled(brand, wf.id)) {
+        // Cancelled while planning: the posts just written go the way cancel sent the others, and nothing follows.
+        if (created.length) await prisma.contentItem.updateMany({ where: { id: { in: created }, status: "PLANNED", versions: { none: {} } }, data: { status: "CANCELLED" } });
+        await ctx.log("WARN", "The workflow was cancelled: the posts just planned are cancelled too");
+        return { planned: 0, unscheduled };
+      }
+      // Nothing new, but an earlier attempt of this run (a job retry) planned the workflow's posts: they still go to review.
+      if (!planned && !(await prisma.contentItem.count({ where: { workflowId: wf.id, brandId: brand.brandId, status: "PLANNED" } }))) {
+        throw new NothingToDoError("Nothing to plan: the chosen ideas already have posts");
+      }
+      // A workflow stops here for a person to approve the plan (approveStage starts the Brief writer); never chained.
+      await prisma.contentWorkflow.updateMany({ where: { id: wf.id, status: { not: "CANCELLED" } }, data: { status: "REVIEW_PLAN" } });
+      return { planned, unscheduled };
     }
-    if (wf && input.chain && planned) await prisma.contentWorkflow.updateMany({ where: { id: wf.id, status: "PLANNING" }, data: { status: "RUNNING" } });
-    // A scoped chain stays on its channels, a workflow's on its own posts: the Brief writer and Creator take only those.
-    const scoped = wf ? { workflowId: wf.id } : allowed ? { channels: [...allowed] } : {};
-    if (input.chain && planned) await startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey: "brief", trigger: "event", input: { chain: true, ...scoped } }).catch(() => null);
+    // A scoped chain stays on its channels: the Brief writer and Creator take only their posts.
+    if (input.chain && planned) await startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey: "brief", trigger: "event", input: { chain: true, ...(allowed ? { channels: [...allowed] } : {}) } }).catch(() => null);
     return { planned, unscheduled };
 }

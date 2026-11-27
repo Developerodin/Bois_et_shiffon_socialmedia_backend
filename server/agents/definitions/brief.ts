@@ -139,12 +139,19 @@ export const briefAgent: AgentDefinition = {
       });
       await ctx.log(count ? "SUCCESS" : "WARN", count ? `Brief ready: ${item.title}` : `Skipped (it moved on while I was writing): ${item.title}`, { type: "ContentItem", id: item.id });
     }
-    if (chain && !cancelled) {
-      const start = (agentKey: string, next: number) =>
-        startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey, trigger: "event", input: { chain: true, round: next, ...(channels ? { channels } : {}), ...(workflowId ? { workflowId } : {}) } }).catch(() => null);
+    if (cancelled) return { briefed: items.length };
+    const start = (agentKey: string, next: number) =>
+      startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey, trigger: "event", input: { chain: true, round: next, ...(channels ? { channels } : {}), ...(workflowId ? { workflowId } : {}) } }).catch(() => null);
+    const more = async () =>
+      (await prisma.contentItem.count({ where: WAITING(brand.brandId, channels, workflowId) })) > 0 && round + 1 < CHAIN_ROUNDS && (await postAiAllowed(brand.workspaceId));
+    if (workflowId) {
+      // A workflow briefs all its posts in rounds, then stops for a person to approve the briefs (approveStage starts
+      // the Creator). Posts the rounds or the day's allowance left unbriefed stay PLANNED (retry the Brief writer).
+      if (chain && (await more())) await start("brief", round + 1);
+      else await prisma.contentWorkflow.updateMany({ where: { id: workflowId, status: { not: "CANCELLED" } }, data: { status: "REVIEW_BRIEFS" } });
+    } else if (chain) {
       await start("creator", round);
-      const waiting = await prisma.contentItem.count({ where: WAITING(brand.brandId, channels, workflowId) });
-      if (waiting > 0 && round + 1 < CHAIN_ROUNDS && (await postAiAllowed(brand.workspaceId))) await start("brief", round + 1);
+      if (await more()) await start("brief", round + 1);
     }
     return { briefed: items.length };
   },

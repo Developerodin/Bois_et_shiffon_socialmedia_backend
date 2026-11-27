@@ -8,9 +8,11 @@ export const WORKFLOW_SOURCES = ["web-ideas", "web-wizard", "mobile", "automatio
 /** manual: the posts feature only the chosen products. catalogue: the Brief writer picks from the catalogue, as today.
  * none: brand posts with no product. ("scout", products recommended by Scout, comes with the Scout step.) */
 export const WORKFLOW_PRODUCT_MODES = ["manual", "catalogue", "none"] as const;
-/** The stages a workflow runs, in order. Only the Planner is paid; the rest are chained. */
+/** The stages a workflow runs, in order. Only the Planner is paid. A workflow stops after the Planner and after the Brief
+ * writer for one approval of that stage's output (the batch, not each post); the Creator and Quality then run through to
+ * the usual approval of each post. */
 export const WORKFLOW_STAGES = ["planner", "brief", "creator", "quality"] as const;
-export const WORKFLOW_STATUSES = ["DRAFT", "SCOUTING", "REVIEW_IDEAS", "PLANNING", "REVIEW_PLAN", "RUNNING", "DONE", "NEEDS_ATTENTION", "FAILED", "CANCELLED"] as const;
+export const WORKFLOW_STATUSES = ["DRAFT", "SCOUTING", "REVIEW_IDEAS", "PLANNING", "REVIEW_PLAN", "REVIEW_BRIEFS", "RUNNING", "DONE", "NEEDS_ATTENTION", "FAILED", "CANCELLED"] as const;
 export const MAX_WORKFLOW_IDEAS = 5;
 export const MAX_WORKFLOW_PRODUCTS = 10;
 export const MAX_WORKFLOW_TARGETS = 9;
@@ -39,7 +41,11 @@ export type StartWorkflowRequest = {
   ideaIds?: string[];
 };
 
-export type PatchWorkflowRequest = { action: "cancel" } | { action: "retry"; stage: WorkflowStage };
+/** The review gates: "plan" (REVIEW_PLAN, approving starts the Brief writer), "briefs" (REVIEW_BRIEFS, the Creator). */
+export const WORKFLOW_GATES = ["plan", "briefs"] as const;
+export type WorkflowGate = (typeof WORKFLOW_GATES)[number];
+
+export type PatchWorkflowRequest = { action: "cancel" } | { action: "retry"; stage: WorkflowStage } | { action: "approve"; stage: WorkflowGate };
 
 /** A stage's latest run in the workflow. nothing-to-do: it ended with no work (not a failure). */
 export type WorkflowStageView = {

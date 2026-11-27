@@ -1,7 +1,7 @@
 import { problemResponse } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { paidStart } from "@/server/api/client";
-import { cancelWorkflow, PatchWorkflowBody, retryStage, workflowProblem, workflowStatus } from "@/server/content/workflow";
+import { approveStage, cancelWorkflow, PatchWorkflowBody, retryStage, workflowProblem, workflowStatus } from "@/server/content/workflow";
 import { kickIfDue, kickRunner } from "@/server/jobs/runner";
 import { PlanRequiredError, requirePlan } from "@/server/services/subscriptions";
 
@@ -26,7 +26,9 @@ export async function GET(request: Request, context: { params: Promise<Params> }
 
 /**
  * { action: "cancel" }: its posts not yet written are cancelled and its stages stop chaining.
- * { action: "retry", stage }: restarts that stage (and the chain after it). Retrying the Planner is paid again.
+ * { action: "approve", stage: "plan" | "briefs" }: one approval of the plan or the briefs starts the next agent (200
+ *   repeated on a double click, nothing started twice).
+ * { action: "retry", stage }: restarts that stage (never past a review gate). Retrying the Planner is paid again.
  */
 export async function PATCH(request: Request, context: { params: Promise<Params> }) {
   try {
@@ -37,6 +39,11 @@ export async function PATCH(request: Request, context: { params: Promise<Params>
     if (!parsed.success) return problemResponse({ type: "https://api.brandpilot/errors/content-workflow", title: "Invalid request", status: 422, detail: parsed.error.message });
     const body = parsed.data;
     if (body.action === "cancel") return Response.json({ workflow: await cancelWorkflow(scope, workflowId) });
+    if (body.action === "approve") {
+      const { workflow, runId, repeated } = await approveStage(scope, scope.userId, workflowId, body.stage);
+      if (!repeated) kickRunner();
+      return Response.json({ workflow, runId, repeated }, { status: repeated ? 200 : 202 });
+    }
     const retry = async () => {
       const { workflow, runId } = await retryStage(scope, scope.userId, workflowId, body.stage);
       kickRunner();

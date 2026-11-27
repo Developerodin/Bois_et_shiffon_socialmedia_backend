@@ -10,13 +10,16 @@ import { CREDIT_COSTS, InsufficientCreditsError, refundCharge, spendCredits } fr
 import { CHANNEL_PROVIDER, postAiAllowed } from "@/server/services/publishing";
 import {
   MAX_WORKFLOW_IDEAS, MAX_WORKFLOW_PRODUCTS, MAX_WORKFLOW_TARGETS, WORKFLOW_PRODUCT_MODES, WORKFLOW_SOURCES, WORKFLOW_STAGES,
-  type WorkflowStage, type WorkflowStageView, type WorkflowStatus, type WorkflowView,
+  WORKFLOW_GATES, type WorkflowGate, type WorkflowStage, type WorkflowStageView, type WorkflowStatus, type WorkflowView,
 } from "@/shared";
 
 /**
  * Content workflows ("create posts with agents"): one row holds what a person chose, and the stages stay AgentRuns
- * chained by status (Planner → Brief writer → Creator → Quality), each carrying the workflow's id. Resuming is
- * restarting a stage: work already done has moved on in status, so it is never redone.
+ * (Planner → Brief writer → Creator → Quality), each carrying the workflow's id. A workflow waits after the Planner
+ * (REVIEW_PLAN) and after the Brief writer (REVIEW_BRIEFS) for one approval of that stage's output (approveStage);
+ * the Creator then runs through Quality to the usual approval of each post. Paths without a workflow (the phone's
+ * Generate calendar, the monthly plan, Plan posts) chain straight through as before. Resuming is restarting a stage:
+ * work already done has moved on in status, so it is never redone.
  * Charging: the Planner is the one paid stage (flat, whatever the post count); the chained stages are free event runs,
  * capped by postAiAllowed and CHAIN_ROUNDS as today. Each Planner charge has its own refId (workflow:<id>:planner,
  * then :<n> for retries), so a repeated request can't charge twice and a retry after a refund isn't handed the
@@ -57,6 +60,7 @@ export const StartWorkflowBody = z
 export const PatchWorkflowBody = z.discriminatedUnion("action", [
   z.object({ action: z.literal("cancel") }).strict(),
   z.object({ action: z.literal("retry"), stage: z.enum(WORKFLOW_STAGES) }).strict(),
+  z.object({ action: z.literal("approve"), stage: z.enum(WORKFLOW_GATES) }).strict(),
 ]);
 
 /**
@@ -184,9 +188,10 @@ const UNFINISHED = ["PLANNED", "BRIEF_READY", "DRAFT_REVIEW"] as const;
 
 /**
  * A workflow as the apps show it: each stage's latest run, its posts counted by status, and its status. The stored
- * status is written on start, cancel and Planner chaining; the rest is derived here from the runs and posts (and
- * saved back): a run going → PLANNING/RUNNING; the Planner failed → FAILED; posts still waiting with nothing running
- * (rounds or the daily AI limit ran out, a blocked draft) → NEEDS_ATTENTION; otherwise DONE.
+ * status is written on start (PLANNING), at the review gates by the agents (REVIEW_PLAN, REVIEW_BRIEFS), on approval
+ * (RUNNING) and on cancel; the rest is derived here, never written back (a read can't race a gate or an approval):
+ * a run going → PLANNING/RUNNING; waiting at a gate → that gate; the Planner failed → FAILED; posts still waiting with
+ * nothing running (rounds or the daily AI limit ran out, a blocked draft) → NEEDS_ATTENTION; otherwise DONE.
  */
 export async function workflowStatus(scope: Scope, workflowId: string): Promise<WorkflowView> {
   const wf = await load(scope, workflowId);
@@ -216,11 +221,10 @@ export async function workflowStatus(scope: Scope, workflowId: string): Promise<
   if (wf.status !== "CANCELLED" && runs.length) {
     const planner = stages[0]!;
     if (runs.some((r) => ACTIVE.includes(r.status))) status = planner.state === "queued" || planner.state === "running" ? "PLANNING" : "RUNNING";
+    else if (wf.status === "REVIEW_PLAN" || wf.status === "REVIEW_BRIEFS") status = wf.status;
     else if (planner.state === "failed") status = "FAILED";
     else if (UNFINISHED.some((s) => posts[s])) status = "NEEDS_ATTENTION";
     else status = "DONE";
-    // Never over a cancel that landed meanwhile.
-    if (status !== wf.status) await prisma.contentWorkflow.updateMany({ where: { id: wf.id, status: { not: "CANCELLED" } }, data: { status } });
   }
   return {
     id: wf.id, status, source: wf.source as WorkflowView["source"], createdAt: wf.createdAt.toISOString(),
@@ -281,14 +285,55 @@ export async function retryStage(scope: Scope, userId: string | undefined, workf
     // One more than every charge so far, so a refunded attempt's refId is never reused.
     runId = (await startPlanner(scope, userId, workflowId, plannerRef(workflowId, refs.length + 1))).id;
   } else {
+    // A retry never skips a review gate: the Brief writer is retried only once the plan was approved (a brief run was
+    // started for it), the Creator once the briefs were, Quality once drafts were written.
+    const after = stage === "brief" ? "brief" : "creator";
+    if (!(await prisma.agentRun.count({ where: { workflowId, brandId: scope.brandId, agentKey: after } }))) {
+      throw new WorkflowError(stage === "brief" ? "Approve the plan first" : "Approve the briefs first", 409);
+    }
     if (!(await prisma.contentItem.count({ where: { workflowId, brandId: scope.brandId, studio: false, ...WAITING_FOR[stage] } }))) {
       throw new WorkflowError("No posts in this workflow are waiting for that step", 409);
     }
     if (!(await postAiAllowed(scope.workspaceId))) throw new WorkflowError("Today's AI allowance for posts is used up. Try again tomorrow.", 429);
     runId = (await startAgentRun({ workspaceId: scope.workspaceId, brandId: scope.brandId, agentKey: stage, trigger: "event", userId, input: stage === "quality" ? { workflowId } : { chain: true, workflowId } })).id;
   }
-  // The status follows from the new run (workflowStatus derives it and saves it back).
+  // The status follows from the new run (workflowStatus derives it).
   return { workflow: await workflowStatus(scope, workflowId), runId };
+}
+
+/** Each review gate: the status it waits in, the agent its approval starts, and the posts it approves. */
+const GATES: Record<WorkflowGate, { waits: "REVIEW_PLAN" | "REVIEW_BRIEFS"; next: "brief" | "creator"; posts: "PLANNED" | "BRIEF_READY" }> = {
+  plan: { waits: "REVIEW_PLAN", next: "brief", posts: "PLANNED" },
+  briefs: { waits: "REVIEW_BRIEFS", next: "creator", posts: "BRIEF_READY" },
+};
+
+/**
+ * One approval of a stage's output (the whole plan, or all the briefs) starts the next agent, chain on within its
+ * stage (the Brief writer's rounds; the Creator's rounds and Quality). Taken under a per-workflow lock: a double
+ * click finds the workflow moved on and gets it back (repeated: true) with no second run. The gate's posts must
+ * still be there (a person may have cancelled them all). Free: event runs, like the chain they replace.
+ * ponytail: the next agent's run commits in its own transaction before the status moves to RUNNING; a crash between
+ * leaves the gate showing with the run going, and approving again folds into that run (same input).
+ */
+export async function approveStage(scope: Scope, userId: string | undefined, workflowId: string, gate: WorkflowGate): Promise<{ workflow: WorkflowView; runId: string | null; repeated: boolean }> {
+  const { waits, next, posts } = GATES[gate];
+  const result = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`content-workflow:${workflowId}`}))`;
+    const wf = await tx.contentWorkflow.findFirst({ where: { id: workflowId, workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { status: true } });
+    if (!wf) throw new WorkflowError("Workflow not found", 404);
+    if (wf.status !== waits) {
+      // Approved already (a double click, or another person): nothing more to start.
+      const started = await tx.agentRun.findFirst({ where: { workflowId, brandId: scope.brandId, agentKey: next }, orderBy: { createdAt: "desc" }, select: { id: true } });
+      if (started && wf.status !== "CANCELLED") return { runId: started.id, repeated: true };
+      throw new WorkflowError(wf.status === "CANCELLED" ? "This workflow was cancelled" : "This workflow isn't waiting for that approval", 409);
+    }
+    if (!(await tx.contentItem.count({ where: { workflowId, brandId: scope.brandId, status: posts } }))) throw new WorkflowError("No posts are left to approve", 409);
+    const run = await startAgentRun({ workspaceId: scope.workspaceId, brandId: scope.brandId, agentKey: next, trigger: "event", userId, input: { chain: true, workflowId } });
+    // Not over a cancel that landed meanwhile (the run then stops at its first check).
+    await tx.contentWorkflow.updateMany({ where: { id: workflowId, status: waits }, data: { status: "RUNNING" } });
+    return { runId: run.id, repeated: false };
+  });
+  return { workflow: await workflowStatus(scope, workflowId), ...result };
 }
 
 /** A workflow error, an agent start refusal or an access error as the routes answer it (402s in the paywall shape). */
