@@ -1,7 +1,7 @@
 import "server-only";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/server/db/prisma";
-import { AD_ALERT_KEYS, brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, holdsAll, isClientGrant, isClientMember, memberRole } from "@/server/auth/permissions";
+import { AD_ALERT_KEYS, SEO_ALERT_KEYS, brandMemberPerms, CLIENT_GRANT_WHERE, type Db, hasOtherHolder, holdsAll, isClientGrant, isClientMember, memberRole } from "@/server/auth/permissions";
 import { CLIENT_REVIEWER, rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { CRM_TASK_KEYS } from "@/shared";
 import { lockRow } from "@/server/services/publishing";
@@ -159,26 +159,32 @@ const liveBrand = (a: Prisma.Sql, workspaceId: string) =>
   Prisma.sql`EXISTS (SELECT 1 FROM "Brand" b WHERE b.id = ${a}."brandId" AND b."workspaceId" = ${workspaceId} AND b.status <> 'ARCHIVED')`;
 
 /**
+ * The brands on which someone holds every one of `keys` (role ∪ grant, workspace role required, holdsAll), as a SQL
+ * condition on the notice's brand: TRUE when their workspace role alone does, else the granted brands that do.
+ */
+function alertBrandsSql(own: string[] | null, access: MemberAccess, keys: readonly PermissionKey[]): Prisma.Sql {
+  const n = ref("n");
+  if (!own) return Prisma.sql`FALSE`;
+  if (holdsAll(own, [], keys)) return Prisma.sql`TRUE`;
+  const ids = access.grants.filter((g) => holdsAll(own, rolePermissions(g.role), keys)).map((g) => g.brandId);
+  return ids.length ? Prisma.sql`${n}."brandId" IN (${Prisma.join(ids)})` : Prisma.sql`FALSE`;
+}
+
+/**
  * Which notifications a person sees in one workspace, as a SQL condition on Notification `n` LEFT JOIN Task `t`, from
  * one memberAccess: a task notice while they can still see its task (tasksAcrossSql's rule), an AD_ALERT notice
- * while they hold brand.read and ads.read on its brand (role ∪ grant, workspace role required, holdsAll) and the brand
- * isn't archived.
+ * while they hold brand.read and ads.read on its brand, a SEO_ALERT notice while they hold brand.read and
+ * analytics.read on it (role ∪ grant, workspace role required, holdsAll), the brand not archived.
  */
 export async function visibleNotificationsSql(userId: string, workspaceId: string): Promise<Prisma.Sql> {
   const access = await memberAccess(workspaceId, userId);
   const tasks = tasksAcrossSql(access, userId, workspaceId, "t");
   const own = access.found?.role ? rolePermissions(access.found.role) : null;
   const n = ref("n");
-  let brands: Prisma.Sql;
-  if (!own) brands = Prisma.sql`FALSE`;
-  else if (holdsAll(own, [], AD_ALERT_KEYS)) brands = Prisma.sql`TRUE`;
-  else {
-    const ids = access.grants.filter((g) => holdsAll(own, rolePermissions(g.role), AD_ALERT_KEYS)).map((g) => g.brandId);
-    brands = ids.length ? Prisma.sql`${n}."brandId" IN (${Prisma.join(ids)})` : Prisma.sql`FALSE`;
-  }
-  // The ads branch is on n: t is NULL for these rows under the LEFT JOIN.
-  const ads = Prisma.sql`(n.kind = 'AD_ALERT' AND n."adAlertId" IS NOT NULL AND ${brands} AND ${liveBrand(n, workspaceId)})`;
-  return Prisma.sql`((n."taskId" IS NOT NULL AND ${tasks}) OR ${ads})`;
+  // The alert branches are on n: t is NULL for these rows under the LEFT JOIN.
+  const ads = Prisma.sql`(n.kind = 'AD_ALERT' AND n."adAlertId" IS NOT NULL AND ${alertBrandsSql(own, access, AD_ALERT_KEYS)} AND ${liveBrand(n, workspaceId)})`;
+  const seo = Prisma.sql`(n.kind = 'SEO_ALERT' AND n."seoAlertId" IS NOT NULL AND ${alertBrandsSql(own, access, SEO_ALERT_KEYS)} AND ${liveBrand(n, workspaceId)})`;
+  return Prisma.sql`((n."taskId" IS NOT NULL AND ${tasks}) OR ${ads} OR ${seo})`;
 }
 
 /**

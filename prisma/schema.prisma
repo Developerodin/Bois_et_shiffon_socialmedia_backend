@@ -1456,6 +1456,8 @@ enum NotificationKind {
   TASK_APPROVED
   TASK_CHANGES_REQUESTED
   AD_ALERT
+  /// added in its own migration (20261126150300): an enum value can't be used in the migration that adds it
+  SEO_ALERT
 }
 
 enum TaskAttachmentRole {
@@ -1642,15 +1644,18 @@ model Notification {
   taskId      String?
   /// AD_ALERT notices: the alert they point at (no task)
   adAlertId   String?
+  /// SEO_ALERT notices: the lead alert of the run that raised them (no task)
+  seoAlertId  String?
   actorId     String?
   dedupeKey   String           @unique
   readAt      DateTime?
   createdAt   DateTime         @default(now())
 
-  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  brand   Brand    @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  task    Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  adAlert AdAlert? @relation(fields: [adAlertId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brand    Brand     @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  task     Task?     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  adAlert  AdAlert?  @relation(fields: [adAlertId], references: [id], onDelete: Cascade)
+  seoAlert SeoAlert? @relation(fields: [seoAlertId], references: [id], onDelete: Cascade)
 
   @@index([userId, workspaceId, readAt, createdAt])
   @@index([createdAt])
@@ -1658,6 +1663,7 @@ model Notification {
   @@index([taskId])
   @@index([brandId, workspaceId])
   @@index([adAlertId])
+  @@index([seoAlertId])
 }
 
 enum DataSourceKind {
@@ -1993,7 +1999,8 @@ model SeoAlert {
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
 
-  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  brand         Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  notifications Notification[]
 
   @@index([brandId, subjectKey, lastDay])
   @@index([brandId, lastDay])

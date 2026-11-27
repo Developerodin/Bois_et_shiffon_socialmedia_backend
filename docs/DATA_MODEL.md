@@ -477,3 +477,10 @@ Additive migrations, from `20261126150000` on (docs/superpowers/plans/2026-11-26
   within 7 days of an episode's lastDay moves it on (the shared episode step, server/alerts/episode.ts). Indexes
   `(brandId, subjectKey, lastDay)`, `(brandId, lastDay)`, `(brandId, createdAt)` (the digest's week), `(brandId,
   pageKey)` (the URL page) and `(brandId, runKey)`. Cascades with the brand. A few rows per brand per month.
+- `NotificationKind.SEO_ALERT` (`20261126150300_notification_seo_alert_kind`, alone: an enum value can't be used in the
+  migration that adds it) and `Notification.seoAlertId` (`20261126150400_notification_seo_alert`; nullable, cascades
+  with the alert, indexed): one grouped notice per recipient for a decline run that inserted alerts, pointing at its
+  lead alert; dedupeKey `SEO_ALERT:<userId>:<runKey>`. Who gets one: active people holding brand.read and
+  analytics.read on the brand (role ∪ grant, client reviewers included); who still sees it: the same keys at read time,
+  brand not archived (visibleNotificationsSql). `DataSource.settings.declinesSeenFor` (SEARCH_CONSOLE): the site whose
+  first evaluation ran (quiet); choosing a site again rewrites the settings.

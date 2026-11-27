@@ -1862,7 +1862,8 @@ alerts reach the bell only in a workspace with tasks on. The digest and the chat
 Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (shared sync only) on `seo-depth`.
 
 - **Migrations to apply** (none applied to the dev DB yet, in order): `20261126150000_search_query_day`,
-  `20261126150100_site_crawl`, `20261126150200_seo_alert`. Check each keeps `SearchDay`'s and `SearchQueryDay`'s INCLUDE indexes.
+  `20261126150100_site_crawl`, `20261126150200_seo_alert`, `20261126150300_notification_seo_alert_kind`,
+  `20261126150400_notification_seo_alert`. Check each keeps `SearchDay`'s and `SearchQueryDay`'s INCLUDE indexes.
 - **Search Console queries** (Task 1): each day also reads the top 500 queries and top 500 query-page pairs into
   `SearchQueryDay` (400-day retention by housekeeping). Google's limits, read from its docs on 2026-11-26, are in the
   header of server/data/search-console.ts. Existing sources get queries from their next daily run; no query backfill.
@@ -1899,6 +1900,11 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
   page's alerts, the digest's seo section (count and up to 3 paths, no query text) and the chat's
   `searchPerformance.decliningPages`. `GET search/declines` (analytics.read). The ads alerts now share the episode
   step (server/alerts/episode.ts), behaviour unchanged.
+- **Declines in the bell** (Task 5b, `NotificationKind.SEO_ALERT`): one grouped notice per run that inserted alerts
+  ("3 pages losing search traffic, e.g. /a"), written in the run's transaction, to people with brand.read and
+  analytics.read (clients included); none on a site's first evaluation (`settings.declinesSeenFor`) or for a run that
+  only extended episodes. The bell links to the page's URL history (or the Search tab for a group or the whole site)
+  only when the `data` web flag is on. Visibility shares `alertBrandsSql` with the ads alerts (server/tasks/access.ts).
 - Waits on Search Console verification for B&C: everything above but the link check ships tested against fixtures and
   stays empty until then. Web components weren't browser-checked on the branch (no dev server or build was run).
 

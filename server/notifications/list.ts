@@ -8,16 +8,17 @@ import { TEAM_MEMBER, personName } from "@/server/content/person-name";
 import { prisma } from "@/server/db/prisma";
 import { clientMemberSql, visibleNotificationsSql } from "@/server/tasks/access";
 import { adAlertText } from "@/server/ads/alerts";
+import { seoAlertGroupText, seoAlertUrl } from "@/server/seo/declines";
 import { fromCursor, toCursor } from "@/server/tasks/cursor";
 import { taskProblem } from "@/server/tasks/errors";
-import type { AdAlertKind, NotificationDto, NotificationPageDto } from "@/shared";
+import type { AdAlertKind, NotificationDto, NotificationPageDto, SeoAlertKind } from "@/shared";
 
 const PAGE = 20; // the query reads PAGE + 1 (LIMIT 21) to know if there is more
 // The count stops at 100 (LIMIT 100): the bell shows "99+" past that, so counting further is wasted work.
 
 /**
- * Every notification read left-joins its task as `t` (an AD_ALERT notice has none), so the task visibility rule
- * applies to task notices and the ads rule to alert notices (visibleNotificationsSql).
+ * Every notification read left-joins its task as `t` (an alert notice has none), so the task visibility rule
+ * applies to task notices and the alert rules to alert notices (visibleNotificationsSql).
  */
 const FROM = Prisma.sql`FROM "Notification" n LEFT JOIN "Task" t ON t.id = n."taskId"`;
 
@@ -36,15 +37,22 @@ type Row = {
   id: string; kind: string; brandId: string; taskId: string | null; taskTitle: string | null; actorId: string | null;
   actorName: string | null; actorEmail: string | null; actorGone: boolean | null; actorClient: boolean | null; readAt: Date | null; createdAt: Date;
   alertKind: AdAlertKind | null; alertAccountId: string | null; alertCampaignName: string | null; alertCurrency: string | null; alertValues: unknown;
+  seoKind: SeoAlertKind | null; seoPageKey: string | null; seoValues: unknown; seoRunCount: number | null;
   count?: number;
 };
 
 const COLUMNS = (n: Prisma.Sql) => Prisma.sql`n.id, n.kind::text AS kind, n."brandId", n."taskId", t.title AS "taskTitle", n."actorId", a.name AS "actorName",
            a.email AS "actorEmail", (a."deletedAt" IS NOT NULL OR a.status <> 'ACTIVE') AS "actorGone",
            ${n} AS "actorClient", n."readAt", n."createdAt", al.kind::text AS "alertKind", al."accountId" AS "alertAccountId",
-           al."campaignName" AS "alertCampaignName", al.currency AS "alertCurrency", al."values" AS "alertValues"`;
-/** An AD_ALERT notice's alert, for its text (same brand, so a notice can't show another brand's alert). */
-const ALERT = Prisma.sql`LEFT JOIN "AdAlert" al ON al.id = n."adAlertId" AND al."brandId" = n."brandId"`;
+           al."campaignName" AS "alertCampaignName", al.currency AS "alertCurrency", al."values" AS "alertValues",
+           sa.kind::text AS "seoKind", sa."pageKey" AS "seoPageKey", sa."values" AS "seoValues",
+           (SELECT count(*)::int FROM "SeoAlert" x WHERE x."brandId" = sa."brandId" AND x."runKey" = sa."runKey") AS "seoRunCount"`;
+/**
+ * An alert notice's alert, for its text: AD_ALERT's AdAlert (same brand), SEO_ALERT's lead SeoAlert (same workspace and
+ * brand), so a notice can't show another brand's alert. A SEO notice counts its run's alerts by runKey.
+ */
+const ALERT = Prisma.sql`LEFT JOIN "AdAlert" al ON al.id = n."adAlertId" AND al."brandId" = n."brandId"
+  LEFT JOIN "SeoAlert" sa ON sa.id = n."seoAlertId" AND sa."brandId" = n."brandId" AND sa."workspaceId" = n."workspaceId"`;
 
 /**
  * The person's unread notices in the workspace as `n`, with the columns the visibility rule and the group pick read.
@@ -53,7 +61,7 @@ const ALERT = Prisma.sql`LEFT JOIN "AdAlert" al ON al.id = n."adAlertId" AND al.
  * rows, 0 unread).
  */
 const unreadRows = (userId: string, workspaceId: string) => Prisma.sql`(
-        SELECT id, "taskId", "userId", "workspaceId", kind, "brandId", "adAlertId", "createdAt" FROM "Notification"
+        SELECT id, "taskId", "userId", "workspaceId", kind, "brandId", "adAlertId", "seoAlertId", "createdAt" FROM "Notification"
         WHERE "userId" = ${userId} AND "workspaceId" = ${workspaceId} AND "readAt" IS NULL OFFSET 0
       ) n`;
 
@@ -103,9 +111,12 @@ function toDto(r: Row): NotificationDto {
       ? { id: r.actorId, name: TEAM_MEMBER, gone: true, client: !!r.actorClient }
       : { id: r.actorId, name: personName({ name: r.actorName, email: r.actorEmail }, { reveal: false }), gone: !!r.actorGone, client: !!r.actorClient }
     : null;
+  const seoUrl = r.seoPageKey ? seoAlertUrl(r.seoPageKey) : null;
   const alert = r.alertKind
     ? { kind: r.alertKind, text: adAlertText({ kind: r.alertKind, accountId: r.alertAccountId, campaignName: r.alertCampaignName, currency: r.alertCurrency ?? "", values: r.alertValues }) }
-    : null;
+    : r.seoKind
+      ? { kind: r.seoKind, text: seoAlertGroupText({ kind: r.seoKind, pageKey: r.seoPageKey ?? "", values: r.seoValues }, r.seoRunCount ?? 1), ...(seoUrl ? { seoUrl } : {}) }
+      : null;
   return { id: r.id, kind: r.kind, count: r.count ?? 1, brandId: r.brandId, taskId: r.taskId, taskTitle: r.taskTitle, actor, alert, readAt: r.readAt?.toISOString() ?? null, createdAt: r.createdAt.toISOString() };
 }
 

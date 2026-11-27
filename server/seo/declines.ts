@@ -6,6 +6,7 @@ import { PAGES_PER_DAY } from "@/server/data/search-console";
 import { addDays, dayDate, dayOf, type SyncOutcome } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
 import { enqueueJob } from "@/server/jobs/queue";
+import { notifySeoAlerts, seoAlertRecipients } from "@/server/notifications/seo";
 import { cleanText, cleanTitle } from "@/server/text";
 
 /**
@@ -155,6 +156,16 @@ export function seoAlertText(a: AlertFields): string {
   }
 }
 
+/**
+ * A bell notice's line: the lead alert's own line when its run raised one alert, else how many pages and the lead's
+ * path ("3 pages losing search traffic, e.g. /a"). A run raises SITE_DOWN alone, so a group is always pages.
+ */
+export function seoAlertGroupText(lead: AlertFields, count: number): string {
+  if (count <= 1) return seoAlertText(lead);
+  const path = cleanTitle(pathOf(lead.pageKey) ?? "");
+  return `${count} pages losing search traffic${path ? `, e.g. ${path}` : ""}`;
+}
+
 /** Is the alert open for a source synced through `syncedThrough`? */
 export const isOpen = (lastDay: string, syncedThrough: string | null) => !!syncedThrough && lastDay >= addDays(syncedThrough, -OPEN_DAYS);
 
@@ -259,6 +270,12 @@ type Settings = { backfill?: { start?: string }; declinesSeenFor?: string };
  * Job handler. Re-reads the source by id AND the payload's workspace and brand, kind SEARCH_CONSOLE and not OFF, so a
  * payload naming another brand's source finds nothing. Reads the two windows' PAGE rows grouped by page and window, the
  * SITE clicks and the capped days' floors, evaluates, and stores every candidate in one transaction (≤ 21 rows).
+ *
+ * The bell (Task 5b): when the run inserted alerts (not only extended episodes), one SEO_ALERT notice per recipient
+ * points at the lead one (the biggest click loss; SITE_DOWN is always alone), written in the same transaction. None on
+ * a site's first evaluation (after its backfill every decline under way would read as new): that run records quietly
+ * and marks the site seen (`settings.declinesSeenFor`, merged into the jsonb so other keys stay). Choosing a site
+ * again rewrites the settings, so its next first evaluation is quiet again.
  */
 export async function runSeoDeclines(payload: unknown) {
   const p = Payload.parse(payload);
@@ -300,9 +317,12 @@ export async function runSeoDeclines(payload: unknown) {
     day: p.day, brandId: scope.brandId, backfillStart, capFloors: new Map(floors.map((f) => [f.day, f.floor])),
   });
   const runKey = runKeyOf(source.id, p.day);
+  const seen = settings.declinesSeenFor === siteUrl;
+  const recipients = seen && candidates.length ? await seoAlertRecipients(scope) : [];
   await prisma.$transaction(async (tx) => {
+    const inserted: string[] = [];
     for (const c of candidates) {
-      await recordEpisode(tx, {
+      const { insertedId } = await recordEpisode(tx, {
         table: "SeoAlert",
         scope,
         subjectKey: c.subjectKey,
@@ -319,6 +339,14 @@ export async function runSeoDeclines(payload: unknown) {
           select: { id: true },
         }))[0],
       });
+      if (insertedId) inserted.push(insertedId);
+    }
+    // Candidates come biggest loss first, so the first inserted is the lead.
+    if (seen && inserted.length) await notifySeoAlerts(tx, { leadAlertId: inserted[0]!, runKey, ...scope }, recipients);
+    if (!seen) {
+      await tx.$executeRaw`
+        UPDATE "DataSource" SET "settings" = COALESCE("settings", '{}'::jsonb) || jsonb_build_object('declinesSeenFor', ${siteUrl}::text)
+        WHERE id = ${source.id} AND "workspaceId" = ${scope.workspaceId} AND "brandId" = ${scope.brandId}`;
     }
   });
 }
