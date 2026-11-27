@@ -318,3 +318,10 @@ Total: roughly 71–90 hours. The browser checks the brief asks for on /social a
 5. **LinkedIn and X:** leave them out of agent planning for now (PLANNER_HAND_CHANNELS stays off).
 6. **Disconnected channel:** a post planned for a channel that is disconnected stays a draft. If its date is in the
    future: a notification plus an attention badge on that channel's row on /social. If its date has passed: nothing.
+
+**Answer 2, confirmed 17:22:** "one approval then move to next agent". A workflow pauses after each agent for one
+approval of that stage's output (the batch, not each post one by one), then the next agent starts:
+Scout → approve ideas → Planner → approve plan → Brief writer → approve briefs → Creator → Quality (the check runs on
+each draft right away) → approve each post (the existing per-post approval). Workflow statuses: REVIEW_IDEAS,
+REVIEW_PLAN, REVIEW_BRIEFS, then RUNNING/DONE. Applies to workflows started from the web (Plan / Create with agents).
+The mobile "Generate calendar" and the monthly automation keep running straight through until the owner says otherwise.
