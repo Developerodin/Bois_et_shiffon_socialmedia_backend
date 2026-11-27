@@ -2172,6 +2172,17 @@ Re-run `npm run sync:shared` after the merge so every `.hash` matches.
      it). Browser-checked the dialog on Pinterest, X and Meta calendars (no post created).
    - Fix (web `2464282`): the month calendar crashed "Too many re-renders" on any post without a picture
      (`useStableSignedUrl` compared null with undefined).
-   - Batch 3 (assistant suggestions per channel) running from 15:10; batch 4 (channel analytics) after it.
+   - Channels polish (web `a62de20`): account names under each connection, Manage as a hover ghost, round icons.
+   - Batch 3 (server `d6c01c5`, web `d58941c`): the assistant follows the channel calendar (starters per channel,
+     "Context: <Channel> calendar", optional `channel` on chat; `CHAT_PROMPT_VERSION` 10). Browser-checked.
+   - Batch 4 (server `a775f48` + fix `c2cb7e4`, web `f60ae5d`): `GET insights/channel?channel=instagram|facebook|meta`
+     (analytics.read), live Graph reads with a 15-min in-memory cache (partial answers 2 min); panel on channel
+     calendars. Live: IG followers, reach, views, interactions, daily reach, new followers, countries, last 12 posts;
+     FB Page followers, media views, engagements, page views, daily views. FB per-post for posts not published via the
+     app needs `pages_read_user_content` (app review). The merged version 500'd on every call (scope spread into Prisma
+     `where`); fixed. IG day labels kept as the day itself (today's partial value is stamped today).
+   - 4-lens reviews done for batches 2–4; fixes landed (publish form pictures `b4c52cf`, request id per channel
+     `082c62c`, creator prompt `0fce6b8`). Open nits: listPosts takes one channel (Meta = several lookups), alt-text
+     warning on text-only written posts, `NewPostInput.channel` literal instead of `AI_POST_CHANNELS`.
    - Throwaway-DB recipe: set BOTH `DATABASE_URL` and `DATABASE_URL_UNPOOLED` to the test URL for `prisma migrate
      deploy`; the schema's directUrl is the unpooled one, so setting only the first points the deploy at the dev DB.
