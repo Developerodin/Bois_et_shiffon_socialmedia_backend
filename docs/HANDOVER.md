@@ -2152,7 +2152,12 @@ Re-run `npm run sync:shared` after the merge so every `.hash` matches.
 4. **Next builds, when the owner picks:** CRM Phase B for B&C (Instagram/Messenger, no Meta review needed once B&C's
    admin has a role on our app); the blog editorial calendar; small CRM extras (create/erase a company from the
    Companies view, a `?company=` link, a conversation search endpoint).
-5. **In progress from 13:55:** the Channels page and channel-aware calendar refinement (owner's brief, 2026-11-27),
-   web only, in passes: (1) channel list hierarchy and connection states, (2) a channel opens its filtered calendar
-   with a channel header, (3) platform-specific event card details from real post data. Later passes: channel-specific
-   composer, channel-aware assistant suggestions, channel analytics.
+5. **Done 14:30:** the Channels page and channel-aware calendar, passes 1–3 of the owner's brief (web merge of
+   `channels-calendar` + `f019df2`, browser-checked at 1440 and 390). /social: connection states from `GET connections`
+   (Connected, Partially connected, Needs reconnect, Not connected, Manual publishing), real figures, Awaiting approval
+   and Coming up lists; a row opens `/calendar?cf_channel=…` with a channel header and counts; calendar cards show the
+   Instagram format, a picture, a carousel's picture count and a pin's link. Meta = the META (Facebook Pages) and
+   INSTAGRAM connections together. Would need server data: Pinterest board, Facebook Page, X thread, LinkedIn document
+   on the post; a per-channel CSV export. Limits: the Scheduled figure and lists come from the calendar list (open posts
+   + 30 days, 200 rows); New post can only make an Instagram post or carousel (the composer and NewPostInput). Later
+   passes: channel-specific composer, channel-aware assistant suggestions, channel analytics.
