@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const safeFetchBytes = vi.hoisted(() => vi.fn());
 vi.mock("@/server/research/crawl", async (importOriginal) => ({ ...(await importOriginal<object>()), safeFetchBytes }));
 
-import { discoverProductUrls, parseSitemap } from "@/server/catalog/sitemap";
+import { discoverProductUrls, discoverSiteUrls, parseSitemap } from "@/server/catalog/sitemap";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 type Body = string | Uint8Array | { status?: number; body?: string | Uint8Array; truncated?: boolean };
@@ -197,5 +197,29 @@ describe("discoverProductUrls", () => {
     expect(res.urls).toHaveLength(5000);
     expect(res.urls[0].url).toBe(`${O}/p/5001`);
     expect(res.urls.at(-1)!.url).toBe(`${O}/p/2`);
+  });
+});
+
+describe("discoverSiteUrls (every page kind, for the link check)", () => {
+  it("reads every child sitemap, keeps every page kind and drops other hosts", async () => {
+    site[`${O}/sitemap.xml`] = index([`${O}/sitemap.pages.xml`, `${O}/sitemap.products.xml`, "https://evil.test/sitemap.blog.xml"]);
+    site[`${O}/sitemap.pages.xml`] = urlset([`${O}/about`, "https://evil.test/about"]);
+    site[`${O}/sitemap.products.xml`] = urlset([`${O}/products/chair`]);
+    const res = await discoverSiteUrls(O, "", undefined, 100);
+    expect(fetched()).toEqual([`${O}/sitemap.xml`, `${O}/sitemap.pages.xml`, `${O}/sitemap.products.xml`]);
+    expect(res.urls.map((u) => u.url).sort()).toEqual([`${O}/about`, `${O}/products/chair`]);
+    expect(res).toMatchObject({ complete: true, capped: false });
+    expect(res).not.toHaveProperty("reason");
+  });
+
+  it("caps at max, newest lastmod first, and applies robots.txt", async () => {
+    site[`${O}/sitemap.xml`] = urlset([[`${O}/old`, "2026-01-01"], [`${O}/new`, "2026-03-01"], [`${O}/mid`, "2026-02-01"], [`${O}/private/x`, "2026-04-01"]]);
+    const res = await discoverSiteUrls(O, "User-agent: *\nDisallow: /private", undefined, 3);
+    expect(res.urls.map((u) => u.url)).toEqual([`${O}/new`, `${O}/mid`]);
+    expect(res).toMatchObject({ complete: false, capped: true });
+  });
+
+  it("no sitemap: empty and incomplete", async () => {
+    expect(await discoverSiteUrls(O, "", undefined, 100)).toEqual({ urls: [], complete: false, capped: false });
   });
 });

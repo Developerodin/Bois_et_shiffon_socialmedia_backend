@@ -139,6 +139,31 @@ function gunzip(bytes: Uint8Array, limit: number): Uint8Array | null {
  * With a sitemap named product/produit only those are used; otherwise only product-looking paths count.
  */
 export async function discoverProductUrls(origin: string, robots: string, signal?: AbortSignal): Promise<Discovery> {
+  const found = await listSitemapUrls(origin, robots, signal, { prefer: PRODUCT_SITEMAP, keep: (u) => PRODUCT_PATH.test(u.pathname), max: MAX_PAGES });
+  return found.urls.length ? found : { ...found, reason: "no-product-pages" };
+}
+
+/**
+ * Every page a site's sitemaps list (any kind), newest lastmod first, at most `max`, robots.txt applied, other hosts
+ * dropped; `complete` as discoverProductUrls'. For the weekly link check (server/seo/site-crawl.ts).
+ */
+export function discoverSiteUrls(origin: string, robots: string, signal: AbortSignal | undefined, max: number): Promise<Discovery> {
+  return listSitemapUrls(origin, robots, signal, { max });
+}
+
+/**
+ * The sitemap walk both discoveries share: the roots (robots.txt `Sitemap:` lines, else /sitemap.xml then
+ * /sitemap_index.xml), one level of child sitemaps (at most MAX_CHILDREN), then the `<url>` entries, same site only,
+ * de-duplicated, newest lastmod first, robots.txt checked on the newest `max`, capped at `max`.
+ * `prefer`: sitemap files whose path matches it win: when the index names any, only they are read, and when they
+ * listed entries, only those are used (and `keep` isn't applied to them). `keep`: which other entries count.
+ */
+export async function listSitemapUrls(
+  origin: string, robots: string, signal: AbortSignal | undefined,
+  opts: { keep?: (u: URL) => boolean; max: number; prefer?: RegExp },
+): Promise<Discovery> {
+  const { keep = () => true, max, prefer } = opts;
+  const preferredFile = (u: URL) => !!prefer && prefer.test(u.pathname);
   const base = new URL(origin);
   const deadline = signal ? AbortSignal.any([signal, AbortSignal.timeout(DEADLINE_MS)]) : AbortSignal.timeout(DEADLINE_MS);
   let complete = true;
@@ -181,12 +206,12 @@ export async function discoverProductUrls(origin: string, robots: string, signal
   const fromRobots = roots.length > 0;
   if (!fromRobots) roots = [new URL("/sitemap.xml", base), new URL("/sitemap_index.xml", base)];
 
-  const product = new Map<string, string | null>();
+  const preferredEntries = new Map<string, string | null>();
   const other = new Map<string, string | null>();
   const take = (file: URL, entries: Entry[]) => {
-    const into = PRODUCT_SITEMAP.test(file.pathname) ? product : other;
+    const into = preferredFile(file) ? preferredEntries : other;
     for (const e of entries) {
-      if (product.size + other.size >= MAX_ENTRIES) {
+      if (preferredEntries.size + other.size >= MAX_ENTRIES) {
         complete = false;
         return;
       }
@@ -210,11 +235,11 @@ export async function discoverProductUrls(origin: string, robots: string, signal
       if (child) children.set(child.toString(), child);
     }
   }
-  if (!anyRead) return { urls: [], complete: false, capped: false, reason: "no-product-pages" };
+  if (!anyRead) return { urls: [], complete: false, capped: false };
 
   const all = [...children.values()];
-  const preferred = all.filter((c) => PRODUCT_SITEMAP.test(c.pathname));
-  let queue = preferred.length || product.size ? preferred : all;
+  const preferred = all.filter(preferredFile);
+  let queue = preferred.length || preferredEntries.size ? preferred : all;
   if (queue.length > MAX_CHILDREN) {
     complete = false;
     queue = queue.slice(0, MAX_CHILDREN);
@@ -227,27 +252,26 @@ export async function discoverProductUrls(origin: string, robots: string, signal
     else take(child, parsed.entries);
   }
 
-  const source = product.size ? product : other;
+  const source = preferredEntries.size ? preferredEntries : other;
   const pages = new Map<string, FoundPage & { path: string }>();
   for (const [loc, lastmod] of source) {
     const u = sitemapUrl(loc, base);
     if (!u || pages.has(u.toString())) continue;
-    if (!product.size && !PRODUCT_PATH.test(u.pathname)) continue;
+    if (!preferredEntries.size && !keep(u)) continue;
     const t = lastmod ? Date.parse(lastmod) : NaN;
     pages.set(u.toString(), { url: u.toString(), lastmod: Number.isFinite(t) ? new Date(t) : null, path: u.pathname + u.search });
   }
   const sorted = [...pages.values()].sort((a, b) => (b.lastmod?.getTime() ?? -Infinity) - (a.lastmod?.getTime() ?? -Infinity));
-  // robots.txt is checked on the newest MAX_PAGES only (its matching costs per URL): a disallowed one leaves the list
+  // robots.txt is checked on the newest `max` only (its matching costs per URL): a disallowed one leaves the list
   // short of the cap rather than letting a later page in.
   const rules = robotsRules(robots, ROBOTS_AGENT);
-  const urls = sorted.slice(0, MAX_PAGES).flatMap(({ path, ...p }) => (robotsAllows(rules, path) ? [p] : []));
-  // Capped: the pages past the newest 5,000 are still on the site. Empty: more likely an emptied or broken sitemap than
+  const urls = sorted.slice(0, max).flatMap(({ path, ...p }) => (robotsAllows(rules, path) ? [p] : []));
+  // Capped: the pages past the newest `max` are still on the site. Empty: more likely an emptied or broken sitemap than
   // a shop with nothing for sale. Neither may delete pages (and archive their products).
   return {
     urls,
-    complete: complete && urls.length > 0 && sorted.length <= MAX_PAGES,
-    capped: sorted.length > MAX_PAGES,
-    ...(urls.length === 0 && { reason: "no-product-pages" as const }),
+    complete: complete && urls.length > 0 && sorted.length <= max,
+    capped: sorted.length > max,
   };
 }
 
