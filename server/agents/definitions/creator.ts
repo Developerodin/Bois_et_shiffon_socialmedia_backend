@@ -202,7 +202,7 @@ export const creatorAgent: AgentDefinition = {
           last ? `\nPrevious draft:\n${JSON.stringify(last.body)}\n` : ""
         }${changeRequest(reviewer, reviewerIsClient)}${
           report?.length ? `\nQuality report to fix:\n${report.map((r) => `- [${r.status}] ${r.check}: ${r.note}`).join("\n")}\n` : ""
-        }\nBrand photos (key | product):\n${photoList}\nphotoKeys: exact keys of the photos that show this post's product: 1 for single-image posts and Pins, 2 to 10 for carousels (one per slide where you can), [] when none fits or for Threads and Reels.\nFill unused fields with "" or []: slides only for carousels, script only for Reels, pinTitle only for Pinterest.${products}${campaignLine}${voice}`,
+        }\nBrand photos (key | product):\n${photoList}\nphotoKeys: exact keys of the photos that show this post's product: 1 for single-image posts and Pins, at most 1 for Facebook and Threads posts, 2 to 10 for carousels (one per slide where you can), [] when none fits or for Reels.\nFill unused fields with "" or []: slides only for carousels, script only for Reels, pinTitle only for Pinterest.${products}${campaignLine}${voice}`,
         // Our own hard rules (length, hashtags, slides…): a draft that breaks one is asked again with the reasons
         // (Creator is already the top tier, so the same model rewrites it); if it still breaks one, Quality blocks it.
         // Unknown product ids are dropped below, not asked again: a retry would double the top-tier call.
