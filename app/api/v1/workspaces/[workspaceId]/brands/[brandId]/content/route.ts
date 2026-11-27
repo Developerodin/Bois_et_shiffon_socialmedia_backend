@@ -13,6 +13,9 @@ import { personName } from "@/server/content/person-name";
 import { hideRightsNames, hideRightsNote, isStoryBody, revealRightsNames, revealRightsNote } from "@/server/stories/body";
 import { coverUrl, createStory, failStoryStart, itemForRequest, STORY_RENDER_JOB, STORY_START_NOTE, storyTab } from "@/server/stories/service";
 
+/** A last attempt that is scheduled, going out or out: its account is where the post goes. */
+const GOING_OUT: readonly string[] = ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PARTIAL", "PENDING_VERIFY"];
+
 /** Calendar items with their latest draft and its latest quality check. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
@@ -35,7 +38,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
       owner: { select: { id: true, name: true, email: true } },
       versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } },
       decisions: { orderBy: { createdAt: "desc" }, take: 1, select: { verdict: true, note: true, contentVersionId: true } },
-      publications: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, error: true } },
+      publications: { orderBy: { createdAt: "desc" }, take: 1, select: { status: true, error: true, connectionId: true } },
     } as const;
     // Unscheduled first (a post just made in the app has no date yet), then by date.
     const orderBy: Prisma.ContentItemOrderByWithRelationInput[] = [{ scheduledFor: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }];
@@ -106,6 +109,9 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
         // The last publish went wrong: "FAILED" (back to Approved, reason in publishError) or "CHECK" (may have posted).
         publishIssue: publications[0]?.status === "PENDING_VERIFY" ? "CHECK" : publications[0]?.status === "FAILED" && i.status === "APPROVED" ? "FAILED" : null,
         publishError: publications[0]?.status === "FAILED" || publications[0]?.status === "PENDING_VERIFY" ? publications[0].error : null,
+        // The account the post is scheduled to or went out on (the web names it from its connections list, e.g. a
+        // Facebook Post's Page); null when its last attempt was cancelled or failed, or it has none.
+        publishConnectionId: publications[0] && GOING_OUT.includes(publications[0].status) ? publications[0].connectionId : null,
         latest: versions[0]
           ? {
               version: versions[0].version,

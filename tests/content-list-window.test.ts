@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-type Row = { id: string; workspaceId: string; brandId: string; status: string; channel: string; scheduledFor: Date | null; ownerId?: string | null; campaign?: { id: string; name: string } | null; createdAt: Date; updatedAt: Date };
+type Row = { id: string; workspaceId: string; brandId: string; status: string; channel: string; scheduledFor: Date | null; ownerId?: string | null; campaign?: { id: string; name: string } | null; publications?: { status: string; error: string | null; connectionId: string }[]; createdAt: Date; updatedAt: Date };
 const db = vi.hoisted(() => ({ perms: new Set<string>(["brand.read"]), rows: [] as Row[], contentItem: { findMany: vi.fn() }, users: [] as { id: string; name: string | null; email: string }[], user: { findMany: vi.fn() }, publicationAttempt: { findMany: vi.fn(async () => []) }, job: { findMany: vi.fn(async () => []) } }));
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
@@ -44,7 +44,7 @@ beforeEach(() => {
       .filter((r) => matches(r, a.where))
       .sort(JSON.stringify(a.orderBy?.[0]) === '{"updatedAt":"desc"}' ? (x, y) => y.updatedAt.getTime() - x.updatedAt.getTime() : (x, y) => time(x) - time(y) || x.createdAt.getTime() - y.createdAt.getTime())
       .slice(0, a.take)
-      .map((r) => ({ ...r, campaign: r.campaign ?? null, owner: db.users.find((u) => u.id === r.ownerId) ?? null, opportunity: null, versions: [], decisions: [], publications: [] })),
+      .map((r) => ({ ...r, campaign: r.campaign ?? null, owner: db.users.find((u) => u.id === r.ownerId) ?? null, opportunity: null, versions: [], decisions: [], publications: r.publications ?? [] })),
   );
 });
 
@@ -242,5 +242,20 @@ describe("POST /content scheduledFor", () => {
   it("answers 400 for a date without an offset or that isn't one, and makes nothing", async () => {
     for (const scheduledFor of ["2030-03-04T10:00", "2030-03-04", "soon", 5]) expect((await send({ ...post, scheduledFor })).status, String(scheduledFor)).toBe(400);
     expect(createPost).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /content publishConnectionId", () => {
+  const attempt = (status: string) => [{ status, error: null, connectionId: "fb1" }];
+  it.each(["SCHEDULED", "PUBLISHING", "PUBLISHED", "PARTIAL", "PENDING_VERIFY"])("names the account of a %s last attempt", async (status) => {
+    db.rows.push(row("p1", "SCHEDULED", { channel: "FACEBOOK_POST", scheduledFor: new Date(now + DAY), publications: attempt(status) }));
+    const { items } = await (await call()).json();
+    expect(items[0].publishConnectionId).toBe("fb1");
+  });
+  it.each(["FAILED", "CANCELLED"])("is null after a %s attempt, and with none", async (status) => {
+    db.rows.push(row("p1", "APPROVED", { channel: "FACEBOOK_POST", scheduledFor: new Date(now + DAY), publications: attempt(status) }));
+    db.rows.push(row("p2", "APPROVED", { channel: "FACEBOOK_POST", scheduledFor: new Date(now + 2 * DAY) }));
+    const { items } = await (await call()).json();
+    expect(items.map((i: { publishConnectionId: unknown }) => i.publishConnectionId)).toEqual([null, null]);
   });
 });
