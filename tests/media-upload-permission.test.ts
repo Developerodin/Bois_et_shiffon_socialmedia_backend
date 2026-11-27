@@ -45,6 +45,11 @@ describe("signedMediaUrl", () => {
     expect(() => signedMediaUrl("k", 3600, 'a".html')).toThrow();
   });
 
+  it("serves a task file as an attachment with the verified type", async () => {
+    await signedMediaUrl("k", 3600, "Devis-ete.pdf", "application/pdf");
+    expect(input()).toMatchObject({ ResponseContentDisposition: 'attachment; filename="Devis-ete.pdf"', ResponseContentType: "application/pdf" });
+  });
+
   it("adds none otherwise", async () => {
     await signedMediaUrl("k");
     expect(input()).not.toHaveProperty("ResponseContentDisposition");
