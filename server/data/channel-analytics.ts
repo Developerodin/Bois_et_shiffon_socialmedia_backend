@@ -157,7 +157,7 @@ export async function readChannelAnalytics(input: ReadInput): Promise<Read> {
         // Pins carry only their id and numbers here (no title, image or date): one more read per pin isn't worth it.
         posts: top
           ? pins.map((p) => ({
-              id: p.pin_id as string, mediaType: null, productType: null, postedAt: null, caption: null, permalink: `https://www.pinterest.com/pin/${p.pin_id}/`,
+              id: p.pin_id as string, mediaType: null, productType: null, postedAt: null, caption: null, permalink: `https://www.pinterest.com/pin/${p.pin_id}/`, thumbnailUrl: null,
               metrics: { views: num(p.metrics?.IMPRESSION), reach: null, likes: null, comments: null, shares: null, saves: num(p.metrics?.SAVE), interactions: num(p.metrics?.ENGAGEMENT), navigation: null },
             }))
           : null,
@@ -222,7 +222,7 @@ export async function readChannelAnalytics(input: ReadInput): Promise<Read> {
     metrics(() => `/me/insights?metric=reach&period=day&${range}`, ["reach"]),
     metrics(() => `/me/insights?metric=follower_count&period=day&${range}`, ["follower_count"]),
     metrics(() => "/me/insights?metric=follower_demographics&period=lifetime&metric_type=total_value&timeframe=this_month&breakdown=country", ["follower_demographics"]),
-    get(`/me/media?fields=id,media_type,media_product_type,timestamp,caption,permalink&limit=${POST_LIMIT}`),
+    get(`/me/media?fields=id,media_type,media_product_type,timestamp,caption,permalink,media_url,thumbnail_url&limit=${POST_LIMIT}`),
   ]);
   const t = insights(totalsData);
   const followersDaily = series(followData, "follower_count", false);
@@ -230,9 +230,12 @@ export async function readChannelAnalytics(input: ReadInput): Promise<Read> {
   // live gave no plain total_value, so it isn't asked for.
   const totals = { ...Object.fromEntries(Object.entries(IG_TOTALS).map(([metric, key]) => [key, t.get(metric) ?? null])), newFollowers: total(followersDaily) };
 
-  type Media = { id?: unknown; media_type?: unknown; media_product_type?: unknown; timestamp?: unknown; caption?: unknown; permalink?: unknown };
+  type Media = { id?: unknown; media_type?: unknown; media_product_type?: unknown; timestamp?: unknown; caption?: unknown; permalink?: unknown; media_url?: unknown; thumbnail_url?: unknown };
   const items = ((Array.isArray(media?.data) ? media.data : []) as Media[]).filter((m) => typeof m.id === "string").slice(0, POST_LIMIT);
   const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+  const https = (v: unknown) => (str(v)?.startsWith("https://") ? (v as string) : null);
+  // A video's media_url is the video itself, so only its thumbnail_url is a picture; for anything else media_url is.
+  const thumbnail = (m: Media) => https(m.thumbnail_url) ?? (m.media_type === "VIDEO" ? null : https(m.media_url));
   // One read per post, side by side: a metric one post type refuses is dropped for that post only.
   const stopAt = Date.now() + POSTS_MS;
   const reads = await Promise.all(
@@ -251,7 +254,8 @@ export async function readChannelAnalytics(input: ReadInput): Promise<Read> {
       productType: str(m.media_product_type),
       postedAt: str(m.timestamp) && !Number.isNaN(Date.parse(m.timestamp as string)) ? new Date(m.timestamp as string).toISOString() : null,
       caption: str(m.caption)?.slice(0, 140) ?? null,
-      permalink: str(m.permalink)?.startsWith("https://") ? (m.permalink as string) : null,
+      permalink: https(m.permalink),
+      thumbnailUrl: thumbnail(m),
       metrics: p?.ok ? { ...p.metrics, navigation: null } : null,
     };
   });

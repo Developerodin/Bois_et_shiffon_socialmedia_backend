@@ -24,7 +24,7 @@ function graph(override: (url: URL) => Response | null = () => null) {
     if (p === "/me") return json(200, { user_id: "1", username: "shop", followers_count: 2714, media_count: 238 });
     if (p === "/me/media") {
       return json(200, {
-        data: [{ id: "m1", media_type: "IMAGE", media_product_type: "FEED", timestamp: "2026-11-25T05:11:44+0000", caption: "Hello", permalink: "https://www.instagram.com/p/x/" }],
+        data: [{ id: "m1", media_type: "IMAGE", media_product_type: "FEED", timestamp: "2026-11-25T05:11:44+0000", caption: "Hello", permalink: "https://www.instagram.com/p/x/", media_url: "https://cdn.example/m1.jpg" }],
         paging: { next: `https://graph.instagram.com/next?access_token=${TOKEN}` },
       });
     }
@@ -63,7 +63,7 @@ describe("readChannelAnalytics", () => {
       { country: "FR", followers: 1938 }, { country: "US", followers: 211 }, { country: "GB", followers: 141 }, { country: "IN", followers: 68 }, { country: "DE", followers: 22 },
     ]);
     expect(body.posts).toEqual([{
-      id: "m1", mediaType: "IMAGE", productType: "FEED", postedAt: "2026-11-25T05:11:44.000Z", caption: "Hello", permalink: "https://www.instagram.com/p/x/",
+      id: "m1", mediaType: "IMAGE", productType: "FEED", postedAt: "2026-11-25T05:11:44.000Z", caption: "Hello", permalink: "https://www.instagram.com/p/x/", thumbnailUrl: "https://cdn.example/m1.jpg",
       metrics: { views: 10, reach: 11, likes: 12, comments: 13, shares: 14, saves: 15, interactions: 16, navigation: null },
     }]);
     const text = JSON.stringify(body);
@@ -75,6 +75,19 @@ describe("readChannelAnalytics", () => {
     }
     // The 28 whole UTC days before today: Oct 30 00:00 to Nov 27 00:00.
     expect(f.mock.calls.some(([u]) => String(u).includes("since=1793318400&until=1795737600"))).toBe(true);
+  });
+
+  it("gives each post a picture: a video's thumbnail, else its media; never a video file or a non-https link", async () => {
+    const media = [
+      { id: "v1", media_type: "VIDEO", media_product_type: "REELS", media_url: "https://cdn.example/v1.mp4", thumbnail_url: "https://cdn.example/v1.jpg" },
+      { id: "v2", media_type: "VIDEO", media_product_type: "REELS", media_url: "https://cdn.example/v2.mp4" },
+      { id: "c1", media_type: "CAROUSEL_ALBUM", media_product_type: "FEED", media_url: "https://cdn.example/c1.jpg" },
+      { id: "i1", media_type: "IMAGE", media_product_type: "FEED", media_url: "http://cdn.example/i1.jpg" },
+    ];
+    const f = graph((url) => (url.pathname.endsWith("/me/media") ? json(200, { data: media }) : null));
+    const { body } = await readChannelAnalytics(input(f));
+    expect(body.posts!.map((p) => [p.id, p.thumbnailUrl])).toEqual([["v1", "https://cdn.example/v1.jpg"], ["v2", null], ["c1", "https://cdn.example/c1.jpg"], ["i1", null]]);
+    expect(f.mock.calls.some(([u]) => String(u).includes("/me/media?fields=") && String(u).includes("media_url,thumbnail_url"))).toBe(true);
   });
 
   it("drops a refused metric (error 100) and keeps the others", async () => {
@@ -158,7 +171,7 @@ describe("readChannelAnalytics: Pinterest", () => {
     expect(body.followersDaily).toEqual([]);
     expect(body.countries).toBeNull();
     expect(body.posts).toEqual([{
-      id: "987", mediaType: null, productType: null, postedAt: null, caption: null, permalink: "https://www.pinterest.com/pin/987/",
+      id: "987", mediaType: null, productType: null, postedAt: null, caption: null, permalink: "https://www.pinterest.com/pin/987/", thumbnailUrl: null,
       metrics: { views: 120, reach: null, likes: null, comments: null, shares: null, saves: 4, interactions: 9, navigation: null },
     }]);
     const urls = f.mock.calls.map(([u]) => String(u));
