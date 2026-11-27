@@ -9,6 +9,7 @@ import { brandKnowledge, productFacts } from "@/server/content/knowledge";
 import { campaignFacts, isWithdrawn, offerRows } from "@/server/content/offer-checks";
 import { linkedIds, productRows, snapshotOf } from "@/server/content/product-checks";
 import { checkDraft, overallOf, type CheckResult, type DraftBody } from "@/server/content/rules";
+import { workflowIdInput } from "@/server/content/workflow-context";
 import { prisma } from "@/server/db/prisma";
 import { checkStory } from "@/server/stories/checks";
 import { hideRightsNames, hideRightsNote, isStoryBody, storySlides } from "@/server/stories/body";
@@ -52,12 +53,13 @@ export const qualityAgent: AgentDefinition = {
   // itemId: check just that item (a studio reel after its render or a caption edit), as its own run.
   // version: only so the engine doesn't fold a check of a newer edit into a run still checking the older one.
   // round: the posts chain's batch (agents/engine.ts CHAIN_ROUNDS), for the same reason.
-  inputSchema: z.object({ itemId: z.string().min(1).max(100).optional(), version: z.number().int().min(1).optional(), round: z.number().int().min(0).max(10).optional() }).strict(),
+  // workflowId: a content workflow's chain; only its drafts are checked (a cancelled workflow's drafts still are: they stay).
+  inputSchema: z.object({ itemId: z.string().min(1).max(100).optional(), version: z.number().int().min(1).optional(), round: z.number().int().min(0).max(10).optional(), workflowId: workflowIdInput }).strict(),
   async run(ctx, input) {
     const { brand } = ctx;
-    const { itemId } = input as { itemId?: string }; // parsed by the engine against inputSchema
+    const { itemId, workflowId } = input as { itemId?: string; workflowId?: string }; // parsed by the engine against inputSchema
     const items = await prisma.contentItem.findMany({
-      where: { brandId: brand.brandId, status: "DRAFT_REVIEW", ...(itemId ? { id: itemId } : {}) },
+      where: { brandId: brand.brandId, status: "DRAFT_REVIEW", ...(itemId ? { id: itemId } : {}), ...(workflowId ? { workflowId } : {}) },
       include: { versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { select: { id: true } } } } },
       take: 50,
     });

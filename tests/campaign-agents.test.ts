@@ -73,7 +73,7 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("Brief writer and campaigns", () => {
-  const planned = (over: object = {}) => ({ id: "i1", title: "Un salon chaleureux", channel: "INSTAGRAM_POST", status: "PLANNED", pillar: null, scheduledFor: new Date("2026-11-29T09:00:00Z"), brief: {}, opportunity: null, campaignId: "c1", ...over });
+  const planned = (over: object = {}) => ({ id: "i1", title: "Un salon chaleureux", channel: "INSTAGRAM_POST", status: "PLANNED", pillar: null, scheduledFor: new Date("2026-11-29T09:00:00Z"), brief: {}, opportunity: null, campaignId: "c1", productIds: [], ...over });
 
   it("gives a campaign post its facts after the divider and ranks the campaign's products", async () => {
     withCampaigns(campaign());

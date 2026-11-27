@@ -12,6 +12,7 @@ import { brandKnowledge, productFacts, productPhotos } from "@/server/content/kn
 import { campaignFacts, isWithdrawn } from "@/server/content/offer-checks";
 import { handleOf, linkedIds, RANK_SELECT, rankCandidates, type LinkedProduct } from "@/server/content/product-checks";
 import { checkDraft, type CheckResult } from "@/server/content/rules";
+import { activeWorkflow, workflowCancelled, workflowIdInput } from "@/server/content/workflow-context";
 import { prisma } from "@/server/db/prisma";
 import { storeImage } from "@/server/research/brand-assets";
 import { lock, postAiAllowed, TX } from "@/server/services/publishing";
@@ -50,12 +51,14 @@ export const creatorAgent: AgentDefinition = {
   // itemId: write just that post (sent back from the app's "Re-generate caption"), as its own run.
   // chain: start the next agent of the posts chain when done (Planner → Brief writer → Creator → Quality), the app's "Generate calendar".
   // channels: a scoped Plan's channels, passed down the chain; only posts on them are written.
-  inputSchema: z.object({ itemId: z.string().min(1).max(100).optional(), chain: z.boolean().optional(), round: z.number().int().min(0).max(CHAIN_ROUNDS).optional(), channels: chainChannels }).strict(),
+  // workflowId: a content workflow's chain; only its posts are written.
+  inputSchema: z.object({ itemId: z.string().min(1).max(100).optional(), chain: z.boolean().optional(), round: z.number().int().min(0).max(CHAIN_ROUNDS).optional(), channels: chainChannels, workflowId: workflowIdInput }).strict(),
   async run(ctx, input) {
     const { brand } = ctx;
     const scope = { workspaceId: brand.workspaceId, brandId: brand.brandId };
-    const { itemId, chain, round = 0, channels } = input as { itemId?: string; chain?: boolean; round?: number; channels?: ContentChannel[] }; // parsed by the engine against inputSchema
-    const onChannels = channels ? { channel: { in: channels } } : {};
+    const { itemId, chain, round = 0, channels, workflowId } = input as { itemId?: string; chain?: boolean; round?: number; channels?: ContentChannel[]; workflowId?: string }; // parsed by the engine against inputSchema
+    if (workflowId) await activeWorkflow(scope, workflowId); // gone or cancelled: nothing to do
+    const onChannels = { ...(channels ? { channel: { in: channels } } : {}), ...(workflowId ? { workflowId } : {}) };
     const items = await prisma.contentItem.findMany({
       // studio reels are written in the app
       where: { brandId: brand.brandId, status: { in: ["BRIEF_READY", "DRAFT_REVIEW"] }, studio: false, ...onChannels, ...(itemId ? { id: itemId } : {}) },
@@ -123,7 +126,14 @@ export const creatorAgent: AgentDefinition = {
     // Approved captions per channel, read once per run. They go after the divider, so approvals never change the cached start.
     const examples = new Map<string, { itemId: string; caption: string }[]>();
 
+    let cancelled = false;
     for (const item of todo) {
+      // A cancel stops the workflow's next AI call; drafts already written stay.
+      if (workflowId && (await workflowCancelled(scope, workflowId))) {
+        cancelled = true;
+        await ctx.log("WARN", "The workflow was cancelled: stopping");
+        break;
+      }
       const last = item.versions[0];
       // The Creator's report: product rows that aren't blockers (stock, price warnings) are for the approver, and
       // switching products is the approver's call; product blockers (a price no longer true) stay in.
@@ -261,10 +271,11 @@ export const creatorAgent: AgentDefinition = {
         { type: "ContentItem", id: item.id },
       );
     }
-    if (chain) {
+    if (chain && !cancelled) {
       // Check this round's drafts, then write the next batch while briefs are waiting (see CHAIN_ROUNDS).
+      const wf = workflowId ? { workflowId } : {};
       const start = (agentKey: string, next: number) =>
-        startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey, trigger: "event", input: agentKey === "quality" ? { round: next } : { chain: true, round: next, ...(channels ? { channels } : {}) } }).catch(() => null);
+        startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey, trigger: "event", input: agentKey === "quality" ? { round: next, ...wf } : { chain: true, round: next, ...(channels ? { channels } : {}), ...wf } }).catch(() => null);
       if (drafted) await start("quality", round);
       const waiting = await prisma.contentItem.count({ where: { brandId: brand.brandId, status: "BRIEF_READY", studio: false, ...onChannels } });
       if (waiting > 0 && round + 1 < CHAIN_ROUNDS && (await postAiAllowed(brand.workspaceId))) await start("creator", round + 1);
