@@ -114,6 +114,11 @@ describe("upload slot", () => {
     await expect(slot(manager, { fileName: "x.pdf", contentType: "application/pdf", bytes: 0 })).rejects.toMatchObject({ status: 400 });
     db.taskFile.count.mockResolvedValueOnce(20);
     await expect(slot()).rejects.toMatchObject({ status: 409 });
+    // Only verified files and slots young enough to check hold a place.
+    const live = db.taskFile.count.mock.calls.at(-1)![0].where;
+    expect(live.taskId).toBe("t1");
+    expect(live.OR[0]).toEqual({ status: "VERIFIED" });
+    expect(live.OR[1].createdAt.gt).toBeInstanceOf(Date);
     await expect(slot(stranger)).rejects.toMatchObject({ status: 403 });
     await expect(slot(clientOwner)).rejects.toMatchObject({ status: 403 });
     s.limit.mockResolvedValueOnce({ allowed: false });
@@ -150,6 +155,24 @@ describe("verify", () => {
     s.objects.set("w1/b1/task-files/uploads/abc.csv", Buffer.from("a,b\n"));
     await verify();
     expect(s.put).toHaveBeenCalledWith("w1/b1/task-files/abc.csv", expect.anything(), "text/csv; charset=utf-8");
+  });
+
+  it("two checks at once per process: a third waits its turn (429 task.fileBusy) without claiming its slot; each person has an hourly limit", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    s.objects.set(UP, PDF);
+    s.put.mockImplementation(() => gate);
+    const first = verify();
+    const second = verify();
+    await vi.waitFor(() => expect(s.put).toHaveBeenCalledTimes(2));
+    const claims = db.taskFile.updateMany.mock.calls.length;
+    await expect(verify()).rejects.toMatchObject({ status: 429, code: "task.fileBusy" });
+    expect(db.taskFile.updateMany.mock.calls.length).toBe(claims);
+    release();
+    await Promise.all([first, second]);
+    s.limit.mockResolvedValueOnce({ allowed: false });
+    await expect(verify()).rejects.toMatchObject({ status: 429 });
+    expect(s.limit).toHaveBeenLastCalledWith("task-file-verify:u1", 60, 3_600_000);
   });
 
   it("a file that isn't what was announced is refused (400) and leaves nothing behind", async () => {

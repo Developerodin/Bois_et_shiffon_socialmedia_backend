@@ -84,6 +84,11 @@ describe("checkTaskFile", () => {
     refused(zip({ "[Content_Types].xml": CT, "xl/workbook.xml": "<x/>", "xl/activeX/activeX1.xml": "x" }), XLSX);
     const macro = CT.replace("</Types>", `<Override PartName="/word/document.xml" ContentType="application/vnd.ms-word.document.macroEnabled.main+xml"/></Types>`);
     refused(zip({ "[Content_Types].xml": macro, "word/document.xml": "<w/>" }, { deflate: true }), DOCX);
+    refused(zip({ "[Content_Types].xml": CT, "word/document.xml": "<w/>", "word/embeddings/oleObject1.bin": "x" }), DOCX);
+    const renamed = CT.replace("</Types>", `<Override PartName="/word/x.dat" ContentType="application/vnd.ms-office.vbaProject"/></Types>`);
+    refused(zip({ "[Content_Types].xml": renamed, "word/document.xml": "<w/>", "word/x.dat": "x" }), DOCX);
+    // An embedded workbook (a chart's data) is not active content.
+    expect(ok(zip({ "[Content_Types].xml": CT, "word/document.xml": "<w/>", "word/embeddings/Microsoft_Excel_Worksheet.xlsx": "x" }), DOCX)).toBe(DOCX);
   });
 
   it("broken, ZIP64-looking or doubled archives are refused", () => {
@@ -99,6 +104,7 @@ describe("checkTaskFile", () => {
   it("binary that isn't one of the types, and non-UTF-8 text, are refused with a reason", () => {
     expect(() => checkTaskFile(Buffer.from([0x4d, 0x5a, 0x90, 0, 3, 0]), "text/plain")).toThrow(/isn't supported/);
     expect(() => checkTaskFile(Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]), "text/csv")).toThrow(/CSV UTF-8/);
+    expect(() => checkTaskFile(Buffer.from([0xff, 0xfe, 0x61, 0, 0x2c, 0]), "text/csv")).toThrow(/CSV UTF-8/);
   });
 });
 

@@ -27,7 +27,12 @@ const PUT_SECONDS = 600;
 const VERIFY_WITHIN_MS = 3_600_000;
 const STALE_MS = 86_400_000;
 const SLOTS_PER_HOUR = 30;
-/** Files checked at once by this process: each holds the whole file (≤ 25 MB) in memory. */
+/** Checks a person may ask for in an hour, so one person can't keep the MAX_VERIFYING places busy for everyone. */
+const VERIFIES_PER_HOUR = 60;
+/**
+ * Files checked at once by this process: each holds the whole file (≤ 25 MB) in memory, briefly twice while its chunks
+ * are joined, so about 100 MB at most. Past it a 429; the web retries the check (the slot stays valid for the hour).
+ */
 const MAX_VERIFYING = 2;
 const URL_SECONDS = 3600;
 const UPLOADS = "/task-files/uploads/";
@@ -73,7 +78,9 @@ export async function createFileSlot(scope: TaskScope, v: TaskViewer, taskId: st
   const key = mediaKey(scope, file).replace(/[^/]+$/, `${UPLOADS.slice(1)}${file}`);
   const row = await prisma.$transaction(async (tx) => {
     await lockTaskForEdit(tx, v, scope.perms, taskId);
-    if ((await tx.taskFile.count({ where: { taskId } })) >= TASK_FILES_MAX) throw new TaskError(`A task holds up to ${TASK_FILES_MAX} files. Remove one first.`, 409);
+    // Verified files, and slots still young enough to be checked: a dead slot (over the hour) never holds a place.
+    const live = { taskId, OR: [{ status: "VERIFIED" }, { createdAt: { gt: new Date(Date.now() - VERIFY_WITHIN_MS) } }] };
+    if ((await tx.taskFile.count({ where: live })) >= TASK_FILES_MAX) throw new TaskError(`A task holds up to ${TASK_FILES_MAX} files. Remove one first.`, 409);
     return tx.taskFile.create({
       data: { workspaceId: scope.workspaceId, brandId: scope.brandId, taskId, key, contentType, fileName: cleanFileName(parsed.data.fileName), bytes, createdById: scope.userId },
     });
@@ -92,7 +99,8 @@ let verifying = 0;
  */
 export async function verifyFile(scope: TaskScope, v: TaskViewer, taskId: string, fileId: string): Promise<TaskFileDto> {
   noClients(v);
-  if (verifying >= MAX_VERIFYING) throw new TaskError("Busy checking other files. Try again in a moment.", 429);
+  if (!(await hitRateLimit(`task-file-verify:${scope.userId}`, VERIFIES_PER_HOUR, 3_600_000)).allowed) throw new TaskError("Too many uploads this hour. Try again later.", 429);
+  if (verifying >= MAX_VERIFYING) throw new TaskError("Busy checking other files. Try again in a moment.", 429, "task.fileBusy");
   verifying++;
   try {
     const row = await prisma.$transaction(async (tx) => {

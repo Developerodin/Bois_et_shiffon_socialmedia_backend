@@ -41,7 +41,10 @@ function sniff(b: Buffer): TaskFileType | "text" {
   const image = imageType(b);
   if (image) return image.type as TaskFileType;
   if (b.length >= 4 && b.readUInt32LE(0) === LOCAL) return officeType(b);
-  // Text: valid UTF-8 and no NUL byte (checked without decoding the file to a string).
+  // Text: valid UTF-8 and no NUL byte (checked without decoding the file to a string). UTF-16 (Excel's "Unicode Text",
+  // a byte-order mark first) has NULs, but it is text: the UTF-8 hint, not "not supported".
+  const utf16 = (b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff);
+  if (utf16) throw new FileRefused("That text file isn't UTF-8. If it's a CSV from Excel, save it as CSV UTF-8 and try again.");
   if (b.indexOf(0) !== -1) throw new FileRefused("That file type isn't supported. Attach a PDF, Word, Excel, PowerPoint, CSV, text, JPG or PNG file.");
   if (!isUtf8(b)) throw new FileRefused("That text file isn't UTF-8. If it's a CSV from Excel, save it as CSV UTF-8 and try again.");
   return "text";
@@ -51,19 +54,22 @@ type Entry = { name: string; method: number; compressed: number; size: number; l
 
 /**
  * A Word, Excel or PowerPoint file (Office Open XML), from its ZIP central directory: one end record, no ZIP64, the
- * package's `[Content_Types].xml` and main part. Macro-enabled (a VBA project, ActiveX controls, or a macroEnabled
- * content type) is refused. Entry contents other than `[Content_Types].xml` are never read.
+ * package's `[Content_Types].xml` and main part. Active content is refused: a VBA project, ActiveX controls, embedded
+ * OLE objects (`embeddings/*.bin`, which can carry programs), or a content type naming macros, a VBA project, ActiveX
+ * or an OLE object (a renamed part still declares its type there). Entry contents other than `[Content_Types].xml` are
+ * never read, so external links in `_rels` (remote templates) are not checked (a ceiling in the plan).
  */
 function officeType(b: Buffer): TaskFileType {
   const refuse = (why = "That file couldn't be read as a Word, Excel or PowerPoint file.") => new FileRefused(why);
+  const active = "Files with macros, ActiveX controls or embedded objects can't be attached. Save it as a plain .docx, .xlsx or .pptx.";
   const entries = centralDirectory(b);
   if (!entries) throw refuse();
   const names = new Set(entries.map((e) => e.name));
-  if (entries.some((e) => /(^|\/)vbaproject\.bin$/i.test(e.name) || /(^|\/)activex\//i.test(e.name))) throw refuse("Files with macros or ActiveX controls can't be attached. Save it as a plain .docx, .xlsx or .pptx.");
+  if (entries.some((e) => /(^|\/)vbaproject\.bin$/i.test(e.name) || /(^|\/)activex\//i.test(e.name) || /(^|\/)embeddings\/[^/]*\.bin$/i.test(e.name))) throw refuse(active);
   const kinds = Object.values(OOXML).filter((k) => names.has(k.part));
   const types = entries.find((e) => e.name === "[Content_Types].xml");
   if (kinds.length !== 1 || !types) throw refuse();
-  if (/macroEnabled/i.test(readEntry(b, types).toString("utf8"))) throw refuse("Files with macros can't be attached. Save it as a plain .docx, .xlsx or .pptx.");
+  if (/macroEnabled|vbaProject|activeX|oleObject/i.test(readEntry(b, types).toString("utf8"))) throw refuse(active);
   return kinds[0]!.type;
 }
 

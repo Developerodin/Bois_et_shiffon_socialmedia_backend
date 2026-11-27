@@ -73,7 +73,7 @@ export function decodeCursor<V extends TaskView>(view: V, s: string): KeyOf<V> {
 }
 
 /**
- * One page of task ids (51, to know if there is more) for a view, on top of visibleTaskSql so a client's page is never
+ * One page of task ids (pageSize + 1, to know if there is more) for a view, on top of visibleTaskSql so a client's page is never
  * short. Open views sort by due day (no day last), then id; Done by completion, newest first (last 30 days).
  */
 export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.Sql {
@@ -144,13 +144,13 @@ async function postsNeedingAction(scope: TaskScope, now: Date): Promise<PostRow[
 
 type PageRow = { id: string; due: string; completedAt: Date | null };
 
-/** A page of a view. `posts` only on the first page of view=mine, and only for content work (no area, or CONTENT). */
+/** A page of a view. `posts` only on the first page of view=mine, and only for content work (no area, or CONTENT), never with a due range (the calendar). */
 export async function listTasks(scope: TaskScope, v: TaskViewer, q: ListQuery, now = new Date()): Promise<{ tasks: TaskDto[]; posts?: PostRow[]; nextCursor: string | null }> {
   const sql = listSql(v, q, now);
   const [page, people, posts] = await Promise.all([
     prisma.$queryRaw<PageRow[]>(sql),
     brandOwners(scope, { key: "tasks.read", includeClients: true }),
-    q.view === "mine" && !q.cursor && (!q.area || q.area === "CONTENT") ? postsNeedingAction(scope, now) : undefined,
+    q.view === "mine" && !q.cursor && !q.dueFrom && (!q.area || q.area === "CONTENT") ? postsNeedingAction(scope, now) : undefined,
   ]);
   const shown = page.slice(0, pageSize(q));
   const tasks = await toTaskDtos(scope, await rowsFor(shown.map((r) => r.id)), people);
