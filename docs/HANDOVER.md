@@ -2046,3 +2046,85 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
   view; small duplications (web formatters, Open task buttons, hardcoded "2 credits" in the brief button).
 - The worktree's server `node_modules` is a folder of junctions plus private Prisma copies; remove the junctions with
   `cmd /c rmdir` before deleting the worktree. Its test DB is `sma_test_seo` in the `sma-testdb` container.
+
+## CRM Phase A (branch `crm-phase-a`, 2026-11-27, merged to main the same day; migrations not yet applied to the dev DB)
+
+The plan is `docs/superpowers/plans/2026-11-27-crm.md`. It records the owner's answers O1–O6, the four-lens plan
+review, the "As built" notes and the branch-review fixes. The server, web and mobile worktrees are in `../sma-crm`.
+Phase A is meant to ship with the `crm` web flag on for B&C (O1).
+
+**What was built:**
+- **Quotes:**
+  - A **Declined** status, with a reason.
+  - **Mark as sent** and **Mark accepted** by hand, for quotes that aren't in Shopify. While AskCart's writes don't
+    exist, this is how B&C sends quotes: they expire after 30 days and get day 7 and day 21 reminders, as invoices do.
+  - **Earlier versions**, snapshotted on every edit and revise, with no contact fields.
+- **Customers and companies:** contact identities (email and phone, normalised, unique per brand), the team's notes
+  (append-only; the author can delete their own within 24 h), owner and next action, a search that needs 2 or more
+  characters, "Save the quote's contact as a customer", and merging duplicates by hand. Every view, search and list
+  page is written to the audit log with ids only.
+- **Logged conversations** on any channel, entered by hand. Nothing is ever sent. Each has an owner, a next action,
+  "waiting on customer", close and reopen.
+- **The follow-up queue** shows needs a reply, overdue (24 h for a reply, or 7 days waiting, O4), waiting and mine,
+  with counts.
+- **Follow-up tasks:** a CRM task per episode, keyed on `Task.requestId`. It goes to the conversation owner, else to
+  the inbox role (the project role with the most people that holds inbox.read and tasks.read, O3), else to nobody. It
+  closes when someone replies or closes the conversation.
+- **The pipeline:** New → Contacted → Proposal → Negotiation → Won/Lost (O2). Quotes only ever move a deal forward:
+  sent → Proposal, revised → Negotiation, accepted → Won. When a deal's quotes all end without a yes, it suggests
+  marking the deal lost.
+- **Data rights:** erasure (also reaches quotes that carry the same email; they are kept for the books with personal
+  fields blanked) and a one-customer JSON export. Both are for workspace Owner/Admin only.
+- **Retention:** messages are kept 13 months; customers, notes and deals 24 months after the last activity (O6).
+- **AI:** a conversation summary with a suggested next step, and a reply draft to copy.
+- **Web:** `/crm` has Follow-ups, Customers, Pipeline and Quotes tabs. It opens with the `crm` flag and either
+  `crm.manage` or `inbox.read`; Spark's slot follows. The Overview shows follow-up counts.
+
+**Migrations (NOT applied to the dev DB; apply with the owner's OK, in this order):**
+1. `20261127130000_quote_status_declined` (enum value only)
+2. `20261127130100_quote_declined_reason`
+3. `20261127130200_quote_version`
+4. `20261127130300_crm_records`
+5. `20261127130400_conversations`
+6. `20261127130500_deals`
+
+`130300` adds a hand-written expression index, `Customer_brandId_name_key_idx`. Like the `pg_trgm` ones, it must be
+removed from any future `prisma migrate dev` diff.
+
+**Behaviour to know:**
+- The CRM API is permission-checked but not behind the `crm` flag (same as quotes).
+- Starting a logged conversation needs both inbox.read and crm.manage, because it links a customer. Approvers
+  (inbox.read only) can work the queue and log messages, but can't start conversations or use AI drafts (no
+  content.create).
+- The daily sweep has one new entry, `["crm", crmDailySweep]`, which runs follow-ups and then retention.
+- AI usage rows for `crm.*` and `customers.*` workflows now keep only the error's reason, with no grader notes. This
+  also changes the existing mobile reply drafts.
+- B&C's privacy notice must name this tool, OpenAI (summaries and drafts) and Neon, and check Neon's region.
+
+- Retention never blanks accepted quotes (a record of a sale; a quote accepted by hand has no Shopify order). They
+  are unlinked from a deleted customer and kept whole. A person's erasure request still blanks them. Owner may
+  override.
+- The Overview change is four small edits in `components/workspace/workspace.tsx` (an import, a `crmOn?` prop, its
+  default, the `due=` fragment) and one line in `app/(shell)/page.tsx`.
+
+**Open items:**
+- The web was never rendered: no browser check and no e2e run. This blocks turning on the `crm` flag. Browser check: customer → log message → queue → overdue task → deal → quote sent by hand → declined → versions →
+  erase/export.
+- Not built on the web: a company list (a company is erased from one of its customers' pages), moving a conversation to
+  another customer, and linking a deal to a conversation. The server supports all three.
+- Accepted risk (owner's 2026-11-24 decision): a client reviewer given crm.manage or inbox.read in the permission
+  matrix sees every customer record and message.
+- Phases B (Meta), C (AskCart customers) and D (Gmail; Google restricted-scope verification plus a CASA assessment, or
+  an Internal app on B&C's own Workspace) are not built.
+
+**Merging into today's main:** a trial merge (`git merge-tree`) shows these conflicts:
+- **server:** `prisma/schema.prisma` (the Brand back-relations next to seo-depth's), `server/jobs/runner.ts` (the
+  one-line sweep list; keep both entries) and `shared/.hash`.
+- **web:** `components/workspace/workspace.tsx` and `app/(shell)/page.tsx`, because the overview stream added the
+  `adsOn`/`salesOn` props. Keep theirs and re-add:
+  - the `crmOn` prop;
+  - the `FollowUpCounts` import;
+  - the `due=` fragment.
+- **mobile:** `src/shared/.hash`.
+
+Re-run `npm run sync:shared` after the merge so every `.hash` matches.

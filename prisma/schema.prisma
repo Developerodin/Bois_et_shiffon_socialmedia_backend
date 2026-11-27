@@ -213,44 +213,52 @@ model Brand {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  workspace       Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  profile         BrandProfile?
-  members         BrandMember[]
-  agentRuns       AgentRun[]
-  agentEvents     AgentEvent[]
-  agentConfigs    BrandAgentConfig[]
-  contextDocs     BrandContextDoc[]
-  connections     IntegrationConnection[]
-  auditReports    AuditReport[]
-  chatThreads     ChatThread[]
-  opportunities   Opportunity[]
-  contentItems    ContentItem[]
-  learningNotes   LearningNote[]
-  competitors     Competitor[]
-  invitations     Invitation[]
-  photoShoots     PhotoShoot[]
-  reelAssets      ReelAsset[]
-  products        Product[]
-  catalogPages    CatalogPage[]
-  campaigns       Campaign[]
-  tasks           Task[]
-  workProjects    WorkProject[]
-  taskComments    TaskComment[]
-  notifications   Notification[]
-  dataSources     DataSource[]
-  postMetrics     PostMetric[]
-  shopOrders      ShopOrder[]
-  shopOrderLines  ShopOrderLine[]
-  searchDays      SearchDay[]
-  searchQueryDays SearchQueryDay[]
-  siteCrawls      SiteCrawl[]
-  seoAlerts       SeoAlert[]
-  adDays          AdDay[]
-  adBudgets       AdBudget[]
-  adAlerts        AdAlert[]
-  shopifyWrites   ShopifyWrite[]
-  blogArticles    BlogArticle[]
-  quotes          Quote[]
+  workspace            Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  profile              BrandProfile?
+  members              BrandMember[]
+  agentRuns            AgentRun[]
+  agentEvents          AgentEvent[]
+  agentConfigs         BrandAgentConfig[]
+  contextDocs          BrandContextDoc[]
+  connections          IntegrationConnection[]
+  auditReports         AuditReport[]
+  chatThreads          ChatThread[]
+  opportunities        Opportunity[]
+  contentItems         ContentItem[]
+  learningNotes        LearningNote[]
+  competitors          Competitor[]
+  invitations          Invitation[]
+  photoShoots          PhotoShoot[]
+  reelAssets           ReelAsset[]
+  products             Product[]
+  catalogPages         CatalogPage[]
+  campaigns            Campaign[]
+  tasks                Task[]
+  workProjects         WorkProject[]
+  taskComments         TaskComment[]
+  notifications        Notification[]
+  dataSources          DataSource[]
+  postMetrics          PostMetric[]
+  shopOrders           ShopOrder[]
+  shopOrderLines       ShopOrderLine[]
+  searchDays           SearchDay[]
+  searchQueryDays      SearchQueryDay[]
+  siteCrawls           SiteCrawl[]
+  seoAlerts            SeoAlert[]
+  adDays               AdDay[]
+  adBudgets            AdBudget[]
+  adAlerts             AdAlert[]
+  shopifyWrites        ShopifyWrite[]
+  blogArticles         BlogArticle[]
+  quotes               Quote[]
+  quoteVersions        QuoteVersion[]
+  deals                Deal[]
+  conversations        Conversation[]
+  conversationMessages ConversationMessage[]
+  companies            Company[]
+  customers            Customer[]
+  customerIdentities   CustomerIdentity[]
+  customerNotes        CustomerNote[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -2248,6 +2256,8 @@ enum QuoteStatus {
   ACCEPTED
   EXPIRED
   CANCELLED
+  /// a person recorded the customer's no (CREATED, SENT or EXPIRED → DECLINED); Shopify's draft is left as it is
+  DECLINED
 }
 
 /// A quote drafted in our app (server/quotes/quotes.ts) and created in Shopify as a draft order (server/quotes/shopify-draft-orders.ts).
@@ -2264,10 +2274,12 @@ model Quote {
   contactName      String?
   /// PII: sent to Shopify only on invoice send; never in audit metadata or logs
   contactEmail     String?
-  /// tier 2
+  /// the customer record (plan 2026-11-27-crm); contactName/contactEmail stay the snapshot the quote was written to
   customerId       String?
-  /// tier 2
+  /// the conversation it came from (plan 2026-11-27-crm)
   conversationId   String?
+  /// the pipeline deal it belongs to: its sends and acceptance move the deal forward (server/crm/deals.ts)
+  dealId           String?
   /// the shop's currency
   currency         String
   /// QuoteLine[] snapshot (shared/quotes.ts): title, variant and unit price frozen when added; <= 100
@@ -2290,6 +2302,8 @@ model Quote {
   subtotalAccepted String?
   invoiceUrl       String?
   orderId          String?
+  /// <= 500, why the customer said no (DECLINED); PII-adjacent: never in audit metadata, blanked on erasure
+  declinedReason   String?
   sentAt           DateTime?
   /// who sent the invoice last: owns the payment reminders
   sentById         String?
@@ -2297,8 +2311,304 @@ model Quote {
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 
-  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  brand        Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  versions     QuoteVersion[]
+  deal         Deal?          @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  conversation Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  customer     Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   @@unique([brandId, number])
   @@index([brandId, status, updatedAt])
+  @@index([customerId])
+  @@index([conversationId])
+  @@index([dealId])
+}
+
+/// A quote as it was before an edit or a revise (plan 2026-11-27-crm, Decision 10). No contact name or email: they stay
+/// on Quote only, so erasure has nothing to chase here except the customer note and free line titles.
+model QuoteVersion {
+  id          String   @id @default(cuid())
+  workspaceId String
+  brandId     String
+  quoteId     String
+  /// the quote's version this was
+  version     Int
+  /// QuoteLine[] as they were
+  lines       Json
+  discount    Json?
+  /// the note for the customer, as it was
+  note        String?
+  /// QuoteTotals as the server worked them out then
+  totals      Json
+  /// this version had been sent to the customer (snapshotted by a revise)
+  sent        Boolean  @default(false)
+  /// who replaced it (plain id, as on Quote)
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  quote Quote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([quoteId, version])
+}
+
+// ---- CRM records (plan 2026-11-27-crm, Phase A) -----------------------------------------------------------------
+// Customer data: names, identity values, note text never go into logs, job payloads, audit metadata or errors.
+// User ids (ownerId, authorId, ...) are plain strings, as on Quote: a removed member's id stays and reads "Former member".
+
+/// A business customer (trade buyer, interior designer's studio). Optional parent of customers. Erasable (server/crm/erase.ts).
+model Company {
+  id          String   @id @default(cuid())
+  workspaceId String
+  brandId     String
+  /// <= 200
+  name        String
+  /// http(s) only
+  website     String?
+  /// a member holding crm.manage
+  ownerId     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  brand     Brand      @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customers Customer[]
+  deals     Deal[]
+
+  @@index([brandId, name])
+  @@index([updatedAt])
+}
+
+enum CustomerSource {
+  MANUAL
+  QUOTE
+  SHOPIFY
+  INBOX
+}
+
+/// A person B&C deals with. Retention: deleted 24 months after the last activity (server/crm/retention.ts, Decision 18).
+model Customer {
+  id             String         @id @default(cuid())
+  workspaceId    String
+  brandId        String
+  companyId      String?
+  /// PII, <= 200
+  displayName    String
+  /// "Interior designer", free text <= 100
+  role           String?
+  /// BCP 47, for AI drafts
+  language       String?
+  source         CustomerSource @default(MANUAL)
+  /// a member holding crm.manage
+  ownerId        String?
+  /// <= 200
+  nextAction     String?
+  /// brand-local day
+  nextActionDue  DateTime?      @db.Date
+  /// bumped by writes to the customer, its notes, conversations, deals and quotes: the retention candidate hint only
+  lastActivityAt DateTime       @default(now())
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  brand         Brand              @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  company       Company?           @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  identities    CustomerIdentity[]
+  notes         CustomerNote[]
+  quotes        Quote[]
+  conversations Conversation[]
+  deals         Deal[]
+
+  @@index([brandId, lastActivityAt(sort: Desc), id])
+  @@index([brandId, ownerId])
+  @@index([companyId])
+  @@index([lastActivityAt])
+}
+
+enum IdentityKind {
+  EMAIL
+  PHONE
+  INSTAGRAM
+  MESSENGER
+  SHOPIFY
+}
+
+/// How a customer is reached or recognised. A value belongs to one customer per brand and kind (normalised: server/crm/identity.ts).
+model CustomerIdentity {
+  id          String       @id @default(cuid())
+  workspaceId String
+  brandId     String
+  customerId  String
+  kind        IdentityKind
+  /// PII, <= 254, normalised
+  value       String
+  createdAt   DateTime     @default(now())
+
+  brand    Brand    @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@unique([brandId, kind, value])
+  @@index([customerId])
+}
+
+/// The team's note on a customer: append-only (the author may delete theirs within 24 h).
+model CustomerNote {
+  id          String   @id @default(cuid())
+  workspaceId String
+  brandId     String
+  customerId  String
+  authorId    String?
+  /// <= 4,000
+  text        String
+  createdAt   DateTime @default(now())
+
+  brand    Brand    @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt])
+}
+
+enum ConversationChannel {
+  LOGGED
+  INSTAGRAM
+  MESSENGER
+}
+
+enum MessageMedium {
+  EMAIL
+  PHONE
+  IN_PERSON
+  WHATSAPP
+  OTHER
+}
+
+/// One thread with a customer on any channel (plan 2026-11-27-crm, Decision 1). LOGGED: typed in by a person, always
+/// with a customer. A thread from an outside system (Meta in Phase B, Gmail in Phase D) is keyed by
+/// (connectionId, externalThreadId). The follow-up state is derived from these columns (server/crm/conversations.ts).
+model Conversation {
+  id                 String              @id @default(cuid())
+  workspaceId        String
+  brandId            String
+  channel            ConversationChannel
+  /// INSTAGRAM/MESSENGER (and Gmail later) only
+  connectionId       String?
+  /// Meta: the customer's PSID/IGSID; Gmail: the threadId
+  externalThreadId   String?
+  /// the sender's id on that channel (PSID/IGSID, or a lower-cased email address)
+  customerExternalId String?
+  customerId         String?
+  /// <= 200
+  subject            String?
+  /// a member holding inbox.read
+  ownerId            String?
+  /// <= 200
+  nextAction         String?
+  nextActionDue      DateTime?           @db.Date
+  /// the latest message's sentAt, and whether the customer sent it
+  lastMessageAt      DateTime
+  lastFromCustomer   Boolean
+  /// we wrote last (our message's sentAt) or a person marked it waiting on the customer
+  waitingSince       DateTime?
+  /// the follow-up episode: the first customer message after ours (its sentAt); the follow-up task's key
+  episodeAt          DateTime?
+  /// the open follow-up task (Task.id, plain), closed on a reply or close
+  followUpTaskId     String?
+  closedAt           DateTime?
+  /// AI, <= 600 (server/crm/summary.ts)
+  summary            String?
+  summaryThrough     DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  brand    Brand                 @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customer Customer?             @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  messages ConversationMessage[]
+  quotes   Quote[]
+  deals    Deal[]
+
+  @@unique([connectionId, externalThreadId])
+  @@index([brandId, closedAt, lastMessageAt(sort: Desc), id])
+  @@index([brandId, ownerId])
+  @@index([brandId, nextActionDue])
+  @@index([customerId, lastMessageAt])
+  @@index([closedAt, waitingSince])
+}
+
+/// One message in a Conversation. LOGGED: typed in by a person (medium, loggedById); nothing is ever sent from here.
+/// Kept 13 months from sentAt (server/crm/retention.ts).
+model ConversationMessage {
+  id             String         @id @default(cuid())
+  workspaceId    String
+  brandId        String
+  conversationId String
+  /// Meta mid / Gmail message id; null for LOGGED
+  externalId     String?
+  medium         MessageMedium?
+  fromCustomer   Boolean
+  /// PII, <= 4,000
+  text           String
+  /// types only
+  attachments    String[]       @default([])
+  loggedById     String?
+  /// a channel's unsend (Phase B): text cleared, row kept so a late copy can't revive it
+  deletedAt      DateTime?
+  sentAt         DateTime
+  createdAt      DateTime       @default(now())
+
+  brand        Brand        @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, externalId])
+  @@index([conversationId, sentAt])
+  @@index([sentAt])
+}
+
+/// O2 (owner, 2026-11-27): New → Contacted → Proposal → Negotiation → Won / Lost.
+enum DealStage {
+  NEW
+  CONTACTED
+  PROPOSAL
+  NEGOTIATION
+  WON
+  LOST
+}
+
+/// An enquiry or sales opportunity on the pipeline (plan 2026-11-27-crm, Task A7). Quotes move it forward only
+/// (server/crm/deals.ts advanceDealForQuote). Not "Opportunity": that name is content ideas.
+model Deal {
+  id             String    @id @default(cuid())
+  workspaceId    String
+  brandId        String
+  stage          DealStage @default(NEW)
+  /// <= 200; the form warns against personal data; replaced on erasure
+  title          String
+  customerId     String?
+  companyId      String?
+  conversationId String?
+  value          Decimal?  @db.Decimal(14, 2)
+  /// ISO 4217, required with value; totals never mix currencies
+  currency       String?
+  /// a member holding crm.manage
+  ownerId        String?
+  nextAction     String?
+  nextActionDue  DateTime? @db.Date
+  /// DealCloseReason (shared/crm.ts) when WON or LOST
+  closedReason   String?
+  /// <= 500
+  closedNote     String?
+  stageChangedAt DateTime  @default(now())
+  closedAt       DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  brand        Brand         @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customer     Customer?     @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  company      Company?      @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  quotes       Quote[]
+
+  @@index([brandId, stage, updatedAt])
+  @@index([brandId, ownerId])
+  @@index([customerId, updatedAt])
+  @@index([companyId])
+  @@index([conversationId])
+  @@index([updatedAt])
 }

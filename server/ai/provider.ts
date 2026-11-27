@@ -296,6 +296,9 @@ async function readStream(res: Response, onText: (soFar: string) => void): Promi
   throw new AiProviderError("OpenAI's stream ended before the answer was complete", true, "unavailable");
 }
 
+/** Workflows whose input is customer text: their usage rows keep reasons, never notes (see logRun). */
+const customerData = (workflowId: string) => /^(crm|customers)\./.test(workflowId);
+
 export async function logRun(
   ctx: AiCallContext,
   provider: string,
@@ -328,9 +331,11 @@ export async function logRun(
       webSearchCalls: usage?.webSearchCalls,
       costUsd: usage ? aiCostUsd(await modelConfig(), model, usage) : null,
       latencyMs: Date.now() - started,
-      error: error?.slice(0, 2000),
+      // Customer-data workflows (crm.*, customers.*): the reason only, never the note or the model's text, which can
+      // quote a customer's message (plan 2026-11-27-crm, review Security 6).
+      error: error && customerData(ctx.workflowId) ? error.split(/[:(]/)[0]!.trim().slice(0, 200) : error?.slice(0, 2000),
       evalPassed: findings ? findings.length === 0 : null,
-      evalFindings: findings?.length ? findings.map((f) => ({ ...f, note: f.note.slice(0, 300) })) : undefined,
+      evalFindings: findings?.length ? findings.map((f) => ({ ...f, note: customerData(ctx.workflowId) ? "" : f.note.slice(0, 300) })) : undefined,
     },
   });
 }
