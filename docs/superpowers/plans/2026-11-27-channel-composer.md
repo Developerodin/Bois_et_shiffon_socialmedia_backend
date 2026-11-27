@@ -28,8 +28,8 @@ offers every channel.
    (`requestId`), same `scheduledFor` rule as `createPost`. Linked products come from the photo (`productIdsForPhoto`).
 4. **One set of limits.** `IMAGES` moves from `publishing.ts` to `shared/content-limits.ts` as `CHANNEL_IMAGES`
    (publishing imports it). `cleanPinLink` moves to `shared/` (publishing re-exports it). A pure
-   `writtenPostProblem(channel, { text, pinTitle, pinLink, photos })` in `shared/` is used by the route's zod refine
-   and by the dialog, with `captionMaxFor(channel)` (the draft editor's `CAPTION_MAX`, lifted). Text limits:
+   `writtenPostProblem(channel, { text, pinTitle, pinLink, photos })` in `shared/` is used by `createWrittenPost`
+   (a 400 with its message) and by the dialog, with `captionMaxFor(channel)` (the draft editor's `CAPTION_MAX`, lifted). Text limits:
    Facebook 2,200 (rules' default), Threads 500, LinkedIn 3,000, X 280 (`CHANNEL_TEXT_MAX`), pin description 500,
    pin title 100. Images: Pinterest exactly 1; Facebook, Threads, LinkedIn, X 0–1. So each offers **one** optional image
    (Pinterest: required), not a multi-picker.
@@ -48,8 +48,12 @@ offers every channel.
    `NEW_POST_CHANNELS` (web) and the channel header's "New post makes an Instagram post or carousel" line.
 10. **LinkedIn and X** say "Published by hand" in the dialog: planned and approved here, posted by a person, then
     marked posted (`registerManualPost`, unchanged).
-11. **Written posts' brief.** The post view shows "Written in New post" instead of "The Brief writer hasn't written the
-    brief yet" when `brief.written`.
+11. **Written posts' brief.** The post view's Brief says "None: written by hand in New post." instead of "The Brief
+    writer hasn't written the brief yet" when `brief.written`.
+12. **Publishing with the draft's pictures (found while building).** The web publish form started empty, so a written
+    Facebook or Threads post's image would have been dropped when published from the web (min 0 images), and an upload
+    on a draft that names its pictures is refused. The form now starts with the draft's pictures (removable), as the
+    phone and auto-publish already do.
 
 ## Skipped
 
@@ -65,5 +69,9 @@ offers every channel.
    parses, each channel's limits, idempotency, version + Quality start).
 3. Web: `lib/new-post.ts` + tests; the dialog's channel choice, written fields, hand-offs; callers pass the channel
    filter and `reelsOn`; header line removed; brief line.
+
+**Ceilings / notes:** written posts count toward the shared 60-a-day AI cap (the Quality run). The Creator's cap
+change also lets an existing Threads draft keep one photo on a rewrite. Mobile's copy of `shared/` is not updated on
+this branch (no mobile change): run `npm run sync:shared` after merging. Not browser-checked.
 
 **Migrations:** none (`plannedBoard*` exist; nothing new is stored in a column).
