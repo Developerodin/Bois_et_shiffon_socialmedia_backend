@@ -49,8 +49,9 @@ export function period(days: number, now: Date) {
 
 /**
  * A daily series by day. Facebook stamps a day with its end (`end_time` 07:00/08:00 UTC the next day, Pacific
- * midnight), so its day is the one before; Instagram stamps it with that same day's 07:00/08:00 UTC (checked live
- * 2026-11-27: since=Oct 30 gave a first end_time of Oct 30 on Instagram, Oct 31 on Facebook).
+ * midnight), so its day is the one before. Instagram is taken to stamp it with that same day's 07:00/08:00 UTC:
+ * inferred from one live read on 2026-11-27 (since=Oct 30 gave a first end_time of Oct 30 on Instagram, Oct 31 on
+ * Facebook, and 28 values each); compare a day against Instagram's own Insights to confirm.
  */
 function series(data: unknown, name: string, stampsEnd: boolean): ChannelDayDto[] {
   const s = ((Array.isArray(data) ? data : []) as Series).find((x) => x.name === name);
@@ -149,7 +150,8 @@ export async function readChannelAnalytics(input: ReadInput): Promise<Read> {
   ]);
   const t = insights(totalsData);
   const followersDaily = series(followData, "follower_count", false);
-  // follows_and_unfollows answers only as a breakdown, so new followers are follower_count's days added up.
+  // New followers are follower_count's days added up (gross follows, not net of unfollows): follows_and_unfollows read
+  // live gave no plain total_value, so it isn't asked for.
   const totals = { ...Object.fromEntries(Object.entries(IG_TOTALS).map(([metric, key]) => [key, t.get(metric) ?? null])), newFollowers: total(followersDaily) };
 
   type Media = { id?: unknown; media_type?: unknown; media_product_type?: unknown; timestamp?: unknown; caption?: unknown; permalink?: unknown };
@@ -249,5 +251,3 @@ async function read(conn: IntegrationConnection, channel: AnalyticsChannel, days
   return r.body;
 }
 
-/** Test hook: forget every cached answer. */
-export const clearChannelAnalyticsCache = () => cache.clear();
