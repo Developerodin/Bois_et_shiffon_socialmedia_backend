@@ -36,17 +36,36 @@ describe("GET /agents latest runs", () => {
     expect(agents.every((a) => a.key === "creator" || a.key === "quality" ? true : a.lastRun === null)).toBe(true);
   });
 
-  it("marks a failed run that had nothing to do (its last event INFO) and says whether LinkedIn and X can be planned", async () => {
+  it("marks a failed run that had nothing to do (its last event the engine's INFO with the run's error) and says whether LinkedIn and X can be planned", async () => {
     const t = new Date("2026-11-20T10:00:00Z");
     db.$queryRaw.mockResolvedValue([
       { id: "r1", agentKey: "brief", status: "FAILED", startedAt: t, finishedAt: t, error: "No posts to brief" },
       { id: "r2", agentKey: "creator", status: "FAILED", startedAt: t, finishedAt: t, error: "boom" },
     ]);
-    db.agentEvent.findMany.mockResolvedValue([{ runId: "r1", level: "INFO" }, { runId: "r2", level: "ERROR" }]);
+    db.agentEvent.findMany.mockResolvedValue([{ runId: "r1", level: "INFO", message: "No posts to brief" }, { runId: "r2", level: "ERROR", message: "Failed: boom" }]);
     const body = (await (await call()).json()) as { agents: (Agent & { lastRun: { nothingToDo?: boolean } | null })[]; plannerHandChannels: boolean };
-    expect(db.agentEvent.findMany.mock.calls[0]![0]).toMatchObject({ where: { runId: { in: ["r1", "r2"] } }, distinct: ["runId"] });
+    expect(db.agentEvent.findMany.mock.calls[0]![0]).toMatchObject({ where: { runId: { in: ["r1", "r2"] } }, distinct: ["runId"], select: { message: true } });
     expect(body.agents.find((a) => a.key === "brief")!.lastRun!.nothingToDo).toBe(true);
     expect(body.agents.find((a) => a.key === "creator")!.lastRun!.nothingToDo).toBeUndefined();
     expect(body.plannerHandChannels).toBe(false);
+  });
+
+  it("doesn't read a crash whose last event is a progress INFO as nothing to do", async () => {
+    const t = new Date("2026-11-20T10:00:00Z");
+    const long = "y".repeat(500);
+    db.$queryRaw.mockResolvedValue([
+      { id: "r1", agentKey: "planner", status: "FAILED", startedAt: t, finishedAt: t, error: "connection reset" },
+      { id: "r2", agentKey: "brief", status: "FAILED", startedAt: t, finishedAt: t, error: long },
+      { id: "r3", agentKey: "creator", status: "FAILED", startedAt: t, finishedAt: t, error: null },
+    ]);
+    db.agentEvent.findMany.mockResolvedValue([
+      { runId: "r1", level: "INFO", message: "Planning 2 idea(s)" }, // its failure event was never written
+      { runId: "r2", level: "INFO", message: long.slice(0, 300) }, // the engine's event: the error cut to 300
+      { runId: "r3", level: "INFO", message: "Writing 3 posts" },
+    ]);
+    const body = (await (await call()).json()) as { agents: (Agent & { lastRun: { nothingToDo?: boolean } | null })[] };
+    expect(body.agents.find((a) => a.key === "planner")!.lastRun!.nothingToDo).toBeUndefined();
+    expect(body.agents.find((a) => a.key === "brief")!.lastRun!.nothingToDo).toBe(true);
+    expect(body.agents.find((a) => a.key === "creator")!.lastRun!.nothingToDo).toBeUndefined();
   });
 });

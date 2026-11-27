@@ -7,6 +7,7 @@ const db = vi.hoisted(() => ({
   product: { findMany: vi.fn(async () => [] as unknown[]) },
   brandProfile: { findFirst: vi.fn(async () => null) },
   opportunity: { findMany: vi.fn(async () => [] as unknown[]), updateMany: vi.fn() },
+  $executeRaw: vi.fn(async () => 0),
   $transaction: vi.fn(),
 }));
 const m = vi.hoisted(() => ({ sources: vi.fn(), save: vi.fn(), linked: vi.fn(), refund: vi.fn(), start: vi.fn() }));

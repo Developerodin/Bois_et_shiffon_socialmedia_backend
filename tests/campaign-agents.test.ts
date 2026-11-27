@@ -34,6 +34,7 @@ import { qualityAgent } from "@/server/agents/definitions/quality";
 import { liveOfferFor } from "@/server/content/knowledge";
 import { offerSnapshotOf } from "@/server/content/offer-checks";
 import { createPost } from "@/server/services/publishing";
+import { startAgentRun } from "@/server/agents/engine";
 
 const NOW = new Date("2026-11-28T10:00:00Z");
 const scope = { workspaceId: "w1", brandId: "b1" };
@@ -211,5 +212,59 @@ describe("createPost and liveOfferFor: the offer a special-offer post links", ()
     expect(db.contentItem.create.mock.calls[0]![0].data).toEqual(expect.objectContaining({ productIds: ["p1"], campaignId: "product" }));
     await createPost({ ...post, goal: "newArrival" });
     expect(db.contentItem.create.mock.calls[1]![0].data).toEqual(expect.objectContaining({ campaignId: null }));
+  });
+});
+
+describe("A scoped Plan's chain stays on its channels", () => {
+  const started = () => vi.mocked(startAgentRun).mock.calls.map((c) => [c[0].agentKey, c[0].input]);
+  const item = (over: object = {}) => ({
+    id: "i1", title: "Post", channel: "PINTEREST_PIN", status: "PLANNED", pillar: null, scheduledFor: null, brief: {}, opportunity: null, campaignId: null,
+    productIds: [], versions: [], decisions: [], ...over,
+  });
+
+  it("takes channels in the brief and creator inputs, validated like the Planner's", () => {
+    for (const a of [briefAgent, creatorAgent]) {
+      expect(a.inputSchema.parse({ chain: true, round: 1, channels: ["PINTEREST_PIN", "PINTEREST_PIN"] })).toEqual({ chain: true, round: 1, channels: ["PINTEREST_PIN"] });
+      expect(a.inputSchema.safeParse({ channels: [] }).success).toBe(false);
+      expect(a.inputSchema.safeParse({ channels: ["NOPE"] }).success).toBe(false);
+    }
+  });
+
+  it("briefs only posts on the channels and passes them to the Creator and the next brief round", async () => {
+    db.contentItem.findMany.mockResolvedValue([item()]);
+    db.contentItem.count.mockResolvedValue(3);
+    await briefAgent.run(ctx, { chain: true, channels: ["PINTEREST_PIN"] });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).toMatchObject({ status: "PLANNED", channel: { in: ["PINTEREST_PIN"] } });
+    expect((db.contentItem.count.mock.calls[0] as unknown as [{ where: object }])[0].where).toMatchObject({ status: "PLANNED", channel: { in: ["PINTEREST_PIN"] } });
+    expect(started()).toEqual([
+      ["creator", { chain: true, round: 0, channels: ["PINTEREST_PIN"] }],
+      ["brief", { chain: true, round: 1, channels: ["PINTEREST_PIN"] }],
+    ]);
+  });
+
+  it("an unscoped brief run sweeps every channel and chains as before", async () => {
+    db.contentItem.findMany.mockResolvedValue([item()]);
+    db.contentItem.count.mockResolvedValue(0);
+    await briefAgent.run(ctx, { chain: true });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).not.toHaveProperty("channel");
+    expect(started()).toEqual([["creator", { chain: true, round: 0 }]]);
+  });
+
+  it("writes only posts on the channels, passes them to its next round, and not to Quality", async () => {
+    db.contentItem.findMany.mockResolvedValue([item({ status: "BRIEF_READY" })]);
+    db.contentItem.count.mockResolvedValue(2);
+    await creatorAgent.run(ctx, { chain: true, channels: ["PINTEREST_PIN"] });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).toMatchObject({ status: { in: ["BRIEF_READY", "DRAFT_REVIEW"] }, channel: { in: ["PINTEREST_PIN"] } });
+    expect((db.contentItem.count.mock.calls[0] as unknown as [{ where: object }])[0].where).toMatchObject({ status: "BRIEF_READY", channel: { in: ["PINTEREST_PIN"] } });
+    expect(started()).toContainEqual(["creator", { chain: true, round: 1, channels: ["PINTEREST_PIN"] }]);
+    for (const [key, input] of started()) if (key === "quality") expect(input).toEqual({ round: 0 });
+  });
+
+  it("an unscoped creator run sweeps every channel", async () => {
+    db.contentItem.findMany.mockResolvedValue([item({ status: "BRIEF_READY" })]);
+    db.contentItem.count.mockResolvedValue(2);
+    await creatorAgent.run(ctx, { chain: true });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).not.toHaveProperty("channel");
+    expect(started()).toContainEqual(["creator", { chain: true, round: 1 }]);
   });
 });

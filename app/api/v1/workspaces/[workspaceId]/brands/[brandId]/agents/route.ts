@@ -32,13 +32,15 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
         ) r`,
     ]);
 
-    // A failed run whose last event is INFO had nothing to do (NothingToDoError: a chained round with no posts left):
-    // the app shows it as idle, not failed.
-    const failedIds = lastRuns.filter((r) => r.status === "FAILED").map((r) => r.id);
-    const lastEvents = failedIds.length
-      ? await prisma.agentEvent.findMany({ where: { runId: { in: failedIds } }, orderBy: [{ runId: "asc" }, { id: "desc" }], distinct: ["runId"], select: { runId: true, level: true } })
+    // A failed run had nothing to do (NothingToDoError: a chained round with no posts left) when its last event is the
+    // one the engine writes for it: INFO with the run's own error as the message (onAgentRunFailure). Any other last
+    // INFO (a progress line, its failure event never written) is a crash: the app shows it as failed, not idle.
+    const failed = lastRuns.filter((r) => r.status === "FAILED");
+    const lastEvents = failed.length
+      ? await prisma.agentEvent.findMany({ where: { runId: { in: failed.map((r) => r.id) } }, orderBy: [{ runId: "asc" }, { id: "desc" }], distinct: ["runId"], select: { runId: true, level: true, message: true } })
       : [];
-    const idle = new Set(lastEvents.filter((e) => e.level === "INFO").map((e) => e.runId));
+    const errorOf = new Map(failed.map((r) => [r.id, r.error]));
+    const idle = new Set(lastEvents.filter((e) => e.level === "INFO" && !!errorOf.get(e.runId) && e.message === errorOf.get(e.runId)!.slice(0, 300)).map((e) => e.runId));
     const agents = shown.map((a) => {
       const run = lastRuns.find((r) => r.agentKey === a.key);
       return {

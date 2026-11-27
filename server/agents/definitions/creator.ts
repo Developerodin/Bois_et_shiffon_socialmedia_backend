@@ -1,6 +1,6 @@
-import type { Prisma } from "@prisma/client";
+import type { ContentChannel, Prisma } from "@prisma/client";
 import { z } from "zod";
-import { CHAIN_ROUNDS } from "@/server/agents/chain";
+import { CHAIN_ROUNDS, chainChannels } from "@/server/agents/chain";
 import { NothingToDoError, startAgentRun } from "@/server/agents/engine";
 import { CONTENT_PROMPT_VERSION, CREATOR_SYSTEM } from "@/server/agents/prompts/content";
 import type { AgentDefinition } from "@/server/agents/types";
@@ -49,14 +49,16 @@ export const creatorAgent: AgentDefinition = {
   description: "Writes captions, hooks, carousel slides, Reel scripts and Pin titles from each brief.",
   // itemId: write just that post (sent back from the app's "Re-generate caption"), as its own run.
   // chain: start the next agent of the posts chain when done (Planner → Brief writer → Creator → Quality), the app's "Generate calendar".
-  inputSchema: z.object({ itemId: z.string().min(1).max(100).optional(), chain: z.boolean().optional(), round: z.number().int().min(0).max(CHAIN_ROUNDS).optional() }).strict(),
+  // channels: a scoped Plan's channels, passed down the chain; only posts on them are written.
+  inputSchema: z.object({ itemId: z.string().min(1).max(100).optional(), chain: z.boolean().optional(), round: z.number().int().min(0).max(CHAIN_ROUNDS).optional(), channels: chainChannels }).strict(),
   async run(ctx, input) {
     const { brand } = ctx;
     const scope = { workspaceId: brand.workspaceId, brandId: brand.brandId };
-    const { itemId, chain, round = 0 } = input as { itemId?: string; chain?: boolean; round?: number }; // parsed by the engine against inputSchema
+    const { itemId, chain, round = 0, channels } = input as { itemId?: string; chain?: boolean; round?: number; channels?: ContentChannel[] }; // parsed by the engine against inputSchema
+    const onChannels = channels ? { channel: { in: channels } } : {};
     const items = await prisma.contentItem.findMany({
       // studio reels are written in the app
-      where: { brandId: brand.brandId, status: { in: ["BRIEF_READY", "DRAFT_REVIEW"] }, studio: false, ...(itemId ? { id: itemId } : {}) },
+      where: { brandId: brand.brandId, status: { in: ["BRIEF_READY", "DRAFT_REVIEW"] }, studio: false, ...onChannels, ...(itemId ? { id: itemId } : {}) },
       orderBy: [{ scheduledFor: "asc" }, { createdAt: "asc" }],
       include: {
         versions: { orderBy: { version: "desc" }, take: 1, include: { checks: { orderBy: { createdAt: "desc" }, take: 1 } } },
@@ -262,9 +264,9 @@ export const creatorAgent: AgentDefinition = {
     if (chain) {
       // Check this round's drafts, then write the next batch while briefs are waiting (see CHAIN_ROUNDS).
       const start = (agentKey: string, next: number) =>
-        startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey, trigger: "event", input: agentKey === "quality" ? { round: next } : { chain: true, round: next } }).catch(() => null);
+        startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey, trigger: "event", input: agentKey === "quality" ? { round: next } : { chain: true, round: next, ...(channels ? { channels } : {}) } }).catch(() => null);
       if (drafted) await start("quality", round);
-      const waiting = await prisma.contentItem.count({ where: { brandId: brand.brandId, status: "BRIEF_READY", studio: false } });
+      const waiting = await prisma.contentItem.count({ where: { brandId: brand.brandId, status: "BRIEF_READY", studio: false, ...onChannels } });
       if (waiting > 0 && round + 1 < CHAIN_ROUNDS && (await postAiAllowed(brand.workspaceId))) await start("creator", round + 1);
     }
     return { drafted };

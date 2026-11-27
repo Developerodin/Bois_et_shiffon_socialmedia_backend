@@ -1,3 +1,6 @@
+import { ContentChannel } from "@prisma/client";
+import { z } from "zod";
+
 /**
  * The posts chain ("Generate calendar"): Brief writer and Creator work in batches (8 and 5 per run), so each starts
  * its next round while posts are still waiting. ponytail: at most this many rounds per stage per Generate (about 48
@@ -16,3 +19,9 @@ export function runInput(agentKey: string, input: unknown): unknown {
   if (typeof input !== "object" || Array.isArray(input)) return input; // the schema refuses it
   return { chain: true, ...input };
 }
+
+/**
+ * The channels a scoped Plan ("Plan with agents") is limited to. The Planner passes them down the chain so the Brief
+ * writer and Creator work only on posts on those channels; absent = every channel, as before.
+ */
+export const chainChannels = z.array(z.nativeEnum(ContentChannel)).min(1).max(9).transform((c) => [...new Set(c)]).optional();
