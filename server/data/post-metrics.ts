@@ -84,12 +84,12 @@ type Fetch = typeof fetch;
 type Stop = () => boolean;
 type GraphError = { code?: number; error_subcode?: number; message?: string };
 type Insight = { name: string; values?: { value?: unknown }[]; total_value?: { value?: unknown } };
-type Answer = { status: number; body: unknown };
+export type Answer = { status: number; body: unknown };
 
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const sum = (...xs: (number | null)[]) => (xs.every((x) => x !== null) ? xs.reduce<number>((a, x) => a + x!, 0) : null);
 
-function insights(data: unknown): Map<string, number | null> {
+export function insights(data: unknown): Map<string, number | null> {
   const out = new Map<string, number | null>();
   for (const i of (Array.isArray(data) ? data : []) as Insight[]) out.set(i.name, num(i.total_value?.value ?? i.values?.[0]?.value));
   return out;
@@ -131,7 +131,7 @@ const NO_NUMBERS: PostMetrics = { views: null, reach: null, likes: null, comment
  * "too_few": Instagram's code 10 "Not enough viewers for the media to show insights" (subcode 2108006). A small
  * audience, not a missing permission: the post gets null numbers and the run isn't a permission stop.
  */
-function classify(status: number, body: unknown): PostReason | "reconnect" | "rate_limited" | "too_few" | null {
+export function classify(status: number, body: unknown): PostReason | "reconnect" | "rate_limited" | "too_few" | null {
   const e = (body as { error?: GraphError } | null)?.error;
   if (status < 400 && !e) return null;
   const code = e?.code;
@@ -145,7 +145,7 @@ function classify(status: number, body: unknown): PostReason | "reconnect" | "ra
 const codeOf = (body: unknown) => num((body as { error?: GraphError } | null)?.error?.code);
 
 /** The metric an error 100 refuses, by its `metric[i]` index or else by name; null when it names none we asked for. */
-function refusedMetric(a: Answer | null | undefined, metrics: string[]): string | null {
+export function refusedMetric(a: Answer | null | undefined, metrics: string[]): string | null {
   const e = (a?.body as { error?: GraphError } | null)?.error;
   if (e?.code !== 100 || e.error_subcode === 33 || metrics.length < 2) return null;
   const msg = String(e.message ?? "");
@@ -155,7 +155,7 @@ function refusedMetric(a: Answer | null | undefined, metrics: string[]): string 
 }
 
 /** One HTTP call; never throws (network, timeout, bad JSON → status 0). */
-async function send(f: Fetch, url: string, init?: RequestInit): Promise<Answer> {
+export async function send(f: Fetch, url: string, init?: RequestInit): Promise<Answer> {
   try {
     const res = await f(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
     return { status: res.status, body: await res.json().catch(() => null) };
