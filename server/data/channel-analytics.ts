@@ -210,7 +210,9 @@ const TTL_MS = 15 * 60_000;
  * (move it to Redis or a table then). A partial or reconnect answer is never cached. Requests for the same key while
  * one is reading share it.
  */
-const cache = new Map<string, { at: number; answer: Promise<ChannelAnalyticsDto> }>();
+const cache = new Map<string, { at: number; ttl: number; answer: Promise<ChannelAnalyticsDto> }>();
+/** A partial answer (a rate limit, a timeout) is kept briefly, so a struggling account isn't asked again on every view. */
+const PARTIAL_TTL_MS = 2 * 60_000;
 const CACHE_MAX = 500;
 
 /**
@@ -219,17 +221,22 @@ const CACHE_MAX = 500;
  * only that one; add a Page picker if that ever matters).
  */
 export async function channelAnalytics(scope: { workspaceId: string; brandId: string }, channel: AnalyticsChannel, days: number, now = new Date()): Promise<ChannelAnalyticsDto> {
-  const conns = await prisma.integrationConnection.findMany({ where: { ...scope, provider: PROVIDER[channel], status: { in: ["ACTIVE", "ERROR"] } }, orderBy: { createdAt: "asc" } });
+  const conns = await prisma.integrationConnection.findMany({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId, provider: PROVIDER[channel], status: { in: ["ACTIVE", "ERROR"] } }, orderBy: { createdAt: "asc" } });
   const conn = conns.find((c) => c.status === "ACTIVE");
   if (!conn) return emptyAnswer(channel, conns.length ? "reconnect" : "not_connected", days, now);
   const key = `${conn.id}:${days}`;
   const hit = cache.get(key);
-  if (hit && now.getTime() - hit.at < TTL_MS) return hit.answer;
-  if (cache.size >= CACHE_MAX) for (const [k, v] of cache) if (now.getTime() - v.at >= TTL_MS) cache.delete(k);
+  if (hit && now.getTime() - hit.at < hit.ttl) return hit.answer;
+  if (cache.size >= CACHE_MAX) for (const [k, v] of cache) if (now.getTime() - v.at >= v.ttl) cache.delete(k);
   const answer = read(conn, channel, days, now);
-  cache.set(key, { at: now.getTime(), answer });
+  const entry = { at: now.getTime(), ttl: TTL_MS, answer };
+  cache.set(key, entry);
   answer.then(
-    (a) => (a.partial || a.state !== "ok") && cache.get(key)?.answer === answer && cache.delete(key),
+    (a) => {
+      if (cache.get(key) !== entry) return;
+      if (a.state !== "ok") cache.delete(key);
+      else if (a.partial) entry.ttl = PARTIAL_TTL_MS;
+    },
     () => cache.get(key)?.answer === answer && cache.delete(key),
   );
   return answer;
