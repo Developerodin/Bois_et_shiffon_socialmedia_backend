@@ -248,6 +248,7 @@ model Brand {
   shopifyWrites  ShopifyWrite[]
   blogArticles   BlogArticle[]
   quotes         Quote[]
+  quoteVersions  QuoteVersion[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -2112,8 +2113,37 @@ model Quote {
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 
-  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  brand    Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  versions QuoteVersion[]
 
   @@unique([brandId, number])
   @@index([brandId, status, updatedAt])
+}
+
+/// A quote as it was before an edit or a revise (plan 2026-11-27-crm, Decision 10). No contact name or email: they stay
+/// on Quote only, so erasure has nothing to chase here except the customer note and free line titles.
+model QuoteVersion {
+  id          String   @id @default(cuid())
+  workspaceId String
+  brandId     String
+  quoteId     String
+  /// the quote's version this was
+  version     Int
+  /// QuoteLine[] as they were
+  lines       Json
+  discount    Json?
+  /// the note for the customer, as it was
+  note        String?
+  /// QuoteTotals as the server worked them out then
+  totals      Json
+  /// this version had been sent to the customer (snapshotted by a revise)
+  sent        Boolean  @default(false)
+  /// who replaced it (plain id, as on Quote)
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  quote Quote @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([quoteId, version])
 }

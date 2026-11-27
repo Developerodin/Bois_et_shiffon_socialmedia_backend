@@ -6,7 +6,7 @@ import { prisma } from "@/server/db/prisma";
 import { addDays, brandTimeZone, zoneToday } from "@/server/data/sources";
 import { PublishingError, TX } from "@/server/services/publishing";
 import { writeInFlight } from "@/server/shopify/writes";
-import { OPEN_TASK_STATUSES, QUOTE_LIMITS, quoteNumber, type PermissionKey, type QuoteDiscount, type QuoteDto, type QuoteLine, type QuoteTotals } from "@/shared";
+import { OPEN_TASK_STATUSES, QUOTE_LIMITS, quoteNumber, type PermissionKey, type QuoteDiscount, type QuoteDto, type QuoteLine, type QuoteTotals, type QuoteVersionDto } from "@/shared";
 
 /**
  * Quotes in our app (plan 2026-11-24-phase-3-crm, Task 7), crm.manage for everything (checked by the routes). A quote
@@ -221,6 +221,40 @@ export async function createQuote(scope: QuoteScope, input: z.infer<typeof Quote
 
 const EDITABLE: QuoteStatus[] = ["DRAFT", "CREATED"];
 
+/**
+ * Keeps `q` (as read before a change) as an earlier version (plan 2026-11-27-crm, Decision 10): lines, discount, the
+ * customer note and totals, never the contact fields. A revise and the edit after it hold the same version number:
+ * the first row stays (a revise's row is marked sent).
+ */
+async function snapshotVersion(tx: Prisma.TransactionClient, scope: { workspaceId: string; brandId: string; userId: string }, q: Quote, sent: boolean) {
+  const lines = quoteLines(q.lines);
+  const discount = quoteDiscount(q.discount);
+  await tx.quoteVersion.createMany({
+    data: [{
+      workspaceId: scope.workspaceId, brandId: scope.brandId, quoteId: q.id, version: q.version, lines: lines as Prisma.InputJsonValue,
+      discount: (discount ?? undefined) as Prisma.InputJsonValue | undefined, note: q.note, totals: quoteTotals(lines, discount, q.currency) as Prisma.InputJsonValue, sent, createdById: scope.userId,
+    }],
+    skipDuplicates: true,
+  });
+}
+
+/** The earlier versions, newest first (≤ 50; lines and totals only for the one asked for). Another brand's quote: 404. */
+export async function quoteVersions(scope: { workspaceId: string; brandId: string }, id: string, version?: number): Promise<QuoteVersionDto[]> {
+  await loadQuote(scope, id);
+  const rows = await prisma.quoteVersion.findMany({
+    where: { quoteId: id, workspaceId: scope.workspaceId, brandId: scope.brandId, ...(version ? { version } : {}) },
+    orderBy: { version: "desc" },
+    take: 50,
+  });
+  return rows.map((v) => ({
+    version: v.version,
+    sent: v.sent,
+    createdAt: v.createdAt.toISOString(),
+    createdById: v.createdById,
+    ...(version ? { lines: quoteLines(v.lines), discount: quoteDiscount(v.discount), note: v.note, totals: v.totals as QuoteTotals } : {}),
+  }));
+}
+
 /** An edit on the `version` read (DRAFT or CREATED only): bumps it, so a token for the old one no longer confirms. */
 export async function editQuote(scope: QuoteScope, id: string, patch: z.infer<typeof QuoteEdit>) {
   const { version, lines: lineInput, discount, ...rest } = patch;
@@ -236,18 +270,24 @@ export async function editQuote(scope: QuoteScope, id: string, patch: z.infer<ty
   const nextDiscount = discount === undefined ? quoteDiscount(q.discount) : discount;
   checkDiscount(lines, nextDiscount, q.currency);
   const blank = (v: string | null | undefined) => (v === undefined ? undefined : v || null);
-  const { count } = await prisma.quote.updateMany({
-    where: { id, workspaceId: scope.workspaceId, brandId: scope.brandId, version, status: { in: EDITABLE } },
-    data: {
-      contactName: blank(rest.contactName), contactEmail: blank(rest.contactEmail), note: blank(rest.note), internalNote: blank(rest.internalNote),
-      ...(lineInput ? { lines: lines as Prisma.InputJsonValue } : {}),
-      ...(discount !== undefined ? { discount: (discount ?? null) as Prisma.InputJsonValue } : {}),
-      version: { increment: 1 },
-    },
-  });
-  if (!count) throw changed();
-  // Field names only: never the contact's name, email or the notes.
-  await audit(prisma, scope, "quote.edited", id, { fields: Object.keys(patch).filter((k) => k !== "version"), version: version + 1, lines: lines.length });
+  await prisma.$transaction(async (tx) => {
+    // The guarded update first: a concurrent edit of the same version finds count 0 here (a clean 409), never a
+    // duplicate snapshot.
+    const { count } = await tx.quote.updateMany({
+      where: { id, workspaceId: scope.workspaceId, brandId: scope.brandId, version, status: { in: EDITABLE } },
+      data: {
+        contactName: blank(rest.contactName), contactEmail: blank(rest.contactEmail), note: blank(rest.note), internalNote: blank(rest.internalNote),
+        ...(lineInput ? { lines: lines as Prisma.InputJsonValue } : {}),
+        ...(discount !== undefined ? { discount: (discount ?? null) as Prisma.InputJsonValue } : {}),
+        version: { increment: 1 },
+      },
+    });
+    if (!count) throw changed();
+    // The version replaced, as read before the update (only edits change content, and each bumps version).
+    await snapshotVersion(tx, scope, q, false);
+    // Field names only: never the contact's name, email or the notes.
+    await audit(tx, scope, "quote.edited", id, { fields: Object.keys(patch).filter((k) => k !== "version"), version: version + 1, lines: lines.length });
+  }, TX);
   return toQuoteDto(await loadQuote(scope, id));
 }
 
@@ -270,6 +310,8 @@ export async function quoteAction(scope: QuoteScope, id: string, input: z.infer<
     await prisma.$transaction(async (tx) => {
       const { count } = await tx.quote.updateMany({ where: { ...where, status: "SENT" }, data: { status: to } });
       if (!count) throw changed();
+      // The version the customer saw, marked sent (an edit after this snapshots the same version again: skipped).
+      await snapshotVersion(tx, scope, q, true);
       await closeQuoteReminders(tx, q, "The quote is being revised");
       await audit(tx, scope, "quote.revised", id, { version: q.version, to });
     }, TX);
