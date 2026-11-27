@@ -43,6 +43,7 @@ const DESCRIPTION = {
  */
 export class FollowUpOwners {
   private role: Promise<string | null> | null = null;
+  private zone: Promise<string> | null = null;
   private owners = new Map<string, Promise<boolean>>();
   constructor(
     private readonly tx: Prisma.TransactionClient | typeof prisma,
@@ -60,6 +61,12 @@ export class FollowUpOwners {
         GROUP BY r.id, r."createdAt" ORDER BY count(*) DESC, r."createdAt" ASC LIMIT 1`
       .then((rows) => rows[0]?.id ?? null);
     return this.role;
+  }
+
+  /** The brand's time zone, read once per run (on this client, not inside each conversation's transaction). */
+  today(now: Date) {
+    this.zone ??= brandTimeZone(this.s);
+    return this.zone.then((z) => zoneToday(z, now));
   }
 
   async for(ownerId: string | null): Promise<{ ownerId: string | null; ownerRoleId: string | null }> {
@@ -92,7 +99,7 @@ export async function syncFollowUp(tx: Prisma.TransactionClient, s: Scope, conve
   }
   let created = false;
   if (due && !taskId) {
-    const zone = await brandTimeZone(s);
+    const today = await owners.today(now);
     const who = await owners.for(c.ownerId);
     const t = await createKeyedTask(tx, s, {
       requestId: key!,
@@ -100,11 +107,12 @@ export async function syncFollowUp(tx: Prisma.TransactionClient, s: Scope, conve
       description: `${DESCRIPTION[due.kind]}\n\n/crm?tab=follow-ups&c=${c.id}`,
       areas: ["CRM"],
       ...who,
-      dueOn: new Date(`${zoneToday(zone, now)}T00:00:00Z`),
+      dueOn: new Date(`${today}T00:00:00Z`),
     });
     taskId = t.id;
     created = t.created;
   }
-  if (taskId !== c.followUpTaskId) await tx.conversation.update({ where: { id: c.id }, data: { followUpTaskId: taskId } });
+  // Raw, so `updatedAt` stays: the sweep must not turn someone's open edit of the conversation into a 409.
+  if (taskId !== c.followUpTaskId) await tx.$executeRaw`UPDATE "Conversation" SET "followUpTaskId" = ${taskId} WHERE id = ${c.id}`;
   return created;
 }

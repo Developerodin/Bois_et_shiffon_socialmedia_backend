@@ -1,6 +1,6 @@
 import type { Conversation, Prisma } from "@prisma/client";
 import { z } from "zod";
-import { brandWhere, changed, checkCrmLinks, checkOwner, crmAudit, type CrmScope, type Db, dayOf, dayString, invalid, notFound } from "@/server/crm/common";
+import { brandWhere, changed, checkCrmLinks, checkOwner, crmAudit, type CrmScope, type Db, dayOf, dayString, invalid, notFound, touchCustomer, zDay } from "@/server/crm/common";
 import { syncFollowUp } from "@/server/crm/follow-up-tasks";
 import { brandTimeZone, zoneToday } from "@/server/data/sources";
 import { prisma } from "@/server/db/prisma";
@@ -23,7 +23,7 @@ export const WAITING_MS = 7 * DAY;
 export const MESSAGE_KEEP_MS = 396 * DAY;
 
 const id = z.string().min(1).max(40);
-const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Dates are YYYY-MM-DD");
+const day = zDay;
 export const MessageInput = z.object({
   fromCustomer: z.boolean(),
   medium: z.enum(MESSAGE_MEDIA),
@@ -164,7 +164,7 @@ export async function createConversation(s: CrmScope, input: z.infer<typeof Conv
     });
     await tx.conversationMessage.create({ data: { ...brandWhere(s), conversationId: c.id, medium: input.message.medium, fromCustomer: input.message.fromCustomer, text: input.message.text, sentAt, loggedById: s.userId } });
     await recompute(tx, c.id);
-    await tx.customer.updateMany({ where: { id: input.customerId, lastActivityAt: { lt: now } }, data: { lastActivityAt: now } });
+    await touchCustomer(tx, input.customerId, now);
     await afterChange(tx, s, c.id, now);
     await crmAudit(tx, s, "conversation.created", "Conversation", c.id, { customerId: input.customerId, medium: input.message.medium, fromCustomer: input.message.fromCustomer, length: input.message.text.length });
     return c;
@@ -180,8 +180,10 @@ export async function logMessage(s: CrmScope, conversationId: string, input: z.i
     const c = await loadConversation(tx, s, conversationId);
     if (c.channel !== "LOGGED") throw invalid("Messages are logged on logged conversations only", "crm.notLogged");
     const m = await tx.conversationMessage.create({ data: { ...brandWhere(s), conversationId, medium: input.medium, fromCustomer: input.fromCustomer, text: input.text, sentAt: new Date(input.sentAt), loggedById: s.userId } });
-    await recompute(tx, conversationId);
-    await tx.customer.updateMany({ where: { id: c.customerId ?? "", lastActivityAt: { lt: now } }, data: { lastActivityAt: now } });
+    // Only a message that is now the latest re-derives the state: a back-dated one never reopens a closed
+    // conversation or undoes "waiting" set by hand.
+    if (m.sentAt >= c.lastMessageAt) await recompute(tx, conversationId);
+    await touchCustomer(tx, c.customerId, now);
     await afterChange(tx, s, conversationId, now);
     await crmAudit(tx, s, "conversation.message.logged", "Conversation", conversationId, { messageId: m.id, medium: input.medium, fromCustomer: input.fromCustomer, length: input.text.length });
   }, TX);
@@ -205,10 +207,12 @@ export async function updateConversation(s: CrmScope, conversationId: string, pa
       data: {
         subject: blank(rest.subject), customerId: rest.customerId, ownerId: rest.ownerId, nextAction: blank(rest.nextAction), nextActionDue: dayOf(rest.nextActionDue),
         ...(waiting === true ? { waitingSince: now, episodeAt: null } : waiting === false ? { waitingSince: null, episodeAt: c.episodeAt ?? now } : {}),
-        ...(closed === true ? { closedAt: now } : closed === false ? { closedAt: null } : {}),
+        ...(closed === true ? { closedAt: now } : {}),
+        // Reopened: a new episode from now (the old one's task was closed), so its follow-up can fall due again.
+        ...(closed === false && c.closedAt ? { closedAt: null, ...(c.waitingSince && waiting !== false ? { waitingSince: now } : { episodeAt: now }) } : {}),
       },
     });
-    if (rest.customerId) await tx.customer.updateMany({ where: { id: rest.customerId, lastActivityAt: { lt: now } }, data: { lastActivityAt: now } });
+    await touchCustomer(tx, rest.customerId, now);
     await afterChange(tx, s, conversationId, now);
     await crmAudit(tx, s, "conversation.updated", "Conversation", conversationId, { fields: Object.keys(rest), ...(waiting !== undefined ? { waiting } : {}), ...(closed !== undefined ? { closed } : {}) });
   }, TX);

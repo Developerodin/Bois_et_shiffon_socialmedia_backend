@@ -36,7 +36,7 @@ async function fullCustomer(name: string, email: string) {
   await addNote(s, c.id, { text: `${name} prefers oak` });
   const conv = await createConversation(s, ConversationCreate.parse({ customerId: c.id, message: { fromCustomer: true, medium: "EMAIL", text: `${name} lives at 3 rue Haute`, sentAt: new Date(Date.now() - 30 * 3_600_000).toISOString() } }));
   const deal = await createDeal(s, DealCreate.parse({ title: `${name}'s living room`, customerId: c.id, nextAction: `Call ${name}` }));
-  const linked = await createQuote(s, QuoteCreate.parse({ currency: "EUR", contactName: name, contactEmail: email, note: `For ${name}`, lines: [{ title: "Sofa", quantity: 1, unitPrice: "900" }] }));
+  const linked = await createQuote(s, QuoteCreate.parse({ currency: "EUR", contactName: name, contactEmail: email, note: `For ${name}`, lines: [{ title: "Sofa", quantity: 1, unitPrice: "900" }, { title: `Cushion embroidered ${name}`, quantity: 1, unitPrice: "50" }] }));
   await setQuoteCustomer(s, linked.id, { customerId: c.id });
   const edited = await editQuote(s, linked.id, QuoteEdit.parse({ version: linked.version, note: "changed" }));
   const sent = await quoteAction(s, linked.id, QuoteAction.parse({ action: "markSent", version: edited.version }));
@@ -62,6 +62,8 @@ describe("erasure", () => {
     const left = JSON.stringify([quotes, deal]);
     expect(left).not.toMatch(/Jeanne|jeanne|said too dear|For Jeanne/i);
     expect(quotes.find((q) => q.id === x.linked.id)).toMatchObject({ status: "DECLINED", currency: "EUR" });
+    // Free line titles go (a bespoke piece can name the person); the prices and the rest of the line stay.
+    expect((quotes.find((q) => q.id === x.linked.id)!.lines as { title: string; unitPrice: string }[]).map((l) => [l.title, l.unitPrice])).toEqual([["Item", "900.00"], ["Item", "50.00"]]);
     const audit = await prisma.auditEvent.findMany({ where: { action: "customer.erased" } });
     expect(audit).toHaveLength(1);
     expect(JSON.stringify(audit)).not.toMatch(/Jeanne|jeanne/i);
@@ -122,8 +124,14 @@ describe("retention", () => {
     const orphan = await createDeal(s, DealCreate.parse({ title: "Orphan" }));
     await prisma.$executeRaw`UPDATE "Deal" SET "updatedAt" = ${new Date(Date.now() - 800 * DAY)} WHERE id = ${orphan.id}`;
 
+    // Someone inactive for years who came back with a fresh quote (not linked): retention must leave that quote whole.
+    await prisma.customerIdentity.create({ data: { workspaceId: s.workspaceId, brandId: s.brandId, customerId: gone.id, kind: "EMAIL", value: "back@again.fr" } });
+    await age(gone.id, 25 * 30);
+    const fresh = await createQuote(s, QuoteCreate.parse({ currency: "EUR", contactName: "Back Again", contactEmail: "back@again.fr", lines: [] }));
+
     const out = await pruneCrm();
     expect(out).toMatchObject({ customers: 1, messages: 1, conversations: 1, deals: 1 });
+    expect(await prisma.quote.findUniqueOrThrow({ where: { id: fresh.id } })).toMatchObject({ contactName: "Back Again", contactEmail: "back@again.fr" });
     expect(await prisma.customer.findUnique({ where: { id: gone.id } })).toBeNull();
     expect(await prisma.customer.findUnique({ where: { id: noted.id } })).not.toBeNull();
     expect(await prisma.customer.findUnique({ where: { id: shop.id } })).not.toBeNull();

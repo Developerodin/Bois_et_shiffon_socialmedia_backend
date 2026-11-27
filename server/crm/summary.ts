@@ -44,7 +44,7 @@ export async function summarizeConversation(s: CrmScope, conversationId: string,
   if (!c) throw notFound("Conversation");
   const newer = c.summaryThrough ? await prisma.conversationMessage.count({ where: { conversationId: c.id, createdAt: { gt: c.summaryThrough } } }) : 1;
   if (c.summary && !newer) return { summary: c.summary, nextStep: null, nextActionDue: null, cached: true };
-  const messages = (await prisma.conversationMessage.findMany({ where: { conversationId: c.id, deletedAt: null }, orderBy: [{ sentAt: "desc" }, { createdAt: "desc" }], take: LAST })).reverse();
+  const messages = (await prisma.conversationMessage.findMany({ where: { conversationId: c.id }, orderBy: [{ sentAt: "desc" }, { createdAt: "desc" }], take: LAST })).reverse();
   if (!messages.length) throw new PublishingError("This conversation has no messages to summarise", 409, "crm.empty");
   await limit(s, "summary", 30, 20);
   const out = await generateObject(
@@ -76,7 +76,7 @@ export async function summarizeConversation(s: CrmScope, conversationId: string,
 export async function draftConversationReply(s: CrmScope, conversationId: string) {
   const c = await prisma.conversation.findFirst({ where: { id: conversationId, ...brandWhere(s) }, select: { id: true } });
   if (!c) throw notFound("Conversation");
-  const messages = await prisma.conversationMessage.findMany({ where: { conversationId: c.id, deletedAt: null }, orderBy: [{ sentAt: "desc" }, { createdAt: "desc" }], take: DRAFT_LAST });
+  const messages = await prisma.conversationMessage.findMany({ where: { conversationId: c.id }, orderBy: [{ sentAt: "desc" }, { createdAt: "desc" }], take: DRAFT_LAST });
   if (!messages.length) throw new PublishingError("This conversation has no messages to answer", 409, "crm.empty");
   const kept: string[] = [];
   let size = 0;

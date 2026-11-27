@@ -1,6 +1,6 @@
 import { Prisma, type Deal } from "@prisma/client";
 import { z } from "zod";
-import { brandWhere, changed, checkCrmLinks, checkOwner, crmAudit, type CrmScope, type Db, dayOf, dayString, invalid, notFound } from "@/server/crm/common";
+import { brandWhere, changed, checkCrmLinks, checkOwner, crmAudit, type CrmScope, type Db, dayOf, dayString, invalid, notFound, touchCustomer, zDay } from "@/server/crm/common";
 import { advanceDealForQuote, eventOfStatus } from "@/server/crm/deal-moves";
 import { prisma } from "@/server/db/prisma";
 import { loadQuote } from "@/server/quotes/quotes";
@@ -23,7 +23,7 @@ const fields = {
   currency: z.string().regex(/^[A-Z]{3}$/, "A currency is a 3-letter code like EUR").nullable().optional(),
   ownerId: id.nullable().optional(),
   nextAction: z.string().trim().max(CRM_LIMITS.nextAction).nullable().optional(),
-  nextActionDue: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  nextActionDue: zDay.nullable().optional(),
 };
 export const DealCreate = z.object({ ...fields, stage: z.enum(OPEN_DEAL_STAGES).default("NEW") });
 export const DealPatch = z.object({
@@ -134,7 +134,7 @@ export async function createDeal(s: CrmScope, input: z.infer<typeof DealCreate>)
         value: input.value ?? null, currency: input.value ? input.currency : (input.currency ?? null), ownerId: input.ownerId ?? null, nextAction: input.nextAction || null, nextActionDue: dayOf(input.nextActionDue) ?? null,
       },
     });
-    if (row.customerId) await tx.customer.updateMany({ where: { id: row.customerId, lastActivityAt: { lt: row.createdAt } }, data: { lastActivityAt: row.createdAt } });
+    await touchCustomer(tx, row.customerId, row.createdAt);
     await crmAudit(tx, s, "deal.created", "Deal", row.id, { stage: row.stage });
     return row;
   }, TX);
@@ -159,8 +159,8 @@ export async function updateDeal(s: CrmScope, dealId: string, patch: z.infer<typ
     if (closing && !closedReason) throw invalid("Say why the deal was won or lost", "crm.closeReason");
     const reopening = moving && !closing;
     const blank = (v: string | null | undefined) => (v === undefined ? undefined : v || null);
-    await tx.deal.update({
-      where: { id: d.id },
+    const { count } = await tx.deal.updateMany({
+      where: { id: d.id, updatedAt: d.updatedAt, stage: d.stage },
       data: {
         title: rest.title, customerId: rest.customerId, companyId: rest.companyId, conversationId: rest.conversationId, value: rest.value, currency: rest.currency, ownerId: rest.ownerId,
         nextAction: blank(rest.nextAction), nextActionDue: dayOf(rest.nextActionDue),
@@ -170,8 +170,9 @@ export async function updateDeal(s: CrmScope, dealId: string, patch: z.infer<typ
         ...(!moving && closedNote !== undefined && (d.stage === "WON" || d.stage === "LOST") ? { closedNote: closedNote || null } : {}),
       },
     });
+    if (!count) throw changed("This deal");
     const customerId = rest.customerId ?? d.customerId;
-    if (customerId) await tx.customer.updateMany({ where: { id: customerId, lastActivityAt: { lt: now } }, data: { lastActivityAt: now } });
+    await touchCustomer(tx, customerId, now);
     await crmAudit(tx, s, moving ? "deal.stage" : "deal.edited", "Deal", d.id, moving ? { from: d.stage, to: stage, reason: closedReason ?? null } : { fields: Object.keys(rest) });
   }, TX);
   return getDeal(s, dealId);

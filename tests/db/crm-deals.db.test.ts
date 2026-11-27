@@ -42,6 +42,9 @@ describe("deals", () => {
     const back = await updateDeal(s, d.id, { updatedAt: lost.updatedAt, stage: "NEGOTIATION" });
     expect(back).toMatchObject({ stage: "NEGOTIATION", closedReason: null, closedAt: null });
     await expect(updateDeal(s, d.id, { updatedAt: lost.updatedAt, title: "stale" })).rejects.toMatchObject({ status: 409 });
+    // Two edits of the same read at once: one wins, the other is a 409 (never a silent overwrite).
+    const both = await Promise.allSettled([updateDeal(s, d.id, { updatedAt: back.updatedAt, title: "one" }), updateDeal(s, d.id, { updatedAt: back.updatedAt, title: "two" })]);
+    expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
     await expect(getDeal(other, d.id)).rejects.toMatchObject({ status: 404 });
   });
 

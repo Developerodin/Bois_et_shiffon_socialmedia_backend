@@ -1,4 +1,7 @@
 import type { Prisma } from "@prisma/client";
+import { z } from "zod";
+import { ModelNotConfiguredError } from "@/server/ai/models";
+import { AiProviderError } from "@/server/ai/provider";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { brandMemberPerms } from "@/server/auth/permissions";
 import { prisma } from "@/server/db/prisma";
@@ -20,6 +23,9 @@ export const invalid = (message: string, code?: string) => new PublishingError(m
 
 /** PublishingError (CRM refusals), TaskError (the shared cursor helper), then access errors. Never echoes input. */
 export function crmProblem(error: unknown) {
+  // The AI failures the other AI routes map (tasks/from-note, translate): not set up 503, failed or answered badly 502.
+  if (error instanceof ModelNotConfiguredError) return problemResponse({ type: "https://api.brandpilot/errors/ai-not-configured", title: "AI isn't set up", status: 503, detail: error.message });
+  if (error instanceof AiProviderError) return problemResponse({ type: "https://api.brandpilot/errors/ai-failed", title: "The AI couldn't answer", status: 502, detail: "The AI couldn't answer right now, try again." });
   if (error instanceof PublishingError) {
     return problemResponse({ type: "https://api.brandpilot/errors/crm", title: error.message, status: error.status, detail: error.message, code: error.code, ...error.data });
   }
@@ -54,11 +60,23 @@ export async function checkCrmLinks(db: Db, s: { workspaceId: string; brandId: s
   if (ids.dealId && !(await db.deal.findFirst({ where: { id: ids.dealId, ...w }, select }))) throw notFound("Deal");
 }
 
-/** Bumps the customer's activity (the retention hint) inside the caller's transaction; never moves it back. */
+/**
+ * Bumps the customer's activity (the retention hint) inside the caller's transaction; never moves it back. Raw SQL so
+ * `updatedAt` stays: activity elsewhere must not make someone's open edit of the customer a 409.
+ */
 export async function touchCustomer(db: Db, customerId: string | null | undefined, at = new Date()) {
   if (!customerId) return;
-  await db.customer.updateMany({ where: { id: customerId, lastActivityAt: { lt: at } }, data: { lastActivityAt: at } });
+  await db.$executeRaw`UPDATE "Customer" SET "lastActivityAt" = ${at} WHERE id = ${customerId} AND "lastActivityAt" < ${at}`;
 }
+
+/** "YYYY-MM-DD" that is a real day (2026-02-31 and 2026-13-01 are refused, not a 500 or a shifted date). */
+export const zDay = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Dates are YYYY-MM-DD")
+  .refine((d) => {
+    const t = new Date(`${d}T00:00:00Z`);
+    return !Number.isNaN(t.getTime()) && t.toISOString().slice(0, 10) === d;
+  }, "That date doesn't exist");
 
 /** "2026-11-27" → a Date at UTC midnight (a @db.Date column); null clears. */
 export const dayOf = (d: string | null | undefined) => (d === undefined ? undefined : d ? new Date(`${d}T00:00:00Z`) : null);

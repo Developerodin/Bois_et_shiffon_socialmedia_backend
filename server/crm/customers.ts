@@ -1,7 +1,7 @@
 import type { Customer, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { hitRateLimit } from "@/server/auth/rate-limit";
-import { brandWhere, changed, checkCrmLinks, checkOwner, crmAudit, type CrmScope, type Db, dayOf, dayString, invalid, notFound } from "@/server/crm/common";
+import { brandWhere, changed, checkCrmLinks, checkOwner, crmAudit, type CrmScope, type Db, dayOf, dayString, invalid, notFound, touchCustomer, zDay } from "@/server/crm/common";
 import { customerConversations } from "@/server/crm/conversations";
 import { customerDeals } from "@/server/crm/deals";
 import { normaliseIdentity } from "@/server/crm/identity";
@@ -19,7 +19,7 @@ import { CRM_LIMITS, MANUAL_IDENTITY_KINDS, quoteNumber, type CustomerDto, type 
  * page once per user and hour. Bulk reading is rate limited (plan review, Security 7).
  */
 const HOUR = 3_600_000;
-const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Dates are YYYY-MM-DD");
+const day = zDay;
 const id = z.string().min(1).max(40);
 const text = (max: number) => z.string().trim().max(max);
 
@@ -40,7 +40,7 @@ export const ListQuery = z.object({ q: z.string().max(100).optional(), companyId
 const Cursor = z.object({ at: z.string().datetime(), id: z.string() });
 
 type Row = Customer & { company: { id: string; name: string } | null };
-const toRow = (c: Row): CustomerRow => ({
+export const toRow = (c: Row): CustomerRow => ({
   id: c.id,
   displayName: c.displayName,
   role: c.role,
@@ -201,7 +201,7 @@ export async function addIdentity(s: CrmScope, customerId: string, input: z.infe
     prisma.$transaction(async (tx) => {
       await loadCustomer(tx, s, customerId);
       await addIdentities(tx, s, customerId, [input]);
-      await tx.customer.update({ where: { id: customerId }, data: { lastActivityAt: new Date() } });
+      await touchCustomer(tx, customerId);
       await crmAudit(tx, s, "customer.identity.added", "Customer", customerId, { kind: input.kind });
     }, TX),
   );
@@ -222,7 +222,7 @@ export async function addNote(s: CrmScope, customerId: string, input: z.infer<ty
   const note = await prisma.$transaction(async (tx) => {
     await loadCustomer(tx, s, customerId);
     const n = await tx.customerNote.create({ data: { ...brandWhere(s), customerId, authorId: s.userId, text: input.text } });
-    await tx.customer.update({ where: { id: customerId }, data: { lastActivityAt: n.createdAt } });
+    await touchCustomer(tx, customerId, n.createdAt);
     await crmAudit(tx, s, "customer.note.added", "Customer", customerId, { noteId: n.id, length: input.text.length });
     return n;
   }, TX);
@@ -261,7 +261,7 @@ export async function setQuoteCustomer(s: CrmScope, quoteId: string, input: z.in
       }
       const { count } = await tx.quote.updateMany({ where: { id: q.id, ...brandWhere(s) }, data: { customerId } });
       if (!count) throw notFound("Quote");
-      if (customerId) await tx.customer.update({ where: { id: customerId }, data: { lastActivityAt: new Date() } });
+      await touchCustomer(tx, customerId);
       await crmAudit(tx, s, "quote.customer", "Quote", q.id, { customerId, created: "create" in input });
     }, TX),
   );

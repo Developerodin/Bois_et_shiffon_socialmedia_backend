@@ -84,16 +84,14 @@ const SCAN = 5_000;
  */
 export async function queueFollowUps(now = new Date()) {
   const reply = new Date(now.getTime() - REPLY_AFTER_MS);
-  const due = await prisma.conversation.findMany({
-    where: {
-      closedAt: null,
-      followUpTaskId: null,
-      OR: [{ waitingSince: null, OR: [{ episodeAt: { lt: reply } }, { episodeAt: null, lastMessageAt: { lt: reply } }] }, { waitingSince: { lt: new Date(now.getTime() - WAITING_AFTER_MS) } }],
-    },
-    select: { id: true, workspaceId: true, brandId: true },
-    orderBy: [{ brandId: "asc" }, { lastMessageAt: "asc" }],
-    take: SCAN,
-  });
+  // At most TASKS_PER_BRAND candidates per brand (oldest first), so one brand's backlog never starves the others.
+  const due = await prisma.$queryRaw<{ id: string; workspaceId: string; brandId: string }[]>`
+    SELECT id, "workspaceId", "brandId" FROM (
+      SELECT id, "workspaceId", "brandId", row_number() OVER (PARTITION BY "brandId" ORDER BY "lastMessageAt") AS n
+      FROM "Conversation"
+      WHERE "closedAt" IS NULL AND "followUpTaskId" IS NULL
+        AND (("waitingSince" IS NULL AND COALESCE("episodeAt", "lastMessageAt") < ${reply}) OR "waitingSince" < ${new Date(now.getTime() - WAITING_AFTER_MS)})
+    ) d WHERE n <= ${TASKS_PER_BRAND} LIMIT ${SCAN}`;
   const byBrand = new Map<string, typeof due>();
   for (const c of due) byBrand.set(c.brandId, [...(byBrand.get(c.brandId) ?? []), c]);
   let made = 0;

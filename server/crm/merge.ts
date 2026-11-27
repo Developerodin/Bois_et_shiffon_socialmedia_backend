@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { brandWhere, changed, crmAudit, type CrmScope, invalid, notFound } from "@/server/crm/common";
-import { getCustomer } from "@/server/crm/customers";
+import { getCustomer, toRow } from "@/server/crm/customers";
 import { prisma } from "@/server/db/prisma";
 import { TX } from "@/server/services/publishing";
 import type { CustomerRow } from "@/shared";
@@ -26,7 +26,7 @@ export async function mergeSuggestions(s: CrmScope, customerId: string): Promise
     return [];
   }
   const found = await prisma.customer.findMany({ where: { id: { in: rows.map((r) => r.id) }, ...brandWhere(s) }, include: { company: { select: { id: true, name: true } } }, orderBy: { lastActivityAt: "desc" } });
-  return found.map((c) => ({ id: c.id, displayName: c.displayName, role: c.role, company: c.company, ownerId: c.ownerId, nextAction: c.nextAction, nextActionDue: c.nextActionDue?.toISOString().slice(0, 10) ?? null, lastActivityAt: c.lastActivityAt.toISOString() }));
+  return found.map(toRow);
 }
 
 /** Locks customer rows in id order (merge, erasure and retention all do, so two of them never deadlock). */

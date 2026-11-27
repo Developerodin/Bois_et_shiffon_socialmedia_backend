@@ -84,6 +84,18 @@ describe("follow-up tasks", () => {
     expect(t?.title).toBe("Follow up: the customer hasn't answered for 7 days");
     await updateConversation(s, c.id, { updatedAt: await fresh(c.id), closed: true });
     expect((await tasksOf(c.id))[0]?.status).toBe("DONE");
+    // Reopened: a new episode, so it can fall due again (here at once: it was waiting before, 7 more days later).
+    await updateConversation(s, c.id, { updatedAt: await fresh(c.id), closed: false });
+    await queueFollowUps(new Date(Date.now() + 8 * 24 * H));
+    expect((await tasksOf(c.id)).map((t) => t.status)).toEqual(["DONE", "TODO"]);
+  });
+
+  it("the sweep's task bookkeeping doesn't make someone's open edit a 409", async () => {
+    const c = await start(s, customer, true, ago(2));
+    const seen = await fresh(c.id);
+    await queueFollowUps(new Date(Date.now() + 23 * H));
+    expect(await tasksOf(c.id)).toHaveLength(1);
+    await expect(updateConversation(s, c.id, { updatedAt: seen, nextAction: "Call" })).resolves.toMatchObject({ nextAction: "Call" });
   });
 
   it("no inbox role on the brand: the task is unowned", async () => {

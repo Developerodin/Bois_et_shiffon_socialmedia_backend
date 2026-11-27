@@ -223,11 +223,12 @@ export async function confirmInvoice(scope: QuoteScope, quoteId: string, email: 
         const validUntil = new Date(`${addDays(zoneToday(zone, sentAt), QUOTE_LIMITS.validDays)}T00:00:00Z`);
         // A re-send starts its own reminders: the last send's open ones close.
         await closeQuoteReminders(tx, q, "The invoice was sent again");
-        await tx.quote.updateMany({
+        const { count } = await tx.quote.updateMany({
           where: { ...where, status: { in: ["CREATED", "SENT"] } },
           data: { status: "SENT", sentAt, validUntil, sentById: write.actorUserId, invoiceUrl: result.invoiceUrl },
         });
-        await advanceDealForQuote(tx, q, "sent", write.actorUserId);
+        // The deal id read fresh in this transaction (the rebuild's copy may be stale).
+        if (count) await advanceDealForQuote(tx, { id: q.id, workspaceId: q.workspaceId, brandId: q.brandId }, "sent", write.actorUserId);
       },
     },
     adapter,

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { prisma } from "@/server/db/prisma";
 import type { CrmScope } from "@/server/crm/common";
-import { ConversationCreate, createConversation, followUpState, getConversation, logMessage, updateConversation } from "@/server/crm/conversations";
+import { ConversationCreate, ConversationPatch, createConversation, followUpState, getConversation, logMessage, updateConversation } from "@/server/crm/conversations";
 import { createCustomer, CustomerCreate, getCustomer } from "@/server/crm/customers";
 import type { PermissionKey } from "@/shared";
 
@@ -75,6 +75,11 @@ describe("conversations", () => {
     // A new customer message reopens it.
     expect(await logMessage(s, c.id, { fromCustomer: true, medium: "EMAIL", text: "One more question", sentAt: ago(0) })).toMatchObject({ state: "NEEDS_REPLY", closedAt: null });
     await expect(getConversation(other, c.id)).rejects.toMatchObject({ status: 404 });
+    // A back-dated message doesn't reopen a closed conversation.
+    await updateConversation(s, c.id, { updatedAt: await fresh(), closed: true });
+    expect(await logMessage(s, c.id, { fromCustomer: false, medium: "PHONE", text: "earlier call", sentAt: ago(5) })).toMatchObject({ state: "CLOSED" });
+    // A day that doesn't exist is a 400, not a shifted date.
+    expect(ConversationPatch.safeParse({ updatedAt: await fresh(), nextActionDue: "2026-02-31" }).success).toBe(false);
   });
 
   it("the customer page shows conversations only to inbox.read holders; the audit never holds message text", async () => {

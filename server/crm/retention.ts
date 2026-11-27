@@ -1,5 +1,6 @@
 import { prisma } from "@/server/db/prisma";
-import { eraseCustomers } from "@/server/crm/erase";
+import type { Prisma } from "@prisma/client";
+import { blankQuotes, eraseCustomers } from "@/server/crm/erase";
 import { TX } from "@/server/services/publishing";
 import { closeTasks } from "@/server/tasks/system-tasks";
 
@@ -12,8 +13,9 @@ import { closeTasks } from "@/server/tasks/system-tasks";
  *     erasing transaction, so an irreversible delete never trusts a stale hint. Customers with a SHOPIFY identity
  *     are skipped (they go with their source, Phase C). Erased through eraseCustomers, audited per customer.
  *  3. Deals with no customer, and companies with no customers or deals, 24 months after their last change.
- *  4. Closed quotes not linked to anyone keep their lines but lose contact fields 24 months after their last change
- *     (the Shopify order stays the accounting record).
+ *  4. Closed quotes not linked to anyone are blanked like an erased customer's (blankQuotes) 24 months after their
+ *     last change (the Shopify order stays the accounting record). Quotes found only by an erased customer's email
+ *     are blanked here only when closed and older than the cut, so someone who came back keeps their new quote.
  * ponytail: at most 50k messages and 5k customers per sweep, within about 60 s; a backlog drains over the next days.
  */
 const DAY = 86_400_000;
@@ -26,8 +28,8 @@ const CUSTOMER_MAX = 5_000;
 const BUDGET_MS = 60_000;
 
 /** Inactive customers (all activity before `cut`), optionally only among `ids`. */
-function inactiveCustomers(cut: Date, ids: string[] | null, limit: number) {
-  return prisma.$queryRaw<{ id: string; workspaceId: string; brandId: string }[]>`
+function inactiveCustomers(db: Prisma.TransactionClient | typeof prisma, cut: Date, ids: string[] | null, limit: number) {
+  return db.$queryRaw<{ id: string; workspaceId: string; brandId: string }[]>`
     SELECT c.id, c."workspaceId", c."brandId" FROM "Customer" c
     WHERE c."lastActivityAt" < ${cut} AND c."updatedAt" < ${cut}
       AND (${ids === null} OR c.id = ANY(${ids ?? []}::text[]))
@@ -55,19 +57,22 @@ export async function pruneCrm(now = new Date()) {
     const convIds = [...new Set(gone.map((g) => g.conversationId))];
     await prisma.$executeRaw`UPDATE "Conversation" SET summary = NULL, "summaryThrough" = NULL WHERE id = ANY(${convIds}::text[]) AND summary IS NOT NULL`;
     const empty = await prisma.conversation.findMany({ where: { id: { in: convIds }, messages: { none: {} } }, select: { id: true, workspaceId: true, brandId: true, followUpTaskId: true } });
-    for (const c of empty) {
+    // Per brand, one transaction: their open follow-up tasks closed, then the still-empty conversations deleted.
+    const byBrand = new Map<string, typeof empty>();
+    for (const c of empty) byBrand.set(c.brandId, [...(byBrand.get(c.brandId) ?? []), c]);
+    for (const list of byBrand.values()) {
       await prisma.$transaction(async (tx) => {
-        if (c.followUpTaskId) await closeTasks(tx, c, [c.followUpTaskId], "The conversation's messages passed the 13-month limit", {});
-        await tx.conversation.deleteMany({ where: { id: c.id, messages: { none: {} } } });
+        const tasks = list.flatMap((c) => (c.followUpTaskId ? [c.followUpTaskId] : []));
+        await closeTasks(tx, list[0]!, tasks, "The conversation's messages passed the 13-month limit", {});
+        out.conversations += (await tx.conversation.deleteMany({ where: { id: { in: list.map((c) => c.id) }, messages: { none: {} } } })).count;
       }, TX);
     }
-    out.conversations += empty.length;
   }
 
   // 2. Customers inactive for 24 months, re-checked inside each batch's transaction.
   const cut = new Date(now.getTime() - RECORD_DAYS * DAY);
   while (out.customers < CUSTOMER_MAX && left()) {
-    const batch = await inactiveCustomers(cut, null, CUSTOMER_BATCH);
+    const batch = await inactiveCustomers(prisma, cut, null, CUSTOMER_BATCH);
     if (!batch.length) break;
     const byBrand = new Map<string, typeof batch>();
     for (const c of batch) byBrand.set(c.brandId, [...(byBrand.get(c.brandId) ?? []), c]);
@@ -75,10 +80,15 @@ export async function pruneCrm(now = new Date()) {
     for (const list of byBrand.values()) {
       const b = { workspaceId: list[0]!.workspaceId, brandId: list[0]!.brandId };
       erased += (
-        await prisma.$transaction(async (tx) => {
-          const still = (await inactiveCustomers(cut, list.map((c) => c.id), list.length)).map((c) => c.id);
-          return still.length ? eraseCustomers(tx, b, still, { action: "customer.retention-deleted", actorUserId: null }) : [];
-        }, TX)
+        await prisma.$transaction(
+          (tx) =>
+            eraseCustomers(tx, b, list.map((c) => c.id), { action: "customer.retention-deleted", actorUserId: null }, {
+              // Re-checked after the rows are locked, in this transaction: a note or message committed meanwhile keeps them.
+              recheck: async (t, locked) => (await inactiveCustomers(t, cut, locked, locked.length)).map((c) => c.id),
+              emailQuotesBefore: cut,
+            }),
+          TX,
+        )
       ).length;
     }
     out.customers += erased;
@@ -93,10 +103,11 @@ export async function pruneCrm(now = new Date()) {
         AND NOT EXISTS (SELECT 1 FROM "Customer" x WHERE x."companyId" = c.id) AND NOT EXISTS (SELECT 1 FROM "Deal" d WHERE d."companyId" = c.id)
       LIMIT 5000)`;
 
-  // 4. Contact fields of old closed quotes nobody is linked to (updatedAt left as it is).
-  out.quotes = await prisma.$executeRaw`
-    UPDATE "Quote" SET "contactName" = NULL, "contactEmail" = NULL, "declinedReason" = NULL
-    WHERE id IN (SELECT id FROM "Quote" WHERE "customerId" IS NULL AND status IN ('ACCEPTED', 'EXPIRED', 'CANCELLED', 'DECLINED') AND "updatedAt" < ${cut}
-      AND ("contactName" IS NOT NULL OR "contactEmail" IS NOT NULL OR "declinedReason" IS NOT NULL) LIMIT 5000)`;
+  // 4. Old closed quotes nobody is linked to: blanked as erasure does (blankQuotes, updatedAt left as it is).
+  const stale = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM "Quote" WHERE "customerId" IS NULL AND status IN ('ACCEPTED', 'EXPIRED', 'CANCELLED', 'DECLINED') AND "updatedAt" < ${cut}
+      AND ("contactName" IS NOT NULL OR "contactEmail" IS NOT NULL OR "declinedReason" IS NOT NULL OR note IS NOT NULL OR "internalNote" IS NOT NULL) LIMIT 5000`;
+  if (stale.length) await prisma.$transaction((tx) => blankQuotes(tx, stale.map((q) => q.id)), TX);
+  out.quotes = stale.length;
   return out;
 }
