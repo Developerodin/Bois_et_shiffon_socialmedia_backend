@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { metrics, parsePagesQuery } from "@/server/data/search-read";
+import { metrics, parsePagesQuery, QUERY_CURSOR } from "@/server/data/search-read";
 import { parseDayRange, previousRange } from "@/server/data/sources";
 import { SEARCH_RANGE_MAX_DAYS } from "@/shared";
 
@@ -44,5 +44,16 @@ describe("parsePagesQuery", () => {
     expect(parsePagesQuery(q("sort=position"))).toBeNull();
     expect(parsePagesQuery(q(`sort=impressions&cursor=${cursor}`))).toBeNull();
     expect(parsePagesQuery(q("cursor=nonsense"))).toBeNull();
+  });
+});
+
+describe("parsePagesQuery for queries", () => {
+  it("takes only a query cursor of the same sort, never a page cursor", () => {
+    const pageCursor = Buffer.from("clicks:50").toString("base64url");
+    const queryCursor = Buffer.from(`${QUERY_CURSOR}clicks:50`).toString("base64url");
+    expect(parsePagesQuery(q(`sort=clicks&cursor=${queryCursor}`), QUERY_CURSOR)).toEqual({ sort: "clicks", offset: 50 });
+    expect(parsePagesQuery(q(`sort=clicks&cursor=${pageCursor}`), QUERY_CURSOR)).toBeNull();
+    expect(parsePagesQuery(q(`sort=impressions&cursor=${queryCursor}`), QUERY_CURSOR)).toBeNull();
+    expect(parsePagesQuery(q(`sort=clicks&cursor=${queryCursor}`))).toBeNull();
   });
 });

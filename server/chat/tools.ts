@@ -13,7 +13,8 @@ import { addDays, badRangeDetail, brandTimeZone, liveSources, previousRange, ran
 import { ADS_MAX_DAYS, adsCampaigns, adsDays, D, shopRevenueOverSpend, totalsOf, type AdsDayRow } from "@/server/data/ads-read";
 import { currentMonth, listBudgets, MonthSchema } from "@/server/data/budgets";
 import { MAX_POSTS, POSTS_MAX_DAYS, postsWithMetrics } from "@/server/data/post-metrics-read";
-import { searchPages, searchSummary } from "@/server/data/search-read";
+import { searchPages, searchQueries, searchSummary } from "@/server/data/search-read";
+import { listSeoAlerts } from "@/server/seo/declines";
 import { CHAT_DATA_TOOLS, hiddenFor, MAX_DATA_CALLS, MAX_GROUP_CALLS, type ToolGroup } from "@/server/chat/turn";
 import { AGENTS } from "@/server/agents/registry";
 import { effectivePermissions } from "@/server/auth/permissions";
@@ -76,8 +77,9 @@ const POST_NOTES = [
 ];
 const SEARCH_NOTES = [
   "Days are Google's (Pacific time) and lag 2–3 days.",
-  "Only site totals and the top pages per day are stored; search queries (keywords) aren't synced, so they can't be answered here.",
-  "Page sums sit below the site total.",
+  "Only site totals, the top 500 pages and the top 500 queries per day are stored. Page sums sit below the site total.",
+  "Queries come from Search Console, the top 500 a day; Google also hides rare queries for privacy, so query sums are below the site total (queryCoverage). Queries are stored from queriesSince on.",
+  "decliningPages: pages found losing search traffic (open alerts, newest first): CLICKS_DOWN compares clicks, POSITION_DOWN average position, over the 28 days ending 3 days before the last synced day vs the 28 before; SITE_DOWN means the whole site fell, not one page.",
 ];
 const NO_SEARCH = { note: "Search Console isn't connected or hasn't finished its first sync." };
 
@@ -732,18 +734,24 @@ export function chatTools(scope: ChatScope) {
 
     searchPerformance: tool({
       description:
-        "Google Search Console results for the brand's site over a period (Google's days, default the last 28 synced days): clicks, impressions, CTR and average position with the previous period, daily rows when 31 days or less, and the top pages by clicks or impressions. Search keywords aren't available.",
+        "Google Search Console results for the brand's site over a period (Google's days, default the last 28 synced days): clicks, impressions, CTR and average position with the previous period, daily rows when 31 days or less, the top pages by clicks or impressions, the top search queries (keywords) with the share of clicks they cover, and the pages currently losing search traffic.",
       inputSchema: rangeInput("leave both out for the last 28 synced days").extend({
         pageSort: z.enum(SEARCH_PAGE_SORTS).default("clicks"),
         pages: z.number().int().min(0).max(25).default(10),
+        queries: z.number().int().min(0).max(25).default(10),
       }),
-      execute: async ({ pageSort, pages, ...input }) => {
+      execute: async ({ pageSort, pages, queries, ...input }) => {
         const refused = await gate("searchPerformance");
         if (refused) return refused;
         const range = await rangeOf(input, SEARCH_RANGE_MAX_DAYS, async () => (await liveSources(scope, "SEARCH_CONSOLE")).syncedThrough ?? NO_SEARCH, 28);
         if (!("from" in range)) return range;
         // manage: false, so the site's URL never reaches the model (only integrations.manage sees it on screen).
-        const [summary, top] = await Promise.all([searchSummary(scope, range, { manage: false }), searchPages(scope, range, { sort: pageSort, offset: 0 })]);
+        const [summary, top, topQueries, declines] = await Promise.all([
+          searchSummary(scope, range, { manage: false }),
+          searchPages(scope, range, { sort: pageSort, offset: 0 }),
+          searchQueries(scope, range, { sort: pageSort, offset: 0 }),
+          listSeoAlerts(scope, { open: true }, 10),
+        ]);
         if (!summary.hasSite) return { ...range, hasSite: false, ...NO_SEARCH };
         return {
           ...range,
@@ -757,6 +765,18 @@ export function chatTools(scope: ChatScope) {
           topPages: {
             columns: ["page", "clicks", "impressions", "ctr", "position"],
             rows: top.pages.slice(0, pages).map((p) => [cleanTitle(p.page), p.clicks, p.impressions, p.ctr, p.position]),
+          },
+          // Query text is what strangers typed: cleaned to one short line before the model sees it.
+          topQueries: {
+            columns: ["query", "clicks", "impressions", "ctr", "position"],
+            rows: topQueries.queries.slice(0, queries).map((q) => [cleanTitle(q.query), q.clicks, q.impressions, q.ctr, q.position]),
+          },
+          queryCoverage: topQueries.coverage,
+          queriesSince: topQueries.since,
+          // Paths and figures only (cleaned on the server): no host, no query text.
+          decliningPages: {
+            columns: ["page", "kind", "now", "before", "firstDay"],
+            rows: declines.alerts.map((a) => [a.path === null ? "(whole site)" : cleanTitle(a.path), a.kind, a.values.now ?? null, a.values.before ?? null, a.firstDay]),
           },
           notes: SEARCH_NOTES,
         };

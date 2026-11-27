@@ -185,3 +185,43 @@ describe("tasks from a report", () => {
     expect(await fileFindingTasks(ids, scope.userId)).toBeNull();
   });
 });
+
+describe("clear job: link-check findings", () => {
+  const target = "https://x.com/gone";
+  const links = (complete: boolean) => ({ pagesChecked: ["https://x.com/a"], links: { complete } });
+  // One open task per finding (the partial unique index): each test starts from none.
+  const linkTask = async () =>
+    (await prisma.task.deleteMany({ where: { brandId: scope.brandId, findingId: "links-broken" } })) &&
+    prisma.task.create({ data: { workspaceId: scope.workspaceId, brandId: scope.brandId, title: "Broken internal links", status: "TODO", findingKind: "SEO", findingId: "links-broken", findingUrls: [target] } });
+  const report = (metrics: object, findings: object[] = []) =>
+    prisma.auditReport.create({ data: { workspaceId: scope.workspaceId, brandId: scope.brandId, kind: "SEO", score: 80, summary: "s", findings, metrics } });
+  const clear = async (metrics: object, findings: object[] = []) =>
+    clearFindings({ workspaceId: scope.workspaceId, brandId: scope.brandId, reportId: (await report(metrics, findings)).id });
+
+  it("a complete link check without the finding closes its task, though its targets were never pages the audit read", async () => {
+    const task = await linkTask();
+    await clear(links(true));
+    expect((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).status).toBe("DONE");
+  });
+
+  it("an incomplete (PARTIAL), stale, foreign-origin or missing link check closes nothing", async () => {
+    const task = await linkTask();
+    await clear(links(false));
+    await clear({ pagesChecked: ["https://x.com/a"], links: { complete: false, reason: "stale", running: null } });
+    await clear({ pagesChecked: ["https://x.com/a"], links: { complete: false, reason: "changed", running: null } });
+    await clear({ pagesChecked: ["https://x.com/a"] });
+    expect((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).status).toBe("TODO");
+  });
+
+  it("a complete link check that still reports the finding keeps the task open", async () => {
+    const task = await linkTask();
+    await clear(links(true), [{ id: "links-broken", category: "Links", severity: "high", title: "Broken internal links", detail: "d", fix: "f", urls: [target] }]);
+    expect((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).status).toBe("TODO");
+  });
+
+  it("other findings keep the pages rule: a page the audit didn't re-read isn't cleared by a complete link check", async () => {
+    const task = await prisma.task.create({ data: { workspaceId: scope.workspaceId, brandId: scope.brandId, title: "t", status: "TODO", findingKind: "SEO", findingId: "description-missing", findingUrls: ["https://x.com/unread"] } });
+    await clear(links(true));
+    expect((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).status).toBe("TODO");
+  });
+});

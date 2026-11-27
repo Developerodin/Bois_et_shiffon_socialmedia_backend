@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { AD_ALERT_KEYS, keyHolders } from "@/server/auth/permissions";
+import type { PermissionKey } from "@/server/auth/permissions.catalog";
 import { prisma } from "@/server/db/prisma";
 
 /**
@@ -8,10 +9,13 @@ import { prisma } from "@/server/db/prisma";
  * same keys at read time, so someone who loses them stops seeing the notice. Computed once per alerts job.
  * Ceiling: recipients are fixed when the alert is raised; someone given ads.read later doesn't get old notices.
  */
-export async function adAlertRecipients(scope: { workspaceId: string; brandId: string }) {
+export const adAlertRecipients = (scope: { workspaceId: string; brandId: string }) => alertRecipients(scope, AD_ALERT_KEYS);
+
+/** Active holders of every one of `keys` on a live (not archived) brand: an alert notice's recipients (ads and SEO). */
+export async function alertRecipients(scope: { workspaceId: string; brandId: string }, keys: readonly PermissionKey[]) {
   const brand = await prisma.brand.findFirst({ where: { id: scope.brandId, workspaceId: scope.workspaceId, status: { not: "ARCHIVED" } }, select: { id: true } });
   if (!brand) return [];
-  return keyHolders(prisma, scope.workspaceId, scope.brandId, AD_ALERT_KEYS, { clients: true, activeOnly: true });
+  return keyHolders(prisma, scope.workspaceId, scope.brandId, keys, { clients: true, activeOnly: true });
 }
 
 /**

@@ -213,41 +213,44 @@ model Brand {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  workspace      Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  profile        BrandProfile?
-  members        BrandMember[]
-  agentRuns      AgentRun[]
-  agentEvents    AgentEvent[]
-  agentConfigs   BrandAgentConfig[]
-  contextDocs    BrandContextDoc[]
-  connections    IntegrationConnection[]
-  auditReports   AuditReport[]
-  chatThreads    ChatThread[]
-  opportunities  Opportunity[]
-  contentItems   ContentItem[]
-  learningNotes  LearningNote[]
-  competitors    Competitor[]
-  invitations    Invitation[]
-  photoShoots    PhotoShoot[]
-  reelAssets     ReelAsset[]
-  products       Product[]
-  catalogPages   CatalogPage[]
-  campaigns      Campaign[]
-  tasks          Task[]
-  workProjects   WorkProject[]
-  taskComments   TaskComment[]
-  notifications  Notification[]
-  dataSources    DataSource[]
-  postMetrics    PostMetric[]
-  shopOrders     ShopOrder[]
-  shopOrderLines ShopOrderLine[]
-  searchDays     SearchDay[]
-  adDays         AdDay[]
-  adBudgets      AdBudget[]
-  adAlerts       AdAlert[]
-  shopifyWrites  ShopifyWrite[]
-  blogArticles   BlogArticle[]
-  quotes         Quote[]
+  workspace       Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  profile         BrandProfile?
+  members         BrandMember[]
+  agentRuns       AgentRun[]
+  agentEvents     AgentEvent[]
+  agentConfigs    BrandAgentConfig[]
+  contextDocs     BrandContextDoc[]
+  connections     IntegrationConnection[]
+  auditReports    AuditReport[]
+  chatThreads     ChatThread[]
+  opportunities   Opportunity[]
+  contentItems    ContentItem[]
+  learningNotes   LearningNote[]
+  competitors     Competitor[]
+  invitations     Invitation[]
+  photoShoots     PhotoShoot[]
+  reelAssets      ReelAsset[]
+  products        Product[]
+  catalogPages    CatalogPage[]
+  campaigns       Campaign[]
+  tasks           Task[]
+  workProjects    WorkProject[]
+  taskComments    TaskComment[]
+  notifications   Notification[]
+  dataSources     DataSource[]
+  postMetrics     PostMetric[]
+  shopOrders      ShopOrder[]
+  shopOrderLines  ShopOrderLine[]
+  searchDays      SearchDay[]
+  searchQueryDays SearchQueryDay[]
+  siteCrawls      SiteCrawl[]
+  seoAlerts       SeoAlert[]
+  adDays          AdDay[]
+  adBudgets       AdBudget[]
+  adAlerts        AdAlert[]
+  shopifyWrites   ShopifyWrite[]
+  blogArticles    BlogArticle[]
+  quotes          Quote[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -1453,6 +1456,8 @@ enum NotificationKind {
   TASK_APPROVED
   TASK_CHANGES_REQUESTED
   AD_ALERT
+  /// added in its own migration (20261126150300): an enum value can't be used in the migration that adds it
+  SEO_ALERT
 }
 
 enum TaskAttachmentRole {
@@ -1663,15 +1668,18 @@ model Notification {
   taskId      String?
   /// AD_ALERT notices: the alert they point at (no task)
   adAlertId   String?
+  /// SEO_ALERT notices: the lead alert of the run that raised them (no task)
+  seoAlertId  String?
   actorId     String?
   dedupeKey   String           @unique
   readAt      DateTime?
   createdAt   DateTime         @default(now())
 
-  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  brand   Brand    @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  task    Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  adAlert AdAlert? @relation(fields: [adAlertId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brand    Brand     @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  task     Task?     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  adAlert  AdAlert?  @relation(fields: [adAlertId], references: [id], onDelete: Cascade)
+  seoAlert SeoAlert? @relation(fields: [seoAlertId], references: [id], onDelete: Cascade)
 
   @@index([userId, workspaceId, readAt, createdAt])
   @@index([createdAt])
@@ -1679,6 +1687,7 @@ model Notification {
   @@index([taskId])
   @@index([brandId, workspaceId])
   @@index([adAlertId])
+  @@index([seoAlertId])
 }
 
 enum DataSourceKind {
@@ -1869,6 +1878,162 @@ model SearchDay {
   /// The migration adds INCLUDE (clicks, impressions, positionSum) so reads are index-only; migrate diff shows it as a
   /// re-create, don't let a generated migration drop it. No other index: any would be a prefix of this one.
   @@unique([brandId, siteUrl, dimension, day, page])
+}
+
+enum SearchQueryDimension {
+  QUERY
+  QUERY_PAGE
+}
+
+/// Search Console queries per Google day: QUERY (page "") and QUERY_PAGE, top QUERIES_PER_DAY each, as Google
+/// reports them. Google leaves anonymised queries out, so sums sit below SearchDay's SITE total.
+/// Written with SearchDay by the SEARCH_CONSOLE sync (server/data/search-sync.ts), only for days whose query calls
+/// succeeded; rows older than QUERY_RETENTION_DAYS (400) deleted by housekeeping (server/jobs/runner.ts).
+/// ponytail: ~1,000 rows/brand/day, ~400k per brand at steady state. Ceiling ~20M rows (~50 brands); then roll rows
+/// older than 90 days into weekly rows.
+model SearchQueryDay {
+  id          String               @id @default(cuid())
+  workspaceId String
+  brandId     String
+  siteUrl     String
+  dimension   SearchQueryDimension
+  /// Google's day (Pacific time)
+  day         DateTime             @db.Date
+  /// at most MAX_QUERY_KEY chars; siteUrl + query + page at most MAX_QUERY_ROW_KEY_BYTES (btree tuple limit)
+  query       String
+  /// "" for QUERY
+  page        String
+  clicks      Int
+  impressions Int
+  /// position × impressions, as SearchDay
+  positionSum Float
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  /// The migration adds INCLUDE (clicks, impressions, positionSum), as SearchDay's: don't let a generated migration
+  /// drop it.
+  @@unique([brandId, siteUrl, dimension, day, query, page])
+  /// housekeeping's delete
+  @@index([day])
+}
+
+enum SiteCrawlStatus {
+  RUNNING
+  COMPLETE
+  /// robots.txt unreadable or disallows us, or a bot wall: nothing reported
+  STOPPED
+  /// ran out of days (CYCLE_MAX_DAYS): its findings are reported, nothing is cleared
+  PARTIAL
+  /// websiteUrl changed: never reported
+  ABANDONED
+}
+
+enum SiteCrawlUrlKind {
+  /// read in full for its links (from the sitemap, or link-following when there is none)
+  PAGE
+  /// a same-site link target that isn't a PAGE: 1-byte GET
+  TARGET
+}
+
+/// One weekly full-site link check (server/seo/site-crawl.ts). Resumes from its rows; the job payload names it (and
+/// its run number) only. Kept: the brand's latest COMPLETE/PARTIAL cycle and the RUNNING one; older ones deleted when
+/// a cycle starts.
+model SiteCrawl {
+  id                String          @id @default(cuid())
+  workspaceId       String
+  brandId           String
+  /// websiteUrl's origin when the cycle started; a run that finds another site stops the cycle
+  origin            String
+  status            SiteCrawlStatus @default(RUNNING)
+  startedOn         DateTime        @db.Date
+  discoveryComplete Boolean         @default(false)
+  /// true when no sitemap was found and pages come from following links from the home page
+  followLinks       Boolean         @default(false)
+  /// next run not before (Retry-After, or tomorrow after a budget stop)
+  pausedUntil       DateTime?
+  /// runs queued so far: the next job's key (seo-links:<crawlId>:<runNo>) and its payload's runNo
+  runNo             Int             @default(0)
+  stopReason        String?
+  pages             Int             @default(0)
+  targets           Int             @default(0)
+  checked           Int             @default(0)
+  /// links seen past TARGETS_MAX (or LINK_FOLLOW_MAX) and not stored: reported as unchecked (a link on two pages counts twice)
+  overflow          Int             @default(0)
+  /// the cycle didn't cover the whole site (sitemap list cut or capped, link-following hit its page cap, links past
+  /// TARGETS_MAX): its findings are reported, but it clears no link task (metrics.links.complete false)
+  coverageCut       Boolean         @default(false)
+  finishedAt        DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  brand Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  urls  SiteCrawlUrl[]
+
+  @@index([brandId, status, finishedAt])
+}
+
+/// A URL of a SiteCrawl: a page read for its links, or a link target checked. ≤ ~4,000 rows a cycle.
+model SiteCrawlUrl {
+  id         String           @id @default(cuid())
+  crawlId    String
+  /// ≤ 2,000 chars (URL-encoded, so ASCII: inside the btree limit)
+  url        String
+  kind       SiteCrawlUrlKind
+  /// null = not checked yet
+  checkedAt  DateTime?
+  status     Int?
+  redirects  Int              @default(0)
+  /// ok | broken | server-error | chain | loop | skipped | unknown; "recheck" = 5xx waiting for its second try
+  outcome    String?
+  /// pages of this cycle linking here, and up to 5 of them (for the finding's "on N pages, e.g. …")
+  carryCount Int              @default(0)
+  /// clicks from the home page (link-following only; 0 for sitemap pages)
+  depth      Int              @default(0)
+  sources    String[]
+
+  crawl SiteCrawl @relation(fields: [crawlId], references: [id], onDelete: Cascade)
+
+  @@unique([crawlId, url])
+  @@index([crawlId, checkedAt, kind, carryCount])
+}
+
+enum SeoAlertKind {
+  CLICKS_DOWN
+  POSITION_DOWN
+  SITE_DOWN
+}
+
+/// One episode of a page (or the whole site) losing search traffic (server/seo/declines.ts, job seo.declines after each
+/// complete daily Search Console sync). Days are Google's (Pacific); firstDay/lastDay are the recent window's last day
+/// when the rule held. ~a few rows per brand per month.
+model SeoAlert {
+  id          String       @id @default(cuid())
+  workspaceId String
+  brandId     String
+  kind        SeoAlertKind
+  siteUrl     String
+  /// the page as Google reports it; "" for SITE_DOWN
+  page        String
+  /// urlKey(page); "" for SITE_DOWN
+  pageKey     String
+  /// the evaluation run that raised it (`seo-declines:<sourceId>:<day>`): the bell's grouped notice counts by it
+  runKey      String
+  firstDay    DateTime     @db.Date
+  lastDay     DateTime     @db.Date
+  values      Json
+  subjectKey  String
+  dedupeKey   String       @unique
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  brand         Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  notifications Notification[]
+
+  @@index([brandId, subjectKey, lastDay])
+  @@index([brandId, lastDay])
+  @@index([brandId, createdAt])
+  @@index([brandId, pageKey])
+  @@index([brandId, runKey])
 }
 
 /// GOOGLE is added in its own migration (20261126120000): Postgres can't use a value added by ALTER TYPE … ADD VALUE

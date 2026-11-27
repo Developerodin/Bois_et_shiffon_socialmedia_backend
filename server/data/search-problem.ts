@@ -13,3 +13,7 @@ export function toSearchProblem(error: unknown) {
   return fromAccessError(error);
 }
 
+
+/** A page asked for (search/queries?page, seo/url?u) that isn't on the brand's own site. */
+export const pageNotOnSite = () =>
+  problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid page", status: 400, detail: "That page isn't on this brand's website." });

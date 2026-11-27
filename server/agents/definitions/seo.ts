@@ -2,6 +2,8 @@ import { z } from "zod";
 import { PROMPT_VERSION, SEO_SYSTEM } from "@/server/agents/prompts/seo-geo";
 import type { AgentDefinition } from "@/server/agents/types";
 import { applyPriorities, scoreFindings, seoChecks } from "@/server/seo/checks";
+import { linkFindings, linkMetrics } from "@/server/seo/links";
+import { lastCompleteCrawl, startSiteCrawl } from "@/server/seo/site-crawl";
 import { collectSiteFacts, pageSpeedFindings, runPageSpeed } from "@/server/seo/site-facts";
 import { saveAuditReport } from "@/server/services/audit-reports";
 
@@ -14,6 +16,8 @@ export const Prioritised = z.object({
  * SEO agent (Okara "SEO fixes"): technical + on-page audit of the brand's site.
  * Findings and score are deterministic (server/seo/checks.ts); the AI only explains and orders them.
  * ponytail: samples up to 8 pages (crawler cap); raise MAX_PAGES or read the sitemap for full-site audits.
+ * Links: each run starts this week's full-site link check (server/seo/site-crawl.ts, its own job chain) and reports the
+ * last finished one, so a fix shows as cleared one to two weeks later.
  */
 export const seoAgent: AgentDefinition = {
   key: "seo",
@@ -36,7 +40,17 @@ export const seoAgent: AgentDefinition = {
     const ps = await runPageSpeed(facts.pages[0].url);
     if (ps.error) await ctx.log("WARN", `PageSpeed unavailable: ${ps.error}`);
 
-    const findings = [...seoChecks(facts), ...(ps.result ? pageSpeedFindings(ps.result) : [])];
+    const scope = { workspaceId: brand.workspaceId, brandId: brand.brandId };
+    await startSiteCrawl(scope).catch((e: unknown) => ctx.log("WARN", `Link check not started: ${e instanceof Error ? e.message : String(e)}`));
+    // The link check never fails the audit: unreadable, it reports as "none" (no link findings, nothing cleared).
+    const links = await lastCompleteCrawl(scope).catch(async (e: unknown) => {
+      await ctx.log("WARN", `Link check unavailable: ${e instanceof Error ? e.message : String(e)}`);
+      return { reason: "none" as const, running: null };
+    });
+    const linked = "crawl" in links ? linkFindings(links.rows) : [];
+    if (!("crawl" in links)) await ctx.log("INFO", "No finished link check to report yet; this week's runs in the background");
+
+    const findings = [...seoChecks(facts), ...linked, ...(ps.result ? pageSpeedFindings(ps.result) : [])];
     const checksScore = scoreFindings(findings);
     const score = ps.result
       ? Math.round(0.7 * checksScore + 0.3 * ((ps.result.performance + ps.result.seo) / 2))
@@ -77,6 +91,7 @@ export const seoAgent: AgentDefinition = {
         checksScore,
         hasSitemap: facts.hasSitemap,
         hasRobotsTxt: facts.robotsTxt !== null,
+        links: "crawl" in links ? linkMetrics(links.crawl, links.rows) : { complete: false, reason: links.reason, running: links.running },
       },
       agentRunId: ctx.runId,
     });

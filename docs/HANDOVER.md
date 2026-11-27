@@ -1959,3 +1959,90 @@ Open items
   CSV formula injection, one-hour links).
 - Merge: seo-depth also edits web tasks-page.tsx (TasksPage props, TaskPeek line) and task-view.tsx near the
   attachments; `shared/.hash` will conflict in all three repos: re-run `npm run sync:shared` after merging.
+## SEO depth (branch `seo-depth`, 2026-11-26, merged 2026-11-27)
+
+Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (shared sync only) on `seo-depth`.
+
+- **Migrations to apply** (none applied to the dev DB yet, in order): `20261126150000_search_query_day`,
+  `20261126150100_site_crawl`, `20261126150200_seo_alert`, `20261126150300_notification_seo_alert_kind`,
+  `20261126150400_notification_seo_alert`. Check each keeps `SearchDay`'s and `SearchQueryDay`'s INCLUDE indexes.
+- **Search Console queries** (Task 1): each day also reads the top 500 queries and top 500 query-page pairs into
+  `SearchQueryDay` (400-day retention by housekeeping). Google's limits, read from its docs on 2026-11-26, are in the
+  header of server/data/search-console.ts. Existing sources get queries from their next daily run; no query backfill.
+- **Top queries** (Task 2): `GET search/queries` (analytics.read), the Search tab's "Top queries" table with its
+  coverage line, and the chat's `searchPerformance` (`topQueries`, `queryCoverage`, `queriesSince`; prompt v9).
+- **Broken links, full-site weekly crawl** (Task 4, job `seo.links`, server/seo/site-crawl.ts; tables `SiteCrawl`,
+  `SiteCrawlUrl`, DATA_MODEL §14). The weekly SEO agent starts a cycle (`startSiteCrawl`) and reports the last finished
+  one (`lastCompleteCrawl`: COMPLETE or PARTIAL, same site as today's websiteUrl, finished within 14 days) as
+  `links-broken` (high), `links-server-error` (medium) and `links-redirect-chain` (low) findings plus
+  `metrics.links`; a fix shows as cleared one to two weeks later. Link findings count in the audit score like any other.
+  A `links-*` task clears only when `metrics.links.complete` is true (a COMPLETE cycle that covered the whole site: `coverageCut` false), without the pagesChecked rule.
+  Discovery: every sitemap page (newest first, ≤ 2,000; day cache `site-all-pages:<host>:<day>`), else link-following
+  from the home page (≤ 500 pages, ≤ 3 clicks); ≤ 2,000 link targets, 1-byte GETs.
+  **Budgets:** shares the site reader's host lock, robots.txt day cache and host bucket `site-pages:<host>:<day>`: the
+  crawl stops for the day at 1,000 of the reader's 1,500, so the catalogue keeps ≥ 500; 1,000 requests per brand per
+  day (`site-crawl-brand:<brandId>:<day>`); ≥ 1 s apart (Crawl-delay up to 10 s); runs of ≤ 240 s, the next queued a
+  minute later; `catalog.pages` and `seo.links` share one queue slot (`PAGES_RUNNING_MAX`). A refused budget hit rolls
+  back, so it costs the reader nothing. 429, 503 with Retry-After or 5 server errors in a row pause the cycle
+  (Retry-After, ≤ a day, else 00:10 UTC tomorrow); a URL's first 429 or 5xx is tried again at the end of the cycle
+  (a second 429 is "unknown"). robots.txt unreadable, a bot wall (16 of the last 20 answers 401/403) or not one page
+  readable (`unreadable`) stop it with nothing reported; a cycle not done in 6 days ends PARTIAL; a changed website
+  abandons it. Not enforced weekly: any SEO agent run with no RUNNING cycle starts one (bounded by the budgets).
+  Ceiling: the five-in-a-row pause counts re-checks too, so a site with ~30 persistently failing targets keeps pausing
+  a day per five and may end PARTIAL.
+  A lost chain (no write for a day, not paused) is re-queued by the next weekly start.
+  Live check still to do (plan's Verification): run the SEO agent on B&C, watch the rows fill and the bucket stay
+  ≤ 1,000 from the crawl, then spot-check three "broken" targets by hand.
+- **Declining pages** (Task 5, job `seo.declines`, server/seo/declines.ts; table `SeoAlert`): queued by the
+  SEARCH_CONSOLE runner's afterRun after each complete daily or manual run; compares the 28 Google days ending 3 days
+  before syncedThrough with the 28 before. CLICKS_DOWN (≥ 30 before, ≥ 40 % and ≥ 15 lost), POSITION_DOWN (≥ 200
+  impressions both windows, top 20 before, ≥ 3 places worse), SITE_DOWN instead of page alerts when the site fell
+  ≥ 40 % too; pages missing on days with 500 page rows count at that day's lowest clicks; ≤ 20 a run; needs 56 read
+  days. Shown on the Search tab ("Pages losing search traffic", with "Make a task" behind the `tasks` flag), the URL
+  page's alerts, the digest's seo section (count and up to 3 paths, no query text) and the chat's
+  `searchPerformance.decliningPages`. `GET search/declines` (analytics.read). The ads alerts now share the episode
+  step (server/alerts/episode.ts), behaviour unchanged.
+- **Declines in the bell** (Task 5b, `NotificationKind.SEO_ALERT`): one grouped notice per run that inserted alerts
+  ("3 pages losing search traffic, e.g. /a"), written in the run's transaction, to people with brand.read and
+  analytics.read (clients included); none on a site's first evaluation (`settings.declinesSeenFor`) or for a run that
+  only extended episodes. The bell links to the page's URL history (or the Search tab for a group or the whole site)
+  only when the `data` web flag is on. Visibility shares `alertBrandsSql` with the ads alerts (server/tasks/access.ts).
+- **AI briefs** (Task 6, `POST seo/briefs`, server/seo/briefs.ts; analytics.read and tasks.manage; 2 credits,
+  `CREDIT_COSTS.seoBrief`): "Write a brief" on a finding with 2+ pages (audit board) or on checked declining pages
+  (Search tab). One AI call (`seo.brief`, `seo-brief-v1`) over stored data only (the finding, each page's 28-day
+  numbers and top 5 queries), cleaned and inside a `<data>` block under a data-only system line; items for pages not
+  given are dropped. From a finding, the brief is prepended to its open task (people's edits kept; the task is checked
+  under its lock before credits and again under patchTask's lock after the AI), or makes the finding's task; from
+  declines, a new task re-checked in 28 days. Credits are given back on any failure after the spend; 20 briefs per
+  person per brand per hour. A content brief offers "Write an article" (the blog page's start from a task).
+- Waits on Search Console verification for B&C: everything above but the link check ships tested against fixtures and
+  stays empty until then. Web components weren't browser-checked on the branch (no dev server or build was run).
+
+### SEO depth: where it stopped (2026-11-27): ready to merge
+- Branch `seo-depth` in the worktrees `C:\Users\INTEL\Desktop\sma-seo\{server,web,mobile}`, not merged, not pushed. Plan:
+  `docs/superpowers/plans/2026-11-26-seo-depth.md`. Tasks 0–6 are done and committed (5b's bell included), and the
+  four-lens branch review (correctness, security, performance, maintainability) is done with its Critical and Important
+  findings fixed (none Critical). Server tsc, unit tests, DB tests (on the throwaway `sma_test_seo`), web tsc, tests
+  and eslint pass. Mobile only receives `shared/` copies (no node_modules in its worktree, so its tsc wasn't run).
+- **Deploy notes:**
+  - Migrations, in order, none applied to the dev DB yet (apply with the owner's go-ahead): `20261126150000_search_query_day`,
+    `20261126150100_site_crawl`, `20261126150200_seo_alert`, `20261126150300_notification_seo_alert_kind` (enum value
+    alone), `20261126150400_notification_seo_alert`. Check SearchDay's and SearchQueryDay's INCLUDE indexes survive.
+  - Merge server, web and mobile together (shared types changed: `.hash` must match). Merge hotspot: the bell
+    (`NotificationKind.SEO_ALERT`, server/notifications/list.ts, server/tasks/access.ts `visibleNotificationsSql`, web
+    components/shell/notification-bell.tsx and top-bar.tsx), and server/tasks/service.ts `patchTask` (new optional
+    `opts.edit`).
+  - Flags: everything search-related is behind the `data` web flag; Make a task / Write a brief behind `tasks`; Write
+    an article behind `blog`. The bell links to the URL page only with `data` on.
+  - New jobs: `seo.links` (started by the weekly SEO agent; shares one queue slot with `catalog.pages`) and
+    `seo.declines` (after each complete daily Search Console sync). No new poller.
+- **Still to do after merge:** the live crawl check on B&C (plan's Verification: run the SEO agent, watch SiteCrawl
+  rows and the `site-pages:<host>:<day>` bucket, spot-check three "broken" targets by hand); the fixture browser check
+  of the Search tab's queries and declines panel, the URL page, the digest and the bell (no dev server was run on the
+  branch); Search Console verification for B&C before any of the search features show real data.
+- Review findings left as ceilings: a sitemap that fails outright reads like "no sitemap" (link-following, still
+  counted as full coverage); a day with skipped over-long page URLs stores fewer than 500 rows and gets no cap floor;
+  the brief's query read is one LIMIT 5000 across its pages; the URL page reads the chosen source several times per
+  view; small duplications (web formatters, Open task buttons, hardcoded "2 credits" in the brief button).
+- The worktree's server `node_modules` is a folder of junctions plus private Prisma copies; remove the junctions with
+  `cmd /c rmdir` before deleting the worktree. Its test DB is `sma_test_seo` in the `sma-testdb` container.

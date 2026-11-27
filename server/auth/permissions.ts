@@ -87,6 +87,8 @@ export const isClientMember = (clientGrant: boolean, workspacePerms: readonly st
 
 /** The keys an AD_ALERT notice needs on its brand, now: who is notified (keyHolders) and who sees it (visibleNotificationsSql). */
 export const AD_ALERT_KEYS = ["brand.read", "ads.read"] as const satisfies readonly PermissionKey[];
+/** The keys a SEO_ALERT notice needs on its brand, now (as AD_ALERT_KEYS): the Search tab's read key. */
+export const SEO_ALERT_KEYS = ["brand.read", "analytics.read"] as const satisfies readonly PermissionKey[];
 
 /**
  * Does someone hold every one of `keys` on a brand? Their workspace role's keys ∪ their project grant's (as

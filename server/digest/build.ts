@@ -5,6 +5,8 @@ import { prisma } from "@/server/db/prisma";
 import { isClientGrant, isClientMember, permissionsOf } from "@/server/auth/permissions";
 import { rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { listAlerts } from "@/server/ads/alerts";
+import { listSeoAlerts } from "@/server/seo/declines";
+import { cleanText } from "@/server/text";
 import { adsSummary } from "@/server/data/ads-read";
 import { postsWithMetrics } from "@/server/data/post-metrics-read";
 import { salesSummary } from "@/server/data/sales-read";
@@ -74,13 +76,25 @@ async function contentSection(scope: Scope, week: DateRange, zone: string, now: 
   return { kind: "content", key: "brand.read", published: row?.published ?? 0, scheduled: row?.scheduled ?? 0, awaitingApproval: row?.awaitingApproval ?? 0 };
 }
 
-async function seoSection(scope: Scope): Promise<DigestSection> {
-  const s = await synced(scope, "SEARCH_CONSOLE");
-  if (!s?.syncedThrough) return { kind: "seo", key: "analytics.read", data: null };
+/**
+ * The latest 7 synced Search Console days, and the decline alerts RAISED in the digest's week (the same cutoff as the
+ * ads alerts, so each lands in exactly one digest): their count and up to 3 page paths, cleaned (no host, no query
+ * text: people's search words never reach the email).
+ */
+async function seoSection(scope: Scope, weekAt: Date): Promise<DigestSection> {
+  const cutoff = weekAt.getTime() + AFTER_SWEEP_MS;
+  const [s, raised] = await Promise.all([
+    synced(scope, "SEARCH_CONSOLE"),
+    listSeoAlerts(scope, { createdFrom: new Date(cutoff - 7 * 86_400_000), createdBefore: new Date(cutoff) }, 20),
+  ]);
+  const count = raised.alerts.length + raised.more;
+  const pages = raised.alerts.flatMap((a) => (a.path ? [cleanText(a.path, 120)] : [])).filter((p, i, all) => all.indexOf(p) === i).slice(0, 3);
+  const declines = count ? { declines: { count, pages } } : {};
+  if (!s?.syncedThrough) return { kind: "seo", key: "analytics.read", data: null, ...declines };
   // syncedThrough is the last complete day held: the 7 days ending there (Google lags 2-3 days behind the week).
   const range = { from: addDays(s.syncedThrough, -6), to: s.syncedThrough };
   const sum = await searchSummary(scope, range, { manage: false });
-  return { kind: "seo", key: "analytics.read", data: sum.hasSite ? { range, totals: sum.totals, previous: sum.previous } : null };
+  return { kind: "seo", key: "analytics.read", data: sum.hasSite ? { range, totals: sum.totals, previous: sum.previous } : null, ...declines };
 }
 
 async function postsSection(scope: Scope, week: DateRange, now: Date): Promise<DigestSection> {
@@ -160,7 +174,7 @@ export function brandSections(scope: Scope, perms: ReadonlySet<string>, week: Da
   const g = (kind: string, run: () => Promise<DigestSection>) => guarded(scope.brandId, kind, run);
   const sections = Promise.all([
     keys.includes("brand.read") ? g("content", () => contentSection(scope, week, zone, now)) : [],
-    keys.includes("analytics.read") ? g("seo", () => seoSection(scope)) : [],
+    keys.includes("analytics.read") ? g("seo", () => seoSection(scope, weekAt)) : [],
     keys.includes("analytics.read") ? g("posts", () => postsSection(scope, week, now)) : [],
     keys.includes("crm.read") ? g("sales", () => salesSection(scope, week)) : [],
     keys.includes("ads.read") ? g("ads", () => adsSection(scope, week, weekAt)) : [],
@@ -205,7 +219,7 @@ function hasNews(s: DigestSection) {
   switch (s.kind) {
     case "content": return s.published + s.scheduled + s.awaitingApproval > 0;
     case "tasks": return s.done + s.open + s.overdue > 0;
-    case "seo": return !!s.data && s.data.totals.impressions + s.data.previous.impressions > 0;
+    case "seo": return (!!s.data && s.data.totals.impressions + s.data.previous.impressions > 0) || !!s.declines?.count;
     case "posts": return s.published > 0;
     case "sales": return !!s.data?.length;
     case "ads": return !!s.data?.length || !!s.alerts?.length;

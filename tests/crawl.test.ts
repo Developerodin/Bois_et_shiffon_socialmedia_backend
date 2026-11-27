@@ -18,7 +18,7 @@ vi.mock("undici", async (orig) => {
   return { ...actual, fetch: (url: URL | string, init?: unknown) => (m.fetch ?? (actual.fetch as never as NonNullable<typeof m.fetch>))(url, init) };
 });
 
-import { CrawlError, crawlSite, fetchRobots, jsonLdNodes, pinnedLookup, ROBOTS_AGENT, robotsAllows, robotsGroups, robotsRules, robotsSitemaps, safeFetch } from "@/server/research/crawl";
+import { CrawlError, crawlSite, extractPage, fetchRobots, jsonLdNodes, pageLinks, pinnedLookup, ROBOTS_AGENT, robotsAllows, robotsGroups, robotsRules, robotsSitemaps, safeFetch, safeFetchBytes, sameSite, USER_AGENT } from "@/server/research/crawl";
 
 afterEach(() => {
   m.fetch = null;
@@ -166,5 +166,71 @@ describe("jsonLdNodes", () => {
   it("flattens @graph and skips broken blocks", () => {
     const html = `<script type="application/ld+json">{"@graph":[{"@type":"Product","name":"Table"}]}</script><script type="application/ld+json">{bad</script>`;
     expect(jsonLdNodes(html).some((n) => n["@type"] === "Product")).toBe(true);
+  });
+});
+
+describe("safeFetchBytes redirects", () => {
+  const hops = (n: number) => {
+    m.fetch = async (url) => {
+      const step = Number(new URL(String(url)).pathname.slice(1) || 0);
+      return step < n ? new Response(null, { status: 301, headers: { location: `/${step + 1}` } }) : new Response("ok", { status: 200 });
+    };
+  };
+
+  it("says how many hops it followed, sending our user agent on every hop", async () => {
+    hops(0);
+    expect((await safeFetchBytes("https://shop.example/", "*/*", 10)).redirects).toBe(0);
+    hops(2);
+    const agents: string[] = [];
+    const follow = m.fetch!;
+    m.fetch = async (url, init) => {
+      agents.push((init as { headers: Record<string, string> }).headers["user-agent"]!);
+      return follow(url, init);
+    };
+    const res = await safeFetchBytes("https://shop.example/", "*/*", 10);
+    expect([res.redirects, res.url.pathname, res.status]).toEqual([2, "/2", 200]);
+    expect(agents).toEqual([USER_AGENT, USER_AGENT, USER_AGENT]);
+  });
+
+  it("throws Too many redirects past 4 hops, and refuses another site with sameSite", async () => {
+    hops(9);
+    await expect(safeFetchBytes("https://shop.example/", "*/*", 10)).rejects.toThrow("Too many redirects");
+    m.fetch = async () => new Response(null, { status: 302, headers: { location: "https://elsewhere.example/" } });
+    await expect(safeFetchBytes("https://shop.example/", "*/*", 10, undefined, 1000, { sameSite: true })).rejects.toThrow("Redirected to another site");
+  });
+});
+
+describe("pageLinks", () => {
+  const base = new URL("https://shop.example/a/");
+  const site = (u: URL) => sameSite(u.hostname, base.hostname);
+
+  it("drops links inside <script> and <template> and templated hrefs, keeps <noscript>", () => {
+    const html = [
+      '<a href="/real">r</a>',
+      `<script>document.write('<a href="/in-script">x</a>')</script>`,
+      '<template><a href="/in-template">x</a></template>',
+      '<noscript><a href="/no-js">n</a></noscript>',
+      '<a href="/products/{{ product.handle }}">t</a>',
+      '<a href="/p/${id}">t</a>',
+      '<a href="/c/%7B%7Bhandle%7D%7D">t</a>',
+      '<a href="{% url %}">t</a>',
+    ].join("");
+    expect(pageLinks(html, base, site)).toEqual(["https://shop.example/real", "https://shop.example/no-js"]);
+  });
+
+  it("keeps www. and the bare host with sameSite; drops other hosts, non-http, fragments and queries", () => {
+    const html = '<a href="https://www.shop.example/x?y=1#z">a</a><a href="https://other.example/">b</a><a href="mailto:a@b.c">c</a><a href="javascript:void(0)">d</a><a href="rel">e</a><a href="#top">f</a>';
+    expect(pageLinks(html, base, site)).toEqual(["https://www.shop.example/x", "https://shop.example/a/rel"]);
+  });
+
+  it("stays fast on a page of unclosed <a tags", () => {
+    const t = Date.now();
+    expect(pageLinks("<a ".repeat(1_000_000), base, site)).toEqual([]);
+    expect(Date.now() - t).toBeLessThan(2_000);
+  });
+
+  it("extractPage keeps its same-origin rule (www. differs, files skipped)", () => {
+    const html = '<a href="/b">a</a><a href="https://www.shop.example/c">b</a><a href="/d.pdf">c</a>';
+    expect(extractPage(html, base).links).toEqual(["https://shop.example/b"]);
   });
 });

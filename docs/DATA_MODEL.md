@@ -442,7 +442,52 @@ Two migrations, both additive: `20261126140000_notification_ad_alert_kind`, `202
   recent alerts) and `(brandId, createdAt)` (the digest's week). Cascades with the brand. Written by the `ads.alerts`
   job (server/ads/alerts.ts).
 
-## 14. Task files (2026-11-27, branch `tasks-calendar`)
+## 14. SEO depth (2026-11-26)
+
+Additive migrations, from `20261126150000` on (docs/superpowers/plans/2026-11-26-seo-depth.md).
+
+- `SearchQueryDay` (`20261126150000_search_query_day`): Search Console queries per Google day, beside `SearchDay`.
+  `dimension` (`SearchQueryDimension`: QUERY with `page` "", QUERY_PAGE with both), `query` (at most 200 chars),
+  `page`, `clicks`, `impressions`, `positionSum` (position × impressions). Unique on `(brandId, siteUrl, dimension,
+  day, query, page)` with `INCLUDE (clicks, impressions, positionSum)` added by hand in the migration (keep it, as
+  `SearchDay`'s); `siteUrl + query + page` is at most 2,000 UTF-8 bytes so the btree entry fits. Index `(day)` for
+  housekeeping, which deletes rows older than 400 days. Top 500 of each dimension per day (Google sorts by clicks and
+  leaves anonymised queries out, so sums sit below the SITE total). A day's rows are replaced only when its query calls
+  succeeded. Cascades with the brand. ~1,000 rows per brand per day.
+- `SiteCrawl` and `SiteCrawlUrl` (`20261126150100_site_crawl`): the weekly full-site link check (job `seo.links`,
+  server/seo/site-crawl.ts). `SiteCrawl` is one cycle of a brand: `origin` (websiteUrl's origin at the start),
+  `status` (`SiteCrawlStatus`: RUNNING, COMPLETE, STOPPED = robots.txt unreadable or a bot wall, nothing reported,
+  PARTIAL = out of days, reported but clearing nothing, ABANDONED = the website changed, never reported),
+  `startedOn` (`@db.Date`), `discoveryComplete`, `followLinks` (no sitemap: pages come from links off the home page),
+  `pausedUntil`, `runNo` (the chain's next job key `seo-links:<crawlId>:<runNo>` and its payload's number, so a retried
+  run never forks the chain), `stopReason`, counts `pages`, `targets`, `checked`, `overflow` (links past the caps, not
+  stored), `coverageCut` (the sitemap list was cut or capped, link-following hit its page cap or links overflowed: the
+  cycle is reported but clears no link task), `finishedAt`. Index `(brandId, status, finishedAt)`. Kept per brand: the latest COMPLETE/PARTIAL cycle and
+  the RUNNING one; the rest are deleted when a cycle starts. `SiteCrawlUrl` is a URL of a cycle: `kind`
+  (`SiteCrawlUrlKind`: PAGE read in full for its links, TARGET checked with a 1-byte GET), `url` (≤ 2,000 chars),
+  `checkedAt` (null = not yet; a crash resumes from these), `status`, `redirects`, `outcome` (ok, broken, server-error,
+  chain, loop, skipped, unknown; recheck = a first 5xx), `carryCount` and `sources` (pages linking here, up to 5),
+  `depth` (clicks from home when following links). Unique `(crawlId, url)`, index `(crawlId, checkedAt, kind,
+  carryCount)`. Both cascade (the brand, the cycle). At most 2,000 PAGE + 2,000 TARGET rows a cycle.
+- `SeoAlert` (`20261126150200_seo_alert`): one episode of a page (or the whole site) losing Google search traffic,
+  written by the `seo.declines` job (server/seo/declines.ts) after each complete daily Search Console sync. `kind`
+  (`SeoAlertKind`: CLICKS_DOWN, POSITION_DOWN, SITE_DOWN), `siteUrl`, `page` (Google's spelling, "" for SITE_DOWN),
+  `pageKey` (urlKey), `runKey` (`seo-declines:<sourceId>:<day>`, the run that raised it), `firstDay`/`lastDay`
+  (`@db.Date`, the recent window's last Google day), `values Json` (figures as strings), `subjectKey`
+  (`<kind>:<brandId>:<pageKey>@<siteUrl>` or `SITE_DOWN:<brandId>@<siteUrl>`: another Search Console property starts
+  its own episodes) and a unique `dedupeKey` (subjectKey + first day). A day
+  within 7 days of an episode's lastDay moves it on (the shared episode step, server/alerts/episode.ts). Indexes
+  `(brandId, subjectKey, lastDay)`, `(brandId, lastDay)`, `(brandId, createdAt)` (the digest's week), `(brandId,
+  pageKey)` (the URL page) and `(brandId, runKey)`. Cascades with the brand. A few rows per brand per month.
+- `NotificationKind.SEO_ALERT` (`20261126150300_notification_seo_alert_kind`, alone: an enum value can't be used in the
+  migration that adds it) and `Notification.seoAlertId` (`20261126150400_notification_seo_alert`; nullable, cascades
+  with the alert, indexed): one grouped notice per recipient for a decline run that inserted alerts, pointing at its
+  lead alert; dedupeKey `SEO_ALERT:<userId>:<runKey>`. Who gets one: active people holding brand.read and
+  analytics.read on the brand (role ∪ grant, client reviewers included); who still sees it: the same keys at read time,
+  brand not archived (visibleNotificationsSql). `DataSource.settings.declinesSeenFor` (SEARCH_CONSOLE): the site whose
+  first evaluation ran (quiet); choosing a site again rewrites the settings.
+
+## 15. Task files (2026-11-27, branch `tasks-calendar`)
 
 `TaskFile` (migration `20261127110000_task_files`): a document on a task, kept apart from `MediaUpload` so it never
 reaches the story picker or the photo library. Direct `workspaceId` + `brandId` (§1.1), `taskId` (cascade), `key`

@@ -104,11 +104,12 @@ export async function safeFetch(raw: string, accept = "text/html", signal?: Abor
  * `opts.headers`: more request headers (conditional ones: If-None-Match, If-Modified-Since); `headers` = the final response's.
  * `opts.sameSite`: a redirect to another site (host other than the asked one, www. ignored) throws instead of being followed.
  * `opts.body`: POST it as JSON instead of a GET (Shopify's Catalog MCP); a redirect is then followed same-site only.
+ * `redirects`: the hops followed to reach the final answer (0 = none).
  */
 export async function safeFetchBytes(
   raw: string, accept: string, maxBytes = MAX_BYTES, signal?: AbortSignal, timeoutMs = TIMEOUT_MS,
   opts: { headers?: Record<string, string>; sameSite?: boolean; body?: string } = {},
-): Promise<{ url: URL; status: number; bytes: Uint8Array; contentType: string; truncated: boolean; headers: Pick<Headers, "get"> }> {
+): Promise<{ url: URL; status: number; bytes: Uint8Array; contentType: string; truncated: boolean; headers: Pick<Headers, "get">; redirects: number }> {
   let url = await assertPublicUrl(raw);
   const host = url.hostname;
   for (let hop = 0; hop < 4; hop++) {
@@ -147,6 +148,7 @@ export async function safeFetchBytes(
       contentType: res.headers.get("content-type") ?? "",
       truncated,
       headers: res.headers,
+      redirects: hop,
     };
   }
   throw new CrawlError("Too many redirects");
@@ -252,12 +254,12 @@ const decode = (s: string) =>
     });
 
 /**
- * `<script>…</script>` (and style, noscript, svg, template) blocks replaced by a space, in one pass: once a tag name
+ * `<script>…</script>` (and style, noscript, svg, template; or only the `names` given) blocks replaced by a space, in one pass: once a tag name
  * has no closing tag ahead, its later openings are left alone without searching again (a lazy regex would rescan to
  * the end for each, quadratic on thousands of unclosed "<script").
  */
-function withoutBlocks(html: string) {
-  const open = /<(script|style|noscript|svg|template)/gi;
+function withoutBlocks(html: string, names = "script|style|noscript|svg|template") {
+  const open = new RegExp(`<(${names})`, "gi");
   const unclosed = new Set<string>();
   let out = "";
   let from = 0;
@@ -290,24 +292,38 @@ export function htmlText(html: string) {
     .trim();
 }
 
-export function extractPage(html: string, base: URL) {
-  const title = decode(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() ?? "") || null;
-  const description = tagAttrs(html, "meta").find((m) => m.name?.toLowerCase() === "description")?.content || null;
-  const text = htmlText(html).slice(0, MAX_TEXT);
+// A theme placeholder left in an href ({{ … }}, ${…}, {% … %}), raw or percent-encoded: never a real link.
+const TEMPLATED = /\{\{|\}\}|\$\{|\{%|%7B%7B|%7D%7D|\$%7B|%7B%25/i;
+
+/**
+ * The http(s) `<a href>` links of a page that `keep` accepts, de-duplicated, fragment and query dropped (a query names
+ * the same page). Skipped as never real: links inside `<script>` and `<template>` (code, client-side templates;
+ * `<noscript>` links are real and kept) and templated hrefs. Links that only exist after JavaScript runs aren't seen.
+ */
+export function pageLinks(html: string, base: URL, keep: (u: URL) => boolean): string[] {
   const links = new Set<string>();
-  for (const m of html.matchAll(/<a[^>]+href=["']([^"'#]+)/gi)) {
+  // A tag can't contain "<": a run of unclosed "<a" (hostile HTML) costs one step each, not a scan to the end.
+  for (const m of withoutBlocks(html, "script|template").matchAll(/<a[^<>]+href=["']([^"'#]+)/gi)) {
+    if (TEMPLATED.test(m[1])) continue;
     try {
       const u = new URL(m[1], base);
-      if (u.origin === base.origin && !/\.(jpe?g|png|gif|webp|svg|pdf|zip|mp4)$/i.test(u.pathname)) {
-        u.hash = "";
-        u.search = "";
-        links.add(u.toString());
-      }
+      if ((u.protocol !== "http:" && u.protocol !== "https:") || !keep(u)) continue;
+      u.hash = "";
+      u.search = "";
+      links.add(u.toString());
     } catch {
       // ignore malformed hrefs
     }
   }
-  return { title, description, text, links: [...links], seo: seoSignals(html), assets: pageAssets(html, base) };
+  return [...links];
+}
+
+export function extractPage(html: string, base: URL) {
+  const title = decode(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1]?.trim() ?? "") || null;
+  const description = tagAttrs(html, "meta").find((m) => m.name?.toLowerCase() === "description")?.content || null;
+  const text = htmlText(html).slice(0, MAX_TEXT);
+  const links = pageLinks(html, base, (u) => u.origin === base.origin && !/\.(jpe?g|png|gif|webp|svg|pdf|zip|mp4)$/i.test(u.pathname));
+  return { title, description, text, links, seo: seoSignals(html), assets: pageAssets(html, base) };
 }
 
 /** Attributes of every `<tag …>` in any order, quoted or not (keys lower-cased, values decoded). */

@@ -48,13 +48,28 @@ const connection = (brandId: string, provider: "GOOGLE" | "GOOGLE_BUSINESS" = "G
   prisma.integrationConnection.create({
     data: { workspaceId: ws, brandId, provider, externalAccountId: `${brandId}-${provider}`, displayName: "G", scopes: [], status: "ACTIVE", credentialKeyVersion: 1, connectedByUserId: userId, encryptedCredentials: "x" },
   });
-const day = (d: string, pages: [string, number][], complete = true): SearchDayResult => ({
-  day: d,
-  site: { clicks: 100, impressions: 1000, positionSum: 5000 },
-  pages: pages.map(([page, clicks]) => ({ page, clicks, impressions: clicks * 10, positionSum: clicks * 20 })),
-  skippedPages: 0,
-  complete,
-});
+const day = (d: string, pages: [string, number][], complete = true, queries: [string, string, number][] | null = []): SearchDayResult => {
+  const q = (query: string, page: string, clicks: number) => ({ query, page, clicks, impressions: clicks * 10, positionSum: clicks * 20 });
+  return {
+    day: d,
+    site: { clicks: 100, impressions: 1000, positionSum: 5000 },
+    pages: pages.map(([page, clicks]) => ({ page, clicks, impressions: clicks * 10, positionSum: clicks * 20 })),
+    skippedPages: 0,
+    complete,
+    // [query, page, clicks]: page "" is a QUERY row, else QUERY_PAGE; null = the day's query calls failed.
+    queries: (queries ?? []).filter(([, p]) => !p).map(([query, , clicks]) => q(query, "", clicks)),
+    queryPages: (queries ?? []).filter(([, p]) => p).map(([query, page, clicks]) => q(query, page, clicks)),
+    skippedQueries: 0,
+    queriesComplete: queries !== null,
+  };
+};
+const queryRows = (brandId = "sc-a") =>
+  prisma.searchQueryDay.findMany({
+    where: { brandId },
+    orderBy: [{ day: "asc" }, { dimension: "asc" }, { query: "asc" }, { page: "asc" }],
+    select: { day: true, dimension: true, query: true, page: true, clicks: true },
+  });
+const dayOf = (r: { day: Date }) => r.day.toISOString().slice(0, 10);
 const rows = (brandId = "sc-a") =>
   prisma.searchDay.findMany({
     where: { brandId },
@@ -80,6 +95,7 @@ beforeEach(async () => {
   google.sites = [{ siteUrl: SITE, permissionLevel: "siteOwner" }];
   google.window = null;
   await prisma.searchDay.deleteMany({});
+  await prisma.searchQueryDay.deleteMany({});
   await prisma.job.deleteMany({});
   await prisma.dataSource.deleteMany({});
   await prisma.integrationConnection.deleteMany({});
@@ -140,6 +156,83 @@ describe("SEARCH_CONSOLE sync", () => {
     await runDataSync(backfill(s, "2026-11-01", "2026-11-01"), lease);
     expect(await rows("sc-b")).toHaveLength(1);
     expect(await rows("sc-a")).toHaveLength(2);
+  });
+});
+
+describe("SEARCH_CONSOLE sync: queries", () => {
+  it("replaces a day's query rows when its query calls succeeded, and keeps them when they failed", async () => {
+    const s = await searchSource("sc-a", (await connection("sc-a")).id);
+    google.window = () => ({
+      days: [
+        day("2026-11-01", [], true, [["oak table", "", 5], ["oak chair", "", 2], ["oak table", "https://a.test/x", 4]]),
+        day("2026-11-02", [], true, [["pine", "", 1]]),
+      ],
+    });
+    await runDataSync(backfill(s, "2026-11-01", "2026-11-02"), lease);
+    expect((await queryRows()).map((r) => [dayOf(r), r.dimension, r.query, r.page])).toEqual([
+      ["2026-11-01", "QUERY", "oak chair", ""],
+      ["2026-11-01", "QUERY", "oak table", ""],
+      ["2026-11-01", "QUERY_PAGE", "oak table", "https://a.test/x"],
+      ["2026-11-02", "QUERY", "pine", ""],
+    ]);
+    expect((await prisma.dataSource.findUniqueOrThrow({ where: { id: s.id } })).lastResult).toMatchObject({ count: 2 + 4 });
+
+    // Day 1 read again: "oak chair" dropped by Google is gone. Day 2's query calls failed: its rows stay.
+    google.window = () => ({ days: [day("2026-11-01", [], true, [["oak table", "", 6]]), day("2026-11-02", [], true, null)] });
+    await runDataSync(backfill(s, "2026-11-01", "2026-11-02"), lease);
+    expect((await queryRows()).map((r) => [dayOf(r), r.dimension, r.query, r.clicks])).toEqual([
+      ["2026-11-01", "QUERY", "oak table", 6],
+      ["2026-11-02", "QUERY", "pine", 1],
+    ]);
+  });
+
+  it("leaves other brands' query rows alone", async () => {
+    const other = await searchSource("sc-b", (await connection("sc-b")).id);
+    google.window = () => ({ days: [day("2026-11-01", [], true, [["b only", "", 1]])] });
+    await runDataSync(backfill(other, "2026-11-01", "2026-11-01"), lease);
+    const s = await searchSource("sc-a", (await connection("sc-a")).id);
+    google.window = () => ({ days: [day("2026-11-01", [], true, [["a only", "", 1]])] });
+    await runDataSync(backfill(s, "2026-11-01", "2026-11-01"), lease);
+    expect((await queryRows("sc-b")).map((r) => r.query)).toEqual(["b only"]);
+    expect((await queryRows("sc-a")).map((r) => r.query)).toEqual(["a only"]);
+  });
+
+  it("writes one transaction per day: a write failing on day 3 keeps days 1 and 2", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const s = await searchSource("sc-a", (await connection("sc-a")).id);
+    google.window = () => ({
+      days: [
+        day("2026-11-01", [["https://a.test/x", 1]], true, [["q", "", 1]]),
+        day("2026-11-02", [["https://a.test/x", 1]], true, [["q", "", 1]]),
+        // The same query twice breaks the unique key: the day's insert throws.
+        day("2026-11-03", [["https://a.test/x", 1]], true, [["q", "", 1], ["q", "", 2]]),
+      ],
+    });
+    await expect(runDataSync(backfill(s, "2026-11-01", "2026-11-03"), lease)).rejects.toThrow();
+    expect([...new Set((await rows()).map(dayOf))]).toEqual(["2026-11-01", "2026-11-02"]);
+    expect([...new Set((await queryRows()).map(dayOf))]).toEqual(["2026-11-01", "2026-11-02"]);
+  });
+
+  it("halves a backfill window still capped after its retries (halveOnCap)", async () => {
+    const plan = { start: "2026-08-01", end: "2026-10-29", days: 30 };
+    const conn = await connection("sc-a");
+    const s = await prisma.dataSource.create({
+      data: { workspaceId: ws, brandId: "sc-a", kind: "SEARCH_CONSOLE", externalId: SITE, connectionId: conn.id, settings: { reportsIn: "America/Los_Angeles", backfill: plan } },
+    });
+    google.window = (from) => ({ days: [day(from, [])], stoppedReason: "capped" });
+    await runDataSync({ ...backfill(s, "2026-08-01", "2026-08-30"), end: plan.end, retry: 3 }, lease);
+    const [next] = await prisma.job.findMany({ where: { type: DATA_SYNC_JOB } });
+    expect(next.payload).toMatchObject({ from: "2026-08-01", to: "2026-08-15" });
+  });
+
+  it("housekeeping deletes query rows older than 400 days only", async () => {
+    const { pruneOldRows } = await vi.importActual<typeof import("@/server/jobs/runner")>("@/server/jobs/runner");
+    const ago = (days: number) => new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate()) - days * 86_400_000);
+    for (const [query, d] of [["old", ago(402)], ["kept", ago(398)]] as const) {
+      await prisma.searchQueryDay.create({ data: { workspaceId: ws, brandId: "sc-a", siteUrl: SITE, dimension: "QUERY", day: d, query, page: "", clicks: 1, impressions: 1, positionSum: 1 } });
+    }
+    await pruneOldRows();
+    expect((await queryRows()).map((r) => r.query)).toEqual(["kept"]);
   });
 });
 

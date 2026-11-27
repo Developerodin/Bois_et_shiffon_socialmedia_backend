@@ -32,3 +32,13 @@ describe("digest email: ads alerts", () => {
     expect(digestText(body({ kind: "ads", key: "ads.read", data: null }), "https://u")).toContain("Ads: no data yet\n\n");
   });
 });
+
+describe("digest email: declining pages", () => {
+  const seo = (declines?: { count: number; pages: string[] }): DigestSection => ({ kind: "seo", key: "analytics.read", data: null, ...(declines && { declines }) });
+  it("adds one line with the count and the cleaned paths", () => {
+    expect(digestText(body(seo({ count: 4, pages: ["/a", "/b"] })), "https://u")).toContain("Search: no data yet\n  - losing search traffic: 4 (/a, /b)\n");
+  });
+  it("a stored body from before declines renders as before", () => {
+    expect(digestText(body(seo()), "https://u")).toContain("Search: no data yet\n\n");
+  });
+});

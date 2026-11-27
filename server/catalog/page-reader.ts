@@ -28,20 +28,20 @@ import { fetchRobots, ROBOTS_AGENT, robotsAllows, robotsRules, safeFetchBytes } 
  * change looks the same), and when most of a batch does that, or 404s, the run stops without archiving. The brand's
  * WEBSITE/SHOPIFY rows go only once every page of a complete discovery is settled.
  *
- * ponytail: one runner (claimNextJob caps catalog.pages at 1), ~1,000 pages × ~1.5 s ≈ 25 min per brand per day, so
+ * ponytail: one runner (claimNextJob caps catalog.pages and seo.links at 1 together), ~1,000 pages × ~1.5 s ≈ 25 min per brand per day, so
  * ~55 brands a day at full budget; past that raise the cap or read different hosts in parallel. Bandwidth ~400 MB per
  * brand per day on a first fill (3 MB page cap), mostly 304s after. The host lock and spacing cover page reads only:
  * robots.txt and the sitemaps are fetched outside it (once a day per host). A run uses up to three pooled connections
  * at once (the brand lock, the host lock, a save): docs/DEPLOY_EC2.md.
  */
-const RUN_MS = 240_000;
+export const RUN_MS = 240_000;
 const BATCH = 25;
 const BRAND_PAGES_PER_DAY = 1000;
-const HOST_PAGES_PER_DAY = 1500;
-const PAGE_BYTES = 3_000_000;
-const PAGE_TIMEOUT_MS = 30_000;
+export const HOST_PAGES_PER_DAY = 1500;
+export const PAGE_BYTES = 3_000_000;
+export const PAGE_TIMEOUT_MS = 30_000;
 const REFRESH_MS = 7 * 86_400_000;
-const DAY_MS = 86_400_000;
+export const DAY_MS = 86_400_000;
 // The catalogue lock wait for a batch save: an import or the daily sync can hold it a while.
 const LOCK_WAIT_MS = 120_000;
 // A page failing (an error, or empty after listing products) on this many different days is given up on ("dead").
@@ -89,7 +89,8 @@ async function stillSite(tx: Prisma.TransactionClient, scope: Scope) {
   if ((await catalogSource(scope, tx)).source !== "SITE") throw new Moved();
 }
 
-const siteHost = (origin: string) => new URL(origin).hostname.toLowerCase().replace(/^www\./, "");
+/** The host as the reader keys its lock, budget and caches: lower case, `www.` dropped (shared with seo.links). */
+export const siteHost = (origin: string) => new URL(origin).hostname.toLowerCase().replace(/^www\./, "");
 /** Days in a row a page has failed, from its state ("failed:<n>"; a first 404 counts as one). */
 const failedDays = (state: string | null) => (state === "missing" ? 1 : Number(/^failed:(\d+)$/.exec(state ?? "")?.[1] ?? 0));
 /** A 404/410 or an empty page that used to list products: what may mean the site changed, not the catalogue. */
@@ -116,8 +117,8 @@ function duePages(scope: Scope, dayStart: Date) {
  * session pg_try_advisory_lock), so a pooled connection can't keep it: it ends with the transaction, whatever happens.
  * The transaction holds one connection for the fetch and the pause after it (≤ ~40 s); `fn` gets it for its queries.
  */
-const BUSY = Symbol("busy");
-function onHost<T>(host: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T | typeof BUSY> {
+export const BUSY = Symbol("busy");
+export function onHost<T>(host: string, fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T | typeof BUSY> {
   return prisma.$transaction(async (tx) => {
     const [{ locked }] = await tx.$queryRaw<{ locked: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtext('host:' || ${host})) AS locked`;
     return locked ? fn(tx) : BUSY;
@@ -261,7 +262,7 @@ async function finish(scope: Scope, chain: Chain, stop: Stop) {
  * robots.txt for the day, shared by every brand on the host (TransientEntry, a day). A failed fetch is tried once
  * more after a pause and never cached, so tomorrow (or the next run) asks again.
  */
-async function robotsFor(origin: string, day: string, signal: AbortSignal, sleep: (ms: number) => Promise<void>) {
+export async function robotsFor(origin: string, day: string, signal: AbortSignal, sleep: (ms: number) => Promise<void>) {
   const key = `site-robots:${siteHost(origin)}:${day}`;
   const cached = await getTransient<{ txt: string | null }>(key);
   if (cached) return { txt: cached.txt, disallowAll: false };

@@ -14,13 +14,20 @@ import { OPEN_TASK_STATUSES, safeHttpUrl, type TaskDto } from "@/shared";
 
 /**
  * Findings a report may not have measured, whose absence says nothing: PageSpeed's (`pagespeed-*`) when PageSpeed
- * didn't run (metrics.pageSpeed null), and GEO's "not-recommended" when no real AI answered unbranded questions
- * (metrics.visibilityMeasured not true; reports from before it was stored count as not measured).
+ * didn't run (metrics.pageSpeed null), GEO's "not-recommended" when no real AI answered unbranded questions
+ * (metrics.visibilityMeasured not true; reports from before it was stored count as not measured), and the link check's
+ * (`links-*`) unless the report read a complete, fresh link-check cycle of the current site (metrics.links.complete
+ * true; a PARTIAL cycle's findings are reported but clear nothing).
  */
 function notMeasured(metrics: Prisma.JsonValue, findingId: string) {
-  const m = metrics as { pageSpeed?: unknown; visibilityMeasured?: unknown } | null;
-  return (findingId.startsWith("pagespeed-") && m?.pageSpeed == null) || (findingId === "not-recommended" && m?.visibilityMeasured !== true);
+  const m = metrics as { pageSpeed?: unknown; visibilityMeasured?: unknown; links?: { complete?: unknown } | null } | null;
+  return (findingId.startsWith("pagespeed-") && m?.pageSpeed == null)
+    || (findingId === "not-recommended" && m?.visibilityMeasured !== true)
+    || (isLinkFinding(findingId) && m?.links?.complete !== true);
 }
+
+/** The link check's findings (server/seo/links.ts): their urls are link targets, never in pagesChecked. */
+const isLinkFinding = (id: string) => id.startsWith("links-");
 
 /** Runs after each SEO or GEO report is saved: closes the tasks of findings that audit no longer reports. */
 export const FINDING_CLEAR_JOB = "tasks.clear-findings";
@@ -42,7 +49,7 @@ export const isAutoClearable = (id: string) => !id.startsWith("content-");
 const OPEN = [...OPEN_TASK_STATUSES];
 /** What the audit may close by itself: to do or in progress, never in review (a reviewer decides). */
 const CLOSABLE_BY_AUDIT = taskStatusInSql(["TODO", "IN_PROGRESS"]);
-const findingsOf = (json: Prisma.JsonValue) => (Array.isArray(json) ? (json as unknown as Finding[]) : []);
+export const findingsOf = (json: Prisma.JsonValue) => (Array.isArray(json) ? (json as unknown as Finding[]) : []);
 
 /** The finding as a task: detail, fix and its pages, within the task's text limits. */
 function taskData(f: Finding) {
@@ -62,7 +69,7 @@ type ReportRef = { id: string; kind: AuditKind };
 type FindingScope = { workspaceId: string; brandId: string };
 
 /** The open task for (kind, findingId), if any; with `reportId`, only one made from that report. */
-const openFindingTask = (db: Db, scope: FindingScope, kind: AuditKind, findingId: string, reportId?: string) =>
+export const openFindingTask = (db: Db, scope: FindingScope, kind: AuditKind, findingId: string, reportId?: string) =>
   db.task.findFirst({
     where: { workspaceId: scope.workspaceId, brandId: scope.brandId, findingKind: kind, findingId, status: { in: OPEN }, ...(reportId ? { auditReportId: reportId } : {}) },
     select: { id: true },
@@ -71,10 +78,17 @@ const openFindingTask = (db: Db, scope: FindingScope, kind: AuditKind, findingId
 /**
  * The finding as a new task with its task.create audit event, in the caller's transaction. A null userId is the system
  * (an audit made it). Throws the unique violation of task_open_finding when the finding already has an open task.
+ * `override`: a description and areas in place of the finding's own (an AI brief, server/seo/briefs.ts).
  */
-async function createFindingTask(tx: Db, scope: FindingScope & { userId: string | null }, report: ReportRef, finding: Finding, metadata?: Record<string, unknown>) {
+export async function createFindingTask(
+  tx: Db, scope: FindingScope & { userId: string | null }, report: ReportRef, finding: Finding, metadata?: Record<string, unknown>,
+  override?: { description: string; areas: TaskArea[] },
+) {
   const task = await tx.task.create({
-    data: { ...taskData(finding), workspaceId: scope.workspaceId, brandId: scope.brandId, createdById: scope.userId, auditReportId: report.id, findingKind: report.kind, findingId: finding.id },
+    data: {
+      ...taskData(finding), ...override, workspaceId: scope.workspaceId, brandId: scope.brandId, createdById: scope.userId, auditReportId: report.id,
+      findingKind: report.kind, findingId: finding.id,
+    },
     select: { id: true, title: true },
   });
   await taskAudit(tx, scope, "task.create", { type: "Task", id: task.id, title: task.title }, { auditReportId: report.id, findingId: finding.id, ...metadata });
@@ -116,7 +130,7 @@ const ReportPayload = z.object({ workspaceId: z.string().min(1), brandId: z.stri
 
 /**
  * FINDING_CLEAR_JOB: open tasks of the report's kind whose finding (one isAutoClearable) the report no longer lists, and whose
- * pages it re-read (all of `findingUrls` in metrics.pagesChecked; a site-wide finding needs none), move to DONE with a
+ * pages it re-read (all of `findingUrls` in metrics.pagesChecked; a site-wide or links-* finding needs none), move to DONE with a
  * SYSTEM comment and an audit event, in one transaction. Each task is locked (the lock runTaskAction and patchTask
  * take, in id order) and its status and reviewer read again under the lock, so a task moved to review since the first
  * read is left alone and told the right thing. Tasks in review, and tasks with a reviewer, get the comment only: a
@@ -135,7 +149,10 @@ export async function clearFindings(payload: unknown): Promise<void> {
     where: { workspaceId, brandId, findingKind: report.kind, findingId: { not: null }, status: { in: OPEN } },
     select: { id: true, title: true, status: true, reviewerId: true, findingId: true, findingUrls: true },
   });
-  const cleared = open.filter((t) => isAutoClearable(t.findingId!) && !notMeasured(report.metrics, t.findingId!) && !present.has(t.findingId!) && t.findingUrls.every((u) => pages.has(u)));
+  // A measured links-* finding clears without the pages rule: its findingUrls are link targets, which the whole-site
+  // link check covered, not pages the audit read.
+  const cleared = open.filter((t) => isAutoClearable(t.findingId!) && !notMeasured(report.metrics, t.findingId!) && !present.has(t.findingId!)
+    && (isLinkFinding(t.findingId!) || t.findingUrls.every((u) => pages.has(u))));
   if (!cleared.length) return;
   const day = report.createdAt.toISOString().slice(0, 10);
   const titleOf = new Map(cleared.map((t) => [t.id, t.title]));
