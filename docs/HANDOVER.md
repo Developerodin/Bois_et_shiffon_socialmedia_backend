@@ -2110,8 +2110,12 @@ removed from any future `prisma migrate dev` diff.
 **Open items:**
 - The web was never rendered: no browser check and no e2e run. This blocks turning on the `crm` flag. Browser check: customer → log message → queue → overdue task → deal → quote sent by hand → declined → versions →
   erase/export.
-- Not built on the web: a company list (a company is erased from one of its customers' pages), moving a conversation to
-  another customer, and linking a deal to a conversation. The server supports all three.
+- Built on the web later the same day (web merge of `crm-gaps`, browser-checked): a Companies view (a chip on the
+  Customers tab), moving a conversation to another customer, and linking a deal to one of its customer's
+  conversations. Still open: creating or erasing a company from the Companies view, a `?company=` link, a
+  conversation list/search endpoint (the deal's picker reads the customer, latest 50, and audits a `customer.viewed`).
+- Server gaps found then, not fixed: a deal PATCH from a role without inbox.read still accepts `conversationId: null`
+  (the web leaves the field out), and the server doesn't check that a deal's conversation belongs to its customer.
 - Accepted risk (owner's 2026-11-24 decision): a client reviewer given crm.manage or inbox.read in the permission
   matrix sees every customer record and message.
 - Phases B (Meta), C (AskCart customers) and D (Gmail; Google restricted-scope verification plus a CASA assessment, or
