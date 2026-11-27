@@ -2207,3 +2207,23 @@ Re-run `npm run sync:shared` after the merge so every `.hash` matches.
      columns, `server/content/workflow.ts`, routes, locked product ids in the Brief writer) in flight at 17:05 on branch
      `workflow-p2` (`Desktop\sma-p2\server`); its migration needs the owner's OK before `migrate deploy` on dev.
    - Owner still to confirm: whether Brief → Creator → Quality should pause for a person between stages (answer 2).
+8. **~17:40 2026-11-27, still open:**
+   - Web on `main` (unpushed): agent peek on calendar and /social (`c434e59`), run's posts listed and opened in place
+     (`d62b7c8`), Ideas panel copy (`a1fd6a5`), "Show on calendar" in the post view → `/calendar?post=&at=YYYY-MM` opens
+     Month on that month (`4e933a5`, browser-checked).
+   - **Phase 2** on branch `workflow-p2` (`Desktop\sma-p2\server`), NOT merged: ContentWorkflow service + routes
+     (`content-workflows`, PATCH cancel/approve/retry), gates REVIEW_PLAN and REVIEW_BRIEFS (owner: one approval after
+     each agent), product ids locked through the chain, flat Planner charge. Review found: plain (non-workflow) sweeps
+     brief/draft a workflow's posts at a gate (fix: `workflowId: null` on non-workflow sweeps), concurrent Planner
+     retries can go unpaid (fix: per-workflow lock), 0-post workflow shows DONE, archived chosen products kept. Fixes
+     were in progress at 17:40.
+   - **Migrations:** `20261127180000_content_workflow` APPLIED to dev (owner OK, 17:15). `20261127190000_content_workflow_review_briefs`
+     (one `ALTER TYPE … ADD VALUE 'REVIEW_BRIEFS'`) NOT applied — needs the owner's OK.
+   - **To merge Phase 2:** merge `workflow-p2` into server main; stop the server dev shell; `prisma migrate deploy` (only
+     with the owner's OK for 190000); `prisma generate`; restart; `npm run sync:shared` with MOBILE_DIR set to a scratch
+     folder; check the web copy of `shared/` matches; the worktree's node_modules is a real folder (private
+     `@prisma/client`) — delete the folder, don't treat it as a junction.
+   - Next phases (plan doc): 3 selectors/wizard (product picker, destinations, idea review UI for the gates), 4 channel
+     variants + `connectionId` used by auto-publish, 5 product-aware Quality rows, 6 entry points/filters, 7 timeline,
+     8 Analyst loop. Owner answer 6 (disconnected channel → future-dated drafts get a notification + attention badge on
+     /social; past dates nothing) not built yet.
