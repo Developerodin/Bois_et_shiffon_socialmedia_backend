@@ -1,0 +1,24 @@
+# Owner brief (2026-11-27 ~17:45): redesign the agent detail drawers (condensed, owner's words where possible)
+
+Problem: the agent drawer mixes (1) what the agent does, (2) what it produced, (3) technical execution logs. Raw black terminal logs dominate. Make it a consistent, human-readable **Agent Detail Drawer** with agent-specific content. Keep calendar, colours, typography, tokens and the right-side drawer. No mock data, no backend orchestration changes, don't remove logs.
+
+## Shared architecture (all six agents)
+- **Header:** agent icon, name, short functional description, current execution state, last run time, close, "Run again" when permitted. Consistent sizing; avoid redundant small breadcrumbs.
+- **Tabs:** Overview · Outputs · Activity. Selected tab stays stable during interactions. Switching tabs or opening the drawer never starts a run.
+  - Overview: agent summary, last execution, key statistics, current workload, the next actionable step.
+  - Outputs (the most important tab — lead with results): the actual ideas / planned posts / briefs / drafts / quality reports, with product and channel context and Open post links.
+  - Activity: chronological timeline of runs and events, stage transitions, errors/retries; **Advanced execution logs** collapsed by default at the bottom (timestamps, severity, filter INFO/SUCCESS/WARNING/ERROR, copy, expand).
+- **Sticky footer** for the primary context action where useful; header and footer stay visible, body scrolls independently; footer never overlaps content.
+- Consistent drawer width (~400–460px desktop; full-height drawer on small screens), header height, tab style, padding, badges, rows, expand/collapse, empty/loading/error states. No endless "Loading…": proper loading, empty, completed, error states. No page-level horizontal overflow. Avoid nested cards for every paragraph.
+- Data integrity: real persisted runs/records only; never fabricate counts, product/channel associations, quality results or timestamps. **Label scope**: latest-run outputs vs brand-wide pending queue vs history.
+
+## Per agent
+- **Scout (ideas review):** summary: ideas discovered, recommended, shortlisted, held/dismissed. Idea cards: recommendation badge, title, short description (no wall of text), associated product (only real associations — ideas have no product link yet; show it only where data exists), recommended platforms as compact chips, suggested format, rationale **collapsed** (Expand), timing window. Actions: Shortlist (primary), Hold, Dismiss, More (Translate moves into More). Filter tabs: To review · Shortlisted · Dismissed · All. Multi-select with clear feedback; "Plan selected idea(s)" only when something is selected/shortlisted (singular/plural label).
+- **Planner:** Overview: ideas considered, posts planned, channels, products, date range, status. Outputs: compact list of planned posts — title, product, channel, date/time, current stage, status, Open post; group by channel or date when useful; "View in calendar". Don't imply it wrote briefs/drafts.
+- **Brief writer:** Overview: briefs created, waiting, last run, errors. Outputs: per brief a collapsed preview — post title, product (+thumbnail where available), channel, objective, audience, key message, key product info, CTA, visual direction, status — Expand for the full brief, Open post. No raw JSON.
+- **Creator:** Overview: drafts generated, pending, revisions required, channel variants. Outputs: actual drafts — product, destination, format, version, caption preview, hashtags where supported, visual/media brief, thumbnail where available, status; switch between channel variants of the same product/campaign where they exist; Open editor (the post), view revisions.
+- **Quality (review-focused):** Overview: checked, passed, blocked, warnings, awaiting approval; execution state shown separately from queue state (no contradictions). Outputs grouped: A Blocked drafts (first) — title, product, destination, blocking issue, check category, explanation, required fix, Open post, Send back to Creator (existing action); B Passed, awaiting approval — compact rows (or a summary line + "View passed posts"); C Warnings where applicable. Expandable check details (brand voice, product accuracy, claims, platform, CTA…), preserving existing report detail. Never send blocked drafts to approval.
+- **Analyst:** same architecture, outside the chain. Overview: last analysis, data sources, learning status, period. Outputs: observations, patterns, recommendations (only from real records — LearningNotes). Activity: previous runs, events, advanced logs.
+
+## Order the owner suggested
+1 shared drawer architecture → 2 Scout and Quality → 3 Planner and Brief writer → 4 Creator → 5 Analyst and activity logs. "Make the Outputs tab the most important part of every agent preview."
