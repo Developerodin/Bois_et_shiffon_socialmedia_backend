@@ -1922,3 +1922,40 @@ shows "Couldn't load website tasks and milestones" on every visit.
 - Merge notes: `shared/.hash` and `shared/index.ts` (new export at the end): re-run `npm run sync:shared` after
   merging other streams, never hand-merge `.hash`. Small edits in `server/tasks/list.ts`, `projects.ts`, `sql.ts`
   (tasks-calendar stream territory) and in `components/workspace/workspace.tsx` Home.
+
+## Task calendar and documents on tasks (branch `tasks-calendar`, 2026-11-27, merged)
+
+Feature audit items 5 and 36. Plan with decisions, both four-lens reviews and ceilings:
+`docs/superpowers/plans/2026-11-27-tasks.md`. Worktrees: C:\Users\INTEL\Desktop\sma-tasks\{server,web,mobile}.
+
+What changed for people
+- /tasks has a third layout, Calendar, next to List and Board: the chosen View's tasks (with the Area and Report
+  filters) on their due day in a month grid, the same grid as the content calendar (now
+  web components/calendar/month-grid.tsx, which the content calendar uses too). A task opens in the side peek
+  (`?task=`). Undated tasks stay in the List; a `?view=` link opens the List. Up to 200 tasks a month.
+- A task's panel has a Files list: PDF, Word, Excel, PowerPoint, CSV, text, JPG and PNG, up to 25 MB, 20 a task.
+  Anyone who sees the task downloads them (a client reviewer too, on a client-visible task; staff are told so); its
+  owner or a manager uploads and removes them (never a client). Before/After screenshots are unchanged.
+
+Server
+- GET tasks takes `dueFrom`/`dueTo` (YYYY-MM-DD, ≤ 62 days, 200 a page) on the same `listSql`.
+- New table `TaskFile` (not MediaUpload, so documents never reach the story picker). Routes:
+  POST `tasks/:id/files` (slot), POST `tasks/:id/files/:fileId` (check and keep), DELETE `tasks/:id/files/:fileId`.
+  Bytes are sniffed (server/tasks/file-check.ts); Office files with macros, ActiveX or embedded OLE objects are
+  refused; downloads are signed links with `Content-Disposition: attachment`, a plain ASCII name and the verified type.
+  The daily sweep removes unfinished slots after a day (`task files` step).
+- `getMediaBytes` returns the joined Buffer (one copy less); `signedMediaUrl` takes an optional content type.
+
+Migration (NOT applied to the dev DB): `20261127110000_task_files`. Deploy order: server `prisma migrate deploy`, then
+web. Storage bucket CORS must allow browser PUT (already needed for screenshots).
+
+Checks: server tsc clean, 2109 unit tests, 428 DB tests (sma_test_tasks); web tsc clean, 749 tests, eslint clean on
+changed files. Not browser-checked, no real upload to storage.
+
+Open items
+- Browser pass: the task calendar (wide and narrow), the content calendar after the month-grid move (popover, agenda,
+  "+N more", New post on an empty day), a real document upload and download.
+- Known minors in the plan's "Branch review" section (manager without tasks.all sees Upload, external template links,
+  CSV formula injection, one-hour links).
+- Merge: seo-depth also edits web tasks-page.tsx (TasksPage props, TaskPeek line) and task-view.tsx near the
+  attachments; `shared/.hash` will conflict in all three repos: re-run `npm run sync:shared` after merging.

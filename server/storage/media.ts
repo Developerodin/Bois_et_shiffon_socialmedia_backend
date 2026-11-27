@@ -65,8 +65,11 @@ export async function putMedia(
   );
 }
 
-/** Short-lived read URL, e.g. for Meta to fetch media at publish time. With `downloadAs` the browser saves it under that name. */
-export function signedMediaUrl(key: string, expiresInSeconds = 3600, downloadAs?: string) {
+/**
+ * Short-lived read URL, e.g. for Meta to fetch media at publish time. With `downloadAs` the browser saves it under that
+ * name; `contentType` overrides the type storage answers with (task files: the verified one).
+ */
+export function signedMediaUrl(key: string, expiresInSeconds = 3600, downloadAs?: string, contentType?: string) {
   // The name goes inside a quoted header value: only plain file names, never a quote or line break.
   if (downloadAs !== undefined && !FILE_NAME.test(downloadAs)) throw new Error("Invalid download file name");
   return getSignedUrl(
@@ -75,6 +78,7 @@ export function signedMediaUrl(key: string, expiresInSeconds = 3600, downloadAs?
       Bucket: MEDIA_BUCKET,
       Key: key,
       ...(downloadAs && { ResponseContentDisposition: `attachment; filename="${downloadAs}"` }),
+      ...(contentType && { ResponseContentType: contentType }),
     }),
     { expiresIn: expiresInSeconds },
   );
@@ -116,7 +120,8 @@ export async function getMediaBytes(key: string, maxBytes: number) {
     }
     chunks.push(chunk);
   }
-  return new Uint8Array(Buffer.concat(chunks));
+  // A Buffer is a Uint8Array: no second copy of a large file.
+  return Buffer.concat(chunks, total);
 }
 
 export async function deleteMedia(key: string) {

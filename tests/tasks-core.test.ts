@@ -10,6 +10,7 @@ const db = vi.hoisted(() => {
     auditReport: { findFirst: vi.fn() },
     taskChecklistItem: { groupBy: vi.fn(), findMany: vi.fn() },
     taskAttachment: { findMany: vi.fn() },
+    taskFile: { findMany: vi.fn() },
     auditEvent: { create: vi.fn(), findMany: vi.fn(async (): Promise<unknown[]> => []) },
     notification: { createMany: vi.fn() },
     workspaceMember: { findFirst: vi.fn(), findMany: vi.fn() },
@@ -91,6 +92,7 @@ beforeEach(() => {
   db.taskChecklistItem.groupBy.mockResolvedValue([]);
   db.taskChecklistItem.findMany.mockResolvedValue([]);
   db.taskAttachment.findMany.mockResolvedValue([]);
+  db.taskFile.findMany.mockResolvedValue([]);
   db.auditEvent.create.mockResolvedValue({ id: "a1" });
   db.workspaceMember.findFirst.mockImplementation(async ({ where }: Where) => (staff.has(where.userId as string) ? { id: "m" } : null));
   db.workspaceMember.findMany.mockImplementation(async () => [...staff].filter((u) => u !== "u3").map((userId) => ({ userId, role: "ADMIN", roleRef: { permissions: ["brand.read", "tasks.read"] } })));
@@ -225,6 +227,16 @@ describe("getTask", () => {
       { id: "at1", mediaUploadId: "up1", role: "BEFORE", createdById: "u1", createdAt: "2026-11-23T10:00:00.000Z", url: "https://signed/w1/b1/uploads/a.jpg" },
     ]);
     expect(m.signed).toHaveBeenCalledWith("w1/b1/uploads/a.jpg");
+  });
+
+  it("the single-task read lists verified files only, each with a link that downloads under a plain name", async () => {
+    db.taskFile.findMany.mockResolvedValue([
+      { id: "f1", taskId: "t1", key: "w1/b1/task-files/x.pdf", status: "VERIFIED", contentType: "application/pdf", fileName: "Devis été.pdf", bytes: 9, createdById: "u1", createdAt: new Date("2026-11-27T10:00:00Z") },
+    ]);
+    const dto = await getTask(scope, v, "t1");
+    expect(db.taskFile.findMany.mock.calls[0]![0].where).toEqual({ taskId: "t1", status: "VERIFIED" });
+    expect(m.signed).toHaveBeenCalledWith("w1/b1/task-files/x.pdf", 3600, "Devis-ete.pdf", "application/pdf");
+    expect(dto.files).toEqual([{ id: "f1", fileName: "Devis été.pdf", contentType: "application/pdf", bytes: 9, createdById: "u1", createdAt: "2026-11-27T10:00:00.000Z", url: expect.any(String) }]);
   });
 
   it("clientVisible true when the reviewer is a client", async () => {

@@ -8,6 +8,7 @@ const db = vi.hoisted(() => {
     taskComment: { createMany: vi.fn() },
     taskChecklistItem: { groupBy: vi.fn(async () => []), findMany: vi.fn(async () => []) },
     taskAttachment: { findMany: vi.fn(async () => []) },
+    taskFile: { findMany: vi.fn(async () => []) },
     auditEvent: { create: vi.fn(), createMany: vi.fn() },
     job: { create: vi.fn(), upsert: vi.fn() },
     workspaceMember: { findFirst: vi.fn(), findMany: vi.fn(async () => []) },

@@ -12,19 +12,35 @@ import { DONE_DAYS, isBlocked, isOverdue, OPEN_STATUSES, TASK_AREAS, TASK_VIEWS,
 
 /**
  * GET tasks query (every view but today). `area` may come lower-case from a link (`?area=website`); `source` keeps the
- * tasks made from that kind of audit report (`?source=geo`).
+ * tasks made from that kind of audit report (`?source=geo`). `dueFrom`/`dueTo` (the calendar's month): tasks due on
+ * those days (YYYY-MM-DD, both or neither, at most RANGE_DAYS apart), RANGE_PAGE a page.
  */
-export const ListQuery = z.object({
-  view: z.enum(TASK_VIEWS),
-  area: z.string().transform((s) => s.toUpperCase()).pipe(z.enum(TASK_AREAS)).optional(),
-  source: z.string().transform((s) => s.toUpperCase()).pipe(z.enum(["SEO", "GEO"])).optional(),
-  workProjectId: z.string().min(1).max(100).optional(),
-  ownerId: z.string().min(1).max(100).optional(),
-  cursor: z.string().min(1).max(500).optional(),
-});
+export const ListQuery = z
+  .object({
+    view: z.enum(TASK_VIEWS),
+    area: z.string().transform((s) => s.toUpperCase()).pipe(z.enum(TASK_AREAS)).optional(),
+    source: z.string().transform((s) => s.toUpperCase()).pipe(z.enum(["SEO", "GEO"])).optional(),
+    workProjectId: z.string().min(1).max(100).optional(),
+    ownerId: z.string().min(1).max(100).optional(),
+    cursor: z.string().min(1).max(500).optional(),
+    dueFrom: z.iso.date().optional(),
+    dueTo: z.iso.date().optional(),
+  })
+  .superRefine((q, ctx) => {
+    if (!q.dueFrom !== !q.dueTo) return void ctx.addIssue({ code: "custom", message: "dueFrom and dueTo go together" });
+    if (!q.dueFrom || !q.dueTo) return;
+    const days = (Date.parse(q.dueTo) - Date.parse(q.dueFrom)) / 86_400_000;
+    if (days < 0) ctx.addIssue({ code: "custom", message: "dueFrom is after dueTo" });
+    else if (days > RANGE_DAYS) ctx.addIssue({ code: "custom", message: `A due range is at most ${RANGE_DAYS} days` });
+  });
 export type ListQuery = z.infer<typeof ListQuery>;
 
 const PAGE = 50;
+/** A due-range page: the calendar reads a month in one go. */
+const RANGE_PAGE = 200;
+const RANGE_DAYS = 62;
+/** RANGE_PAGE with a due range, else PAGE: the LIMIT, the slice and the cursor all use it. */
+const pageSize = (q: { dueFrom?: string }) => (q.dueFrom ? RANGE_PAGE : PAGE);
 const TODAY_ROWS = 5;
 const POSTS = 20;
 
@@ -57,7 +73,7 @@ export function decodeCursor<V extends TaskView>(view: V, s: string): KeyOf<V> {
 }
 
 /**
- * One page of task ids (51, to know if there is more) for a view, on top of visibleTaskSql so a client's page is never
+ * One page of task ids (pageSize + 1, to know if there is more) for a view, on top of visibleTaskSql so a client's page is never
  * short. Open views sort by due day (no day last), then id; Done by completion, newest first (last 30 days).
  */
 export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.Sql {
@@ -77,6 +93,9 @@ export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.S
   if (q.source) where.push(Prisma.sql`t."findingKind" = ${q.source}::"AuditKind"`);
   if (q.workProjectId) where.push(Prisma.sql`t."workProjectId" = ${q.workProjectId}`);
   if (q.ownerId) where.push(Prisma.sql`t."ownerId" = ${q.ownerId}`);
+  // DUE, never t."dueOn": the open views' (brand, due, id) index has this expression, so the range is an index range.
+  // Undated rows are infinity, past any dueTo. On Done it filters the 30-day completedAt scan.
+  if (q.dueFrom && q.dueTo) where.push(Prisma.sql`${DUE} >= ${q.dueFrom}::date AND ${DUE} <= ${q.dueTo}::date`);
   if (q.cursor && done) {
     const k = decodeCursor("done", q.cursor);
     where.push(Prisma.sql`(t."completedAt" < ${k.completedAt}::timestamp OR (t."completedAt" = ${k.completedAt}::timestamp AND t.id > ${k.id}))`);
@@ -85,7 +104,7 @@ export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.S
     where.push(Prisma.sql`(${DUE}, t.id) > (${k.due}::date, ${k.id})`);
   }
   const order = done ? Prisma.sql`t."completedAt" DESC, t.id` : Prisma.sql`${DUE}, t.id`;
-  return Prisma.sql`SELECT t.id, ${DUE}::text AS due, t."completedAt" FROM "Task" t WHERE ${Prisma.join(where, " AND ")} ORDER BY ${order} LIMIT ${PAGE + 1}`;
+  return Prisma.sql`SELECT t.id, ${DUE}::text AS due, t."completedAt" FROM "Task" t WHERE ${Prisma.join(where, " AND ")} ORDER BY ${order} LIMIT ${pageSize(q) + 1}`;
 }
 
 /** Rows for ids from a visibility-checked query, in that query's order. */
@@ -125,19 +144,19 @@ async function postsNeedingAction(scope: TaskScope, now: Date): Promise<PostRow[
 
 type PageRow = { id: string; due: string; completedAt: Date | null };
 
-/** A page of a view. `posts` only on the first page of view=mine, and only for content work (no area, or CONTENT). */
+/** A page of a view. `posts` only on the first page of view=mine, and only for content work (no area, or CONTENT), never with a due range (the calendar). */
 export async function listTasks(scope: TaskScope, v: TaskViewer, q: ListQuery, now = new Date()): Promise<{ tasks: TaskDto[]; posts?: PostRow[]; nextCursor: string | null }> {
   const sql = listSql(v, q, now);
   const [page, people, posts] = await Promise.all([
     prisma.$queryRaw<PageRow[]>(sql),
     brandOwners(scope, { key: "tasks.read", includeClients: true }),
-    q.view === "mine" && !q.cursor && (!q.area || q.area === "CONTENT") ? postsNeedingAction(scope, now) : undefined,
+    q.view === "mine" && !q.cursor && !q.dueFrom && (!q.area || q.area === "CONTENT") ? postsNeedingAction(scope, now) : undefined,
   ]);
-  const shown = page.slice(0, PAGE);
+  const shown = page.slice(0, pageSize(q));
   const tasks = await toTaskDtos(scope, await rowsFor(shown.map((r) => r.id)), people);
   const last = shown.at(-1);
   const nextCursor =
-    page.length > PAGE && last
+    page.length > pageSize(q) && last
       ? q.view === "done"
         ? encodeCursor("done", { completedAt: last.completedAt!.toISOString(), id: last.id })
         : encodeCursor(q.view, { due: last.due, id: last.id })

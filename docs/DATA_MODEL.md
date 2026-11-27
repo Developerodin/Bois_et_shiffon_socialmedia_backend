@@ -441,3 +441,12 @@ Two migrations, both additive: `20261126140000_notification_ad_alert_kind`, `202
   `lastDay` on instead of making a new row. Indexes `(brandId, subjectKey, lastDay)`, `(brandId, lastDay)` (the chat's
   recent alerts) and `(brandId, createdAt)` (the digest's week). Cascades with the brand. Written by the `ads.alerts`
   job (server/ads/alerts.ts).
+
+## 14. Task files (2026-11-27, branch `tasks-calendar`)
+
+`TaskFile` (migration `20261127110000_task_files`): a document on a task, kept apart from `MediaUpload` so it never
+reaches the story picker or the photo library. Direct `workspaceId` + `brandId` (§1.1), `taskId` (cascade), `key`
+(unique; `<ws>/<brand>/task-files/uploads/<uuid>.<ext>` while PENDING/CHECKING, `<ws>/<brand>/task-files/<uuid>.<ext>`
+once VERIFIED), `status` (PENDING | CHECKING | VERIFIED; a refused file loses its row), `contentType` (the verified one,
+shared `TASK_FILE_TYPES`), `fileName` (display only), `bytes`, `createdById`, `createdAt`. Indexes (taskId, status),
+(status, createdAt). Routes: POST `tasks/:id/files`, POST and DELETE `tasks/:id/files/:fileId` (server/tasks/files.ts).

@@ -24,6 +24,7 @@ import "@/server/quotes/status-sync"; // registers the SHOPIFY_QUOTES runner (qu
 import { prisma } from "@/server/db/prisma";
 import { EMAIL_SEND_JOB, sendOutboxEmail } from "@/server/email/outbox";
 import { notifyOverdueTasks, notifyRechecks, pruneNotifications } from "@/server/notifications/daily-tasks";
+import { purgeStaleTaskFiles } from "@/server/tasks/files";
 import type { Job } from "@prisma/client";
 import { claimNextJob, completeJob, deadLetterJob, enqueueJob, failJob, holdLease, type Lease, releaseJob } from "@/server/jobs/queue";
 import { onShootFailure, PHOTOSHOOT_JOB, runShoot } from "@/server/photoshoot/shoot";
@@ -192,7 +193,7 @@ async function dailySweep() {
   // read (server/data/fx.ts), one short job outside the data cap; "story reads" queues reads the publish paths missed.
   // "digest" queues Monday's digests for after those syncs, last: a workspace-wide insert that must never hold up the
   // steps before it.
-  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["fx", enqueueFxSync], ["story reads", enqueueMissedStoryReads], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites], ["digest", enqueueWeeklyDigests]] as const) {
+  for (const [name, step] of [["post-metric sources", ensurePostMetricSources], ["data", enqueueDailyDataSyncs], ["fx", enqueueFxSync], ["story reads", enqueueMissedStoryReads], ["overdue", notifyOverdueTasks], ["rechecks", notifyRechecks], ["prune", pruneNotifications], ["shopify writes", expireStaleWrites], ["task files", purgeStaleTaskFiles], ["digest", enqueueWeeklyDigests]] as const) {
     try {
       await step(now);
     } catch (e) {

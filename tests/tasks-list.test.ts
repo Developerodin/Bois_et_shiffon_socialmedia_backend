@@ -94,6 +94,24 @@ describe("listSql", () => {
     expect(text(sql)).toContain(`(COALESCE(t."dueOn", 'infinity'::date), t.id) > (`);
     expect(sql.values).toEqual(expect.arrayContaining(["w1", "b1", "u1", "WEBSITE", "p1", "u2", "2026-11-30", "t9"]));
   });
+
+  it("a due range filters on the indexed due expression and reads 200 a page", () => {
+    for (const view of ["open", "done"] as const) {
+      const sql = listSql(v, { view, dueFrom: "2026-10-27", dueTo: "2026-12-07" }, NOW);
+      expect(text(sql)).toContain(`COALESCE(t."dueOn", 'infinity'::date) >= ?::date AND COALESCE(t."dueOn", 'infinity'::date) <= ?::date`);
+      expect(text(sql)).not.toContain(`t."dueOn" BETWEEN`);
+      expect(sql.values).toEqual(expect.arrayContaining(["2026-10-27", "2026-12-07"]));
+      expect(sql.values.at(-1)).toBe(201);
+    }
+  });
+
+  it("GET tasks refuses a half, reversed or too long due range (400)", async () => {
+    const get = (q: string) => tasksGet(new Request(`http://x/api?view=open&${q}`), { params: Promise.resolve({ workspaceId: "w1", brandId: "b1" }) });
+    for (const q of ["dueFrom=2026-11-01", "dueTo=2026-11-30", "dueFrom=2026-11-30&dueTo=2026-11-01", "dueFrom=2026-11-01&dueTo=2027-01-03", "dueFrom=2026-11-01&dueTo=2026-13-01"]) {
+      expect((await get(q)).status, q).toBe(400);
+    }
+    expect((await get("dueFrom=2026-11-01&dueTo=2027-01-02")).status).toBe(200);
+  });
 });
 
 describe("listTasks", () => {

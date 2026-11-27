@@ -11,6 +11,7 @@ import { canBeAssigned, clientCanSee, findVisibleTask, isSoleStaff, lastSubmitte
 import { taskAudit } from "@/server/tasks/audit";
 import { TaskError } from "@/server/tasks/errors";
 import { toAttachmentDto } from "@/server/tasks/attachments";
+import { toFileDto } from "@/server/tasks/files";
 import { toChecklistDto } from "@/server/tasks/checklist";
 import { checkTaskLinks } from "@/server/tasks/links";
 import { allowedActions, MANAGE_PATCH_FIELDS, pickPatch, safeHttpUrl, TASK_AREAS, TASK_PRIORITIES, WEBSITE_CHANGE_KINDS, type ActorRole, type TaskDetailDto, type TaskDto, type TaskPersonDto, type TaskRow } from "@/shared";
@@ -202,18 +203,29 @@ export async function limitTaskWrites(kind: "create" | "batch" | "comment", user
   if (!(await hitRateLimit(`tasks.${kind}:${userId}`, 60, 60_000)).allowed) throw new TaskError("Too many changes at once. Wait a minute.", 429);
 }
 
-/** One task with its checklist lines (position, id) and photos (signed URLs); list rows carry only checklist counts. */
+/**
+ * One task with its checklist lines (position, id), photos and verified files (signed URLs; files always download);
+ * list rows carry only checklist counts.
+ */
 export async function getTask(scope: TaskScope, v: TaskViewer, taskId: string): Promise<TaskDetailDto> {
   if (!(await findVisibleTask(prisma, v, taskId))) throw notFound();
   const row = await prisma.task.findUnique({ where: { id: taskId }, include: TASK_DTO_INCLUDE });
   if (!row) throw notFound();
-  const [[dto], items, attachments, clientVisible] = await Promise.all([
+  const [[dto], items, attachments, files, clientVisible] = await Promise.all([
     toTaskDtos(scope, [row]),
     prisma.taskChecklistItem.findMany({ where: { taskId }, orderBy: [{ position: "asc" }, { id: "asc" }] }),
     prisma.taskAttachment.findMany({ where: { taskId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }], include: { mediaUpload: { select: { key: true } } } }),
+    prisma.taskFile.findMany({ where: { taskId, status: "VERIFIED" }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] }),
     clientCanSee(prisma, scope, row),
   ]);
-  return { ...dto!, clientVisible, viewerIsClient: v.client, checklistItems: items.map(toChecklistDto), attachments: await Promise.all(attachments.map((a) => toAttachmentDto(a, a.mediaUpload.key))) };
+  return {
+    ...dto!,
+    clientVisible,
+    viewerIsClient: v.client,
+    checklistItems: items.map(toChecklistDto),
+    attachments: await Promise.all(attachments.map((a) => toAttachmentDto(a, a.mediaUpload.key))),
+    files: await Promise.all(files.map(toFileDto)),
+  };
 }
 
 /**

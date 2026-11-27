@@ -1523,6 +1523,7 @@ model Task {
   auditReport   AuditReport?        @relation(fields: [auditReportId], references: [id], onDelete: SetNull)
   checklist     TaskChecklistItem[]
   attachments   TaskAttachment[]
+  files         TaskFile[]
   comments      TaskComment[]
   notifications Notification[]
   blogArticles  BlogArticle[]
@@ -1565,6 +1566,29 @@ model TaskAttachment {
 
   @@index([taskId])
   @@index([mediaUploadId])
+}
+
+/// A document on a task (PDF, Office, CSV, text, or a photo as a file), apart from MediaUpload so it never reaches the
+/// story picker or the photo library. PENDING: a slot handed out; CHECKING: its bytes being checked; VERIFIED: stored at
+/// `key` under the verified `contentType`. A refused file loses its row (server/tasks/files.ts).
+model TaskFile {
+  id          String   @id @default(cuid())
+  workspaceId String
+  brandId     String
+  taskId      String
+  key         String   @unique
+  status      String   @default("PENDING") // "PENDING" | "CHECKING" | "VERIFIED"
+  contentType String
+  /// As the person named it (cleaned); shown as text only, never in a header (downloadName is).
+  fileName    String
+  bytes       Int
+  createdById String
+  createdAt   DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId, status])
+  @@index([status, createdAt])
 }
 
 /// A group of tasks with dates (a launch, a site rebuild). Progress = done / (all - cancelled). The trigram index on
