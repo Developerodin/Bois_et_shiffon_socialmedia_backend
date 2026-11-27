@@ -225,6 +225,7 @@ model Brand {
   chatThreads          ChatThread[]
   opportunities        Opportunity[]
   contentItems         ContentItem[]
+  contentWorkflows     ContentWorkflow[]
   learningNotes        LearningNote[]
   competitors          Competitor[]
   invitations          Invitation[]
@@ -381,6 +382,8 @@ model AgentRun {
   output            Json?
   error             String?
   triggeredByUserId String?
+  // The content workflow this run is a stage of (copied from input.workflowId by startAgentRun), for its status.
+  workflowId        String?
   startedAt         DateTime?
   finishedAt        DateTime?
   createdAt         DateTime       @default(now())
@@ -389,6 +392,7 @@ model AgentRun {
   events AgentEvent[]
 
   @@index([brandId, agentKey, createdAt])
+  @@index([workflowId])
   @@index([agentKey, status])
   @@index([triggeredByUserId, createdAt])
   @@index([workspaceId, createdAt])
@@ -862,23 +866,28 @@ enum OpportunityStatus {
  * An idea worth posting about, found by the Opportunities agent. Deduped per brand.
  */
 model Opportunity {
-  id          String              @id @default(cuid())
-  workspaceId String
-  brandId     String
-  dedupeKey   String
-  title       String
-  summary     String
-  angle       String
-  channels    String[]
-  decision    OpportunityDecision
-  reason      String
-  score       Int // 0-100, for ordering
-  timing      String? // e.g. "before 15 Nov", "evergreen"
-  sources     Json                @default("[]") // [{ url, title }]
-  status      OpportunityStatus   @default(NEW)
-  agentRunId  String?
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @updatedAt
+  id             String              @id @default(cuid())
+  workspaceId    String
+  brandId        String
+  dedupeKey      String
+  title          String
+  summary        String
+  angle          String
+  channels       String[]
+  decision       OpportunityDecision
+  reason         String
+  score          Int // 0-100, for ordering
+  timing         String? // e.g. "before 15 Nov", "evergreen"
+  sources        Json                @default("[]") // [{ url, title }]
+  status         OpportunityStatus   @default(NEW)
+  agentRunId     String?
+  // Catalogue products the idea is about (Scout in a workflow, Phase 3), with Scout's reason per product
+  // ({ [productId]: reason }); the same id array convention as ContentItem.productIds.
+  productIds     String[]            @default([])
+  productReasons Json?
+  workflowId     String? // the content workflow that found it
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
 
   brand Brand         @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   items ContentItem[]
@@ -916,39 +925,81 @@ enum ContentStatus {
   CANCELLED
 }
 
+enum ContentWorkflowStatus {
+  DRAFT
+  SCOUTING
+  REVIEW_IDEAS
+  PLANNING
+  REVIEW_PLAN
+  RUNNING
+  DONE
+  NEEDS_ATTENTION
+  FAILED
+  CANCELLED
+}
+
+/**
+ * One "create posts with agents" request: what a person chose (destinations, products, ideas, campaign) and its
+ * idempotency key. The stages stay AgentRuns (input.workflowId, AgentRun.workflowId) and status-driven sweeps; the
+ * stored status is written on start, cancel and failure, and workflowStatus derives the rest from runs and posts.
+ * input: the validated request (server/content/workflow.ts), the truth the agents read. chargeIds: its paid stages.
+ */
+model ContentWorkflow {
+  id              String                @id @default(cuid())
+  workspaceId     String
+  brandId         String
+  requestId       String
+  source          String
+  status          ContentWorkflowStatus @default(PLANNING)
+  input           Json
+  chargeIds       String[]              @default([])
+  createdByUserId String?
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([brandId, requestId])
+  @@index([brandId, createdAt])
+}
+
 /**
  * One planned post for one channel and date. Brief + versions + quality checks hang off it.
  */
 model ContentItem {
-  id            String         @id @default(cuid())
-  workspaceId   String
-  brandId       String
-  opportunityId String?
-  title         String
-  channel       ContentChannel
-  status        ContentStatus  @default(PLANNED)
-  scheduledFor  DateTime?
-  pillar        String?
-  brief         Json? // { goal, audience, keyMessage, products, cta, references, notes }
+  id               String         @id @default(cuid())
+  workspaceId      String
+  brandId          String
+  opportunityId    String?
+  title            String
+  channel          ContentChannel
+  status           ContentStatus  @default(PLANNED)
+  scheduledFor     DateTime?
+  pillar           String?
+  brief            Json? // { goal, audience, keyMessage, products, cta, references, notes }
   // Catalogue Product ids the post features (Brief writer / app). ponytail: an id array, not a join table; a deleted
   // MANUAL product leaves a dangling id that the checks read as "no longer in the catalogue". Join table if posts
   // need querying by product at scale.
-  productIds    String[]       @default([])
+  productIds       String[]       @default([])
   // Campaign the post was planned for (Planner, createPost); never changed after. ponytail: not in the version body
   // because nothing changes it after planning; move it there like productIds when an "unlink" control comes.
-  campaignId    String?
-  studio        Boolean        @default(false) // made in the mobile Reels studio: the writing agents leave it alone
-  postUrl       String? // posted by hand after a download; the link the person pasted back
-  byHand        Boolean        @default(false) // a story the person posts themselves from a downloaded package
+  campaignId       String?
+  studio           Boolean        @default(false) // made in the mobile Reels studio: the writing agents leave it alone
+  postUrl          String? // posted by hand after a download; the link the person pasted back
+  byHand           Boolean        @default(false) // a story the person posts themselves from a downloaded package
   // Who the post is for: whoever made it (or started the Planner run), else unassigned; the team can reassign it.
-  ownerId       String?
+  ownerId          String?
   // A Pinterest Pin's planned board: set ahead of scheduling (the schedule step starts on it), both or neither. The name
   // is kept so cards don't call Pinterest; it is as the person's board list named it when they picked it and goes stale
   // if the board is renamed. Scheduling on another board moves the plan to that board.
   plannedBoardId   String?
   plannedBoardName String?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  // The content workflow that planned it (null = planned outside one), and the account it is planned to go out on
+  // (a workflow target; null = by hand, draft only or chosen at schedule time). Plain ids, like plannedBoardId.
+  workflowId       String?
+  connectionId     String?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
   brand        Brand                @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
   opportunity  Opportunity?         @relation(fields: [opportunityId], references: [id], onDelete: SetNull)
@@ -965,6 +1016,7 @@ model ContentItem {
   @@index([brandId, scheduledFor])
   @@index([brandId, updatedAt])
   @@index([campaignId])
+  @@index([workflowId])
   // ponytail: Phase 0's indexes were added with a plain CREATE INDEX, which blocks writes to the table while it builds;
   // fine at today's size. Past ~1M rows, add such an index with CREATE INDEX CONCURRENTLY in a migration of its own.
   @@index([brandId, ownerId])
