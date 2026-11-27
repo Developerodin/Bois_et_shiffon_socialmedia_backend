@@ -9,6 +9,7 @@ import { rateTable, type Converted } from "@/server/data/fx";
 import type { AdSettings } from "@/server/data/meta-ads-sync";
 import { addDays, dayDate, dayOf, utcToday, type SyncOutcome } from "@/server/data/sources";
 import { adAlertRecipients, notifyAdAlert } from "@/server/notifications/ads";
+import { recordEpisode } from "@/server/alerts/episode";
 import { cleanTitle } from "@/server/text";
 
 /**
@@ -367,39 +368,31 @@ export async function runAdAlerts(payload: unknown) {
 async function recordAlert(scope: { workspaceId: string; brandId: string }, c: Candidate, recipients: readonly string[]) {
   const month = c.kind === "OVER_PACE";
   await prisma.$transaction(async (tx) => {
-    const [found] = await tx.$queryRaw<{ id: string }[]>`
-      SELECT id FROM "AdAlert"
-      WHERE "workspaceId" = ${scope.workspaceId} AND "brandId" = ${scope.brandId} AND "subjectKey" = ${c.subjectKey}
-        AND (${month} OR ("lastDay" >= ${dayDate(addDays(c.day, -1))}::date AND "firstDay" <= ${dayDate(addDays(c.day, 1))}::date))
-      ORDER BY "lastDay" DESC LIMIT 1
-      FOR UPDATE`;
-    if (found) {
-      // Figures follow the latest day only: a rerun of an earlier day doesn't overwrite newer ones.
-      await tx.$executeRaw`
-        UPDATE "AdAlert" SET
-          "values" = CASE WHEN ${dayDate(c.day)}::date >= "lastDay" THEN ${JSON.stringify(c.values)}::jsonb ELSE "values" END,
-          "lastDay" = GREATEST("lastDay", ${dayDate(c.day)}::date),
-          "updatedAt" = now()
-        WHERE id = ${found.id}`;
-      return;
-    }
-    const [inserted] = await tx.adAlert.createManyAndReturn({
-      data: [{
-        ...scope,
-        kind: c.kind,
-        accountId: c.accountId,
-        campaignId: c.campaignId ?? null,
-        campaignName: c.campaignName ?? null,
-        currency: c.currency,
-        firstDay: dayDate(c.day),
-        lastDay: dayDate(c.day),
-        values: c.values,
-        subjectKey: c.subjectKey,
-        dedupeKey: month ? c.subjectKey : `${c.subjectKey}:${c.day}`,
-      }],
-      skipDuplicates: true,
-      select: { id: true },
+    const { insertedId } = await recordEpisode(tx, {
+      table: "AdAlert",
+      scope,
+      subjectKey: c.subjectKey,
+      day: c.day,
+      values: c.values,
+      join: month ? "subjectKey" : { before: 1, after: 1 },
+      insert: async (t) => (await t.adAlert.createManyAndReturn({
+        data: [{
+          ...scope,
+          kind: c.kind,
+          accountId: c.accountId,
+          campaignId: c.campaignId ?? null,
+          campaignName: c.campaignName ?? null,
+          currency: c.currency,
+          firstDay: dayDate(c.day),
+          lastDay: dayDate(c.day),
+          values: c.values,
+          subjectKey: c.subjectKey,
+          dedupeKey: month ? c.subjectKey : `${c.subjectKey}:${c.day}`,
+        }],
+        skipDuplicates: true,
+        select: { id: true },
+      }))[0],
     });
-    if (inserted) await notifyAdAlert(tx, { id: inserted.id, ...scope }, recipients);
+    if (insertedId) await notifyAdAlert(tx, { id: insertedId, ...scope }, recipients);
   });
 }
