@@ -32,7 +32,7 @@ const act = (id: string, version: number, action: string, extra = {}) => quoteAc
 const stage = async (id: string) => (await getDeal(s, id)).stage;
 
 describe("deals", () => {
-  it("a value needs a currency; won and lost need a reason; reopening clears it", async () => {
+  it("a value needs a currency; lost needs a reason, a win by hand doesn't; reopening clears it", async () => {
     await expect(createDeal(s, DealCreate.parse({ title: "x", value: "10" }))).rejects.toMatchObject({ status: 400, code: "crm.currency" });
     const d = await deal();
     await expect(updateDeal(s, d.id, { updatedAt: d.updatedAt, stage: "LOST" })).rejects.toMatchObject({ status: 400, code: "crm.closeReason" });
@@ -45,6 +45,10 @@ describe("deals", () => {
     // Two edits of the same read at once: one wins, the other is a 409 (never a silent overwrite).
     const both = await Promise.allSettled([updateDeal(s, d.id, { updatedAt: back.updatedAt, title: "one" }), updateDeal(s, d.id, { updatedAt: back.updatedAt, title: "two" })]);
     expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const w = await deal("Showroom chairs");
+    const won = await updateDeal(s, w.id, { updatedAt: w.updatedAt, stage: "WON", closedNote: "Signed in the showroom" });
+    expect(won).toMatchObject({ stage: "WON", closedReason: null, closedNote: "Signed in the showroom" });
+    expect(won.closedAt).not.toBeNull();
     await expect(getDeal(other, d.id)).rejects.toMatchObject({ status: 404 });
   });
 

@@ -141,7 +141,7 @@ export async function createDeal(s: CrmScope, input: z.infer<typeof DealCreate>)
   return getDeal(s, d.id);
 }
 
-/** Field edits and stage moves on the `updatedAt` read. Won/Lost need a reason; reopening clears it. */
+/** Field edits and stage moves on the `updatedAt` read. Lost needs a reason (the reasons are why a deal was lost; a win by hand has none); reopening clears it. */
 export async function updateDeal(s: CrmScope, dealId: string, patch: z.infer<typeof DealPatch>, now = new Date()) {
   const { updatedAt, stage, closedReason, closedNote, ...rest } = patch;
   if (rest.conversationId && !s.perms.has("inbox.read")) throw invalid("Linking a conversation needs access to customer messages", "crm.needsInbox");
@@ -156,7 +156,7 @@ export async function updateDeal(s: CrmScope, dealId: string, patch: z.infer<typ
     checkMoney(value, currency);
     const moving = stage !== undefined && stage !== d.stage;
     const closing = moving && (stage === "WON" || stage === "LOST");
-    if (closing && !closedReason) throw invalid("Say why the deal was won or lost", "crm.closeReason");
+    if (stage === "LOST" && moving && !closedReason) throw invalid("Say why the deal was lost", "crm.closeReason");
     const reopening = moving && !closing;
     const blank = (v: string | null | undefined) => (v === undefined ? undefined : v || null);
     const { count } = await tx.deal.updateMany({
@@ -165,7 +165,7 @@ export async function updateDeal(s: CrmScope, dealId: string, patch: z.infer<typ
         title: rest.title, customerId: rest.customerId, companyId: rest.companyId, conversationId: rest.conversationId, value: rest.value, currency: rest.currency, ownerId: rest.ownerId,
         nextAction: blank(rest.nextAction), nextActionDue: dayOf(rest.nextActionDue),
         ...(moving ? { stage, stageChangedAt: now } : {}),
-        ...(closing ? { closedAt: now, closedReason, closedNote: closedNote || null } : {}),
+        ...(closing ? { closedAt: now, closedReason: closedReason ?? null, closedNote: closedNote || null } : {}),
         ...(reopening ? { closedAt: null, closedReason: null, closedNote: null } : {}),
         ...(!moving && closedNote !== undefined && (d.stage === "WON" || d.stage === "LOST") ? { closedNote: closedNote || null } : {}),
       },
