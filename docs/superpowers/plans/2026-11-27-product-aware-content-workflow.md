@@ -303,3 +303,18 @@ Total: roughly 71–90 hours. The browser checks the brief asks for on /social a
 - `C:\Users\INTEL\Desktop\Social Media Agent\apps\server\app\api\v1\workspaces\[workspaceId]\brands\[brandId]\agents\[agentKey]\runs\route.ts`
 - `C:\Users\INTEL\Desktop\Social Media Agent\apps\server\prisma\schema.prisma`
 - `C:\Users\INTEL\Desktop\Social Media Agent\apps\web\components\workspace\content-panels.tsx`
+
+## Owner answers (2026-11-27, ~17:00 IST)
+
+1. **Pricing:** flat, as planned: 5 credits for the Planner (+5 when Scout runs), whatever the post count.
+2. **Chain from every Planner start, with a person's check at each step:** the Planner always starts the full chain
+   (Phase 1 default), but the workflow pauses for a person where the plan already allows it: review Scout's ideas
+   (REVIEW_IDEAS), review the planned posts (REVIEW_PLAN), and every post still ends at human approval. To confirm with
+   the owner: whether Brief → Creator → Quality should also pause between stages, or run through to approval.
+3. **Brand first:** posts are about the brand; a product is optional. When a post names a product, it must be one of the
+   brand's own catalogue products and is checked against it (identity, facts, URL).
+4. **Revision cap 2, then Needs attention:** the post shows the problem (the Quality findings), the suggested fix, and a
+   Rewrite action (a Creator run with the findings).
+5. **LinkedIn and X:** leave them out of agent planning for now (PLANNER_HAND_CHANNELS stays off).
+6. **Disconnected channel:** a post planned for a channel that is disconnected stays a draft. If its date is in the
+   future: a notification plus an attention badge on that channel's row on /social. If its date has passed: nothing.
