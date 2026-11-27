@@ -2243,7 +2243,7 @@ Production builds (`next build` in clean worktrees `Desktop\sma-build\{server,we
 2. Turn the `crm` flag on for B&C; `npm run reset:shopify-orders -- <brandId>` for B&C.
 3. Env: `PLANNER_HAND_CHANNELS` stays off (owner: leave LinkedIn and X out of agent planning for now).
 
-**In flight when the session ended (not merged, not pushed):**
+**Agent drawer: merged and pushed at ~18:00 (web `4cc90f9`; drawer-a + drawer-b; tsc, 932 tests, production build and a six-drawer browser check passed). Below is kept for the record:**
 - Agent drawer redesign (owner brief: `C:\Users\INTEL\AppData\Local\Temp\claude\510d4fc7e483f2e2\cf5a7854-35c2-4d5b-a146-db5d9df2bbfb\scratchpad\briefs\agent-drawer-brief.md`
   — copy it into `docs/` on Monday; the scratchpad may be cleared). Two parallel branches in web:
   `drawer-a` (`Desktop\sma-drawer-a\web`: shared drawer with Overview/Outputs/Activity tabs, Planner, Brief writer,
