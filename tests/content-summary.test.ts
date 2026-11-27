@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = { id: string; workspaceId: string; brandId: string; channel: string; status: string; title: string; scheduledFor: Date | null; createdAt: Date };
 type Where = { workspaceId: string; brandId: string; channel?: string; status: { in: string[] }; scheduledFor?: { gte: Date } };
-const db = vi.hoisted(() => ({ rows: [] as Row[], asked: [] as string[], contentItem: { groupBy: vi.fn(), findFirst: vi.fn() } }));
+const db = vi.hoisted(() => ({ rows: [] as Row[], asked: [] as string[], contentItem: { groupBy: vi.fn(), findMany: vi.fn() } }));
 
 vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/api/brand-route", () => ({
@@ -31,16 +31,19 @@ const of = (a: Answer, channel: string) => a.channels.find((c) => c.channel === 
 
 beforeEach(() => {
   db.rows = [];
+  db.contentItem.findMany.mockClear();
   db.asked = [];
   db.contentItem.groupBy.mockImplementation(async (a: { where: Where }) => {
     const counts = new Map<string, number>();
     for (const r of db.rows.filter((r) => matches(r, a.where))) counts.set(r.channel, (counts.get(r.channel) ?? 0) + 1);
     return [...counts].map(([channel, c]) => ({ channel, _count: { _all: c } }));
   });
-  db.contentItem.findFirst.mockImplementation(async (a: { where: Where }) => {
-    const hit = db.rows.filter((r) => matches(r, a.where)).sort((x, y) => x.scheduledFor!.getTime() - y.scheduledFor!.getTime() || x.createdAt.getTime() - y.createdAt.getTime())[0];
-    return hit ? { id: hit.id, title: hit.title, scheduledFor: hit.scheduledFor, status: hit.status } : null;
-  });
+  db.contentItem.findMany.mockImplementation(async (a: { where: Where }) =>
+    db.rows
+      .filter((r) => matches(r, a.where))
+      .sort((x, y) => x.scheduledFor!.getTime() - y.scheduledFor!.getTime() || x.createdAt.getTime() - y.createdAt.getTime())
+      .map((r) => ({ id: r.id, title: r.title, scheduledFor: r.scheduledFor, status: r.status, channel: r.channel })),
+  );
 });
 
 describe("GET content/summary", () => {
@@ -49,6 +52,16 @@ describe("GET content/summary", () => {
     expect(db.asked).toEqual(["brand.read"]);
     expect(a.channels.map((c) => c.channel)).toEqual(["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "INSTAGRAM_REEL", "INSTAGRAM_STORY", "FACEBOOK_POST", "PINTEREST_PIN", "THREADS_POST", "LINKEDIN_POST", "X_POST"]);
     for (const c of a.channels) expect(c).toMatchObject({ awaiting: 0, next: null });
+  });
+
+  it("asks the database for the brand's awaiting posts, and its open, unblocked posts dated from now", async () => {
+    await call();
+    const g = db.contentItem.groupBy.mock.calls.at(-1)![0] as { where: Where };
+    expect(g.where).toEqual({ workspaceId: "w1", brandId: "b1", status: { in: ["AWAITING_APPROVAL"] } });
+    const f = db.contentItem.findMany.mock.calls.at(-1)![0] as { where: Where };
+    expect(f.where.status.in.sort()).toEqual(["APPROVED", "AWAITING_APPROVAL", "BRIEF_READY", "DRAFT_REVIEW", "PLANNED", "SCHEDULED"]);
+    expect(f.where).toMatchObject({ workspaceId: "w1", brandId: "b1" });
+    expect(Math.abs(f.where.scheduledFor!.gte.getTime() - Date.now())).toBeLessThan(5_000);
   });
 
   it("counts only posts awaiting approval, per channel and brand", async () => {
@@ -81,7 +94,8 @@ describe("GET content/summary", () => {
     const a: Answer = await call();
     expect(of(a, "INSTAGRAM_POST").next).toMatchObject({ title: "draft", status: "DRAFT_REVIEW" });
     expect(of(a, "FACEBOOK_POST").next).toMatchObject({ title: "facebook" });
-    // Each channel is its own read, scoped to the brand.
-    for (const c of db.contentItem.findFirst.mock.calls) expect((c[0] as { where: Where }).where).toMatchObject({ workspaceId: "w1", brandId: "b1" });
+    // One read, scoped to the brand.
+    expect(db.contentItem.findMany).toHaveBeenCalledTimes(1);
+    expect((db.contentItem.findMany.mock.calls[0][0] as { where: Where }).where).toMatchObject({ workspaceId: "w1", brandId: "b1" });
   });
 });

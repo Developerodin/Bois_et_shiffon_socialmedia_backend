@@ -12,8 +12,9 @@ const UPCOMING = OPEN_STATUSES.filter((s) => s !== "BLOCKED");
  * post (dated from now, open, not blocked), with its status so a dated draft reads differently from a scheduled post.
  * Every channel is listed, empty ones with 0 and null. Read straight from the table, not the calendar's 200-row
  * window, so many undated posts can't hide the dated ones.
- * ponytail: one groupBy plus one findFirst per channel (9) on the (brandId, scheduledFor) index; no channel index, so
- * each walks the brand's future dated posts in date order. Fine at hundreds; past that add (brandId, channel, scheduledFor).
+ * ponytail: two reads: a groupBy, and the brand's open dated posts from now on (five columns) on the
+ * (brandId, scheduledFor) index, the first per channel kept here. Fine at hundreds of future posts; past a few thousand
+ * use one `DISTINCT ON (channel)` query with a (brandId, channel, scheduledFor) index.
  */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
@@ -22,20 +23,19 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
     const brand = { workspaceId: scope.workspaceId, brandId: scope.brandId };
     const now = new Date();
     const channels = Object.values(ContentChannel);
-    const [awaiting, next] = await Promise.all([
+    const [awaiting, upcoming] = await Promise.all([
       prisma.contentItem.groupBy({ by: ["channel"], where: { ...brand, status: { in: [...STATUS_GROUPS.awaiting] } }, _count: { _all: true } }),
-      Promise.all(
-        channels.map((channel) =>
-          prisma.contentItem.findFirst({
-            where: { ...brand, channel, status: { in: [...UPCOMING] }, scheduledFor: { gte: now } },
-            orderBy: [{ scheduledFor: "asc" }, { createdAt: "asc" }],
-            select: { id: true, title: true, scheduledFor: true, status: true },
-          }),
-        ),
-      ),
+      prisma.contentItem.findMany({
+        where: { ...brand, status: { in: [...UPCOMING] }, scheduledFor: { gte: now } },
+        orderBy: [{ scheduledFor: "asc" }, { createdAt: "asc" }],
+        select: { id: true, title: true, scheduledFor: true, status: true, channel: true },
+      }),
     ]);
     const counts = new Map(awaiting.map((g) => [g.channel, g._count._all]));
-    return Response.json({ channels: channels.map((channel, n) => ({ channel, awaiting: counts.get(channel) ?? 0, next: next[n] })) });
+    // Sorted by date: the first row seen per channel is its next post.
+    const first = new Map<string, { id: string; title: string; scheduledFor: Date | null; status: string }>();
+    for (const { channel, ...post } of upcoming) if (!first.has(channel)) first.set(channel, post);
+    return Response.json({ channels: channels.map((channel) => ({ channel, awaiting: counts.get(channel) ?? 0, next: first.get(channel) ?? null })) });
   } catch (error) {
     return fromAccessError(error);
   }
