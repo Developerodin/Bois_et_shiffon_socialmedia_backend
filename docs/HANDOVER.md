@@ -1862,7 +1862,7 @@ alerts reach the bell only in a workspace with tasks on. The digest and the chat
 Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (shared sync only) on `seo-depth`.
 
 - **Migrations to apply** (none applied to the dev DB yet, in order): `20261126150000_search_query_day`,
-  `20261126150100_site_crawl`. Check each keeps `SearchDay`'s and `SearchQueryDay`'s INCLUDE indexes.
+  `20261126150100_site_crawl`, `20261126150200_seo_alert`. Check each keeps `SearchDay`'s and `SearchQueryDay`'s INCLUDE indexes.
 - **Search Console queries** (Task 1): each day also reads the top 500 queries and top 500 query-page pairs into
   `SearchQueryDay` (400-day retention by housekeeping). Google's limits, read from its docs on 2026-11-26, are in the
   header of server/data/search-console.ts. Existing sources get queries from their next daily run; no query backfill.
@@ -1890,6 +1890,15 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
   A lost chain (no write for a day, not paused) is re-queued by the next weekly start.
   Live check still to do (plan's Verification): run the SEO agent on B&C, watch the rows fill and the bucket stay
   ≤ 1,000 from the crawl, then spot-check three "broken" targets by hand.
+- **Declining pages** (Task 5, job `seo.declines`, server/seo/declines.ts; table `SeoAlert`): queued by the
+  SEARCH_CONSOLE runner's afterRun after each complete daily or manual run; compares the 28 Google days ending 3 days
+  before syncedThrough with the 28 before. CLICKS_DOWN (≥ 30 before, ≥ 40 % and ≥ 15 lost), POSITION_DOWN (≥ 200
+  impressions both windows, top 20 before, ≥ 3 places worse), SITE_DOWN instead of page alerts when the site fell
+  ≥ 40 % too; pages missing on days with 500 page rows count at that day's lowest clicks; ≤ 20 a run; needs 56 read
+  days. Shown on the Search tab ("Pages losing search traffic", with "Make a task" behind the `tasks` flag), the URL
+  page's alerts, the digest's seo section (count and up to 3 paths, no query text) and the chat's
+  `searchPerformance.decliningPages`. `GET search/declines` (analytics.read). The ads alerts now share the episode
+  step (server/alerts/episode.ts), behaviour unchanged.
 - Waits on Search Console verification for B&C: everything above but the link check ships tested against fixtures and
   stays empty until then. Web components weren't browser-checked on the branch (no dev server or build was run).
 

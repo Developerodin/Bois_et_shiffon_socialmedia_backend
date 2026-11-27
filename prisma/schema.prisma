@@ -244,6 +244,7 @@ model Brand {
   searchDays      SearchDay[]
   searchQueryDays SearchQueryDay[]
   siteCrawls      SiteCrawl[]
+  seoAlerts       SeoAlert[]
   adDays          AdDay[]
   adBudgets       AdBudget[]
   adAlerts        AdAlert[]
@@ -1961,6 +1962,44 @@ model SiteCrawlUrl {
 
   @@unique([crawlId, url])
   @@index([crawlId, checkedAt, kind, carryCount])
+}
+
+enum SeoAlertKind {
+  CLICKS_DOWN
+  POSITION_DOWN
+  SITE_DOWN
+}
+
+/// One episode of a page (or the whole site) losing search traffic (server/seo/declines.ts, job seo.declines after each
+/// complete daily Search Console sync). Days are Google's (Pacific); firstDay/lastDay are the recent window's last day
+/// when the rule held. ~a few rows per brand per month.
+model SeoAlert {
+  id          String       @id @default(cuid())
+  workspaceId String
+  brandId     String
+  kind        SeoAlertKind
+  siteUrl     String
+  /// the page as Google reports it; "" for SITE_DOWN
+  page        String
+  /// urlKey(page); "" for SITE_DOWN
+  pageKey     String
+  /// the evaluation run that raised it (`seo-declines:<sourceId>:<day>`): the bell's grouped notice counts by it
+  runKey      String
+  firstDay    DateTime     @db.Date
+  lastDay     DateTime     @db.Date
+  values      Json
+  subjectKey  String
+  dedupeKey   String       @unique
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  brand Brand @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@index([brandId, subjectKey, lastDay])
+  @@index([brandId, lastDay])
+  @@index([brandId, createdAt])
+  @@index([brandId, pageKey])
+  @@index([brandId, runKey])
 }
 
 /// GOOGLE is added in its own migration (20261126120000): Postgres can't use a value added by ALTER TYPE … ADD VALUE

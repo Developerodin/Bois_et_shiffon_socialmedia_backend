@@ -4,6 +4,7 @@ import { prisma } from "@/server/db/prisma";
 import { metrics, chosenSite, searchQueries } from "@/server/data/search-read";
 import { addDays, liveSources, previousRange, zoneToday } from "@/server/data/sources";
 import { taskViewer, visibleTaskSql } from "@/server/tasks/access";
+import { pageSeoAlerts } from "@/server/seo/declines";
 
 /**
  * One URL's SEO story for the Performance page's URL view (docs/superpowers/plans/2026-11-26-seo-depth.md, Task 3):
@@ -186,8 +187,10 @@ export async function urlHistory(scope: Scope, u: string, range: DateRange): Pro
   const parsed = new URL(u);
   const key = urlKey(u)!;
   const path = urlPath(u)!;
-  const [search, findings, tasks] = await Promise.all([searchSection(scope, u, range), findingsSection(scope, key, path), tasksSection(scope, u)]);
+  const [search, findings, tasks, alerts] = await Promise.all([
+    searchSection(scope, u, range), findingsSection(scope, key, path), tasksSection(scope, u), pageSeoAlerts(scope, key),
+  ]);
   const articles = await articlesSection(scope, path, (tasks ?? []).map((t) => t.id));
   // Rebuilt from the parsed URL: https, its host and the key's path, never the caller's text.
-  return { url: `https://${parsed.host}${path}`, key, range, search, findings, tasks, articles };
+  return { url: `https://${parsed.host}${path}`, key, range, search, findings, tasks, articles, alerts };
 }

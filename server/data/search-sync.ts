@@ -7,6 +7,7 @@ import { backfillPlan, dailyWindow, enqueueBackfill, registerSync, stopReason, z
 import type { SyncStop } from "@/server/data/sync-stop";
 import { accessToken } from "@/server/services/connections";
 import { ReconnectNeeded } from "@/server/services/reconnect-needed";
+import { enqueueSeoDeclines } from "@/server/seo/declines";
 
 /**
  * Search Console's side of the data sync (docs/superpowers/plans/2026-11-23-phase-2-data.md, Task 2): the SEARCH_CONSOLE
@@ -94,7 +95,7 @@ registerSync("SEARCH_CONSOLE", async (ctx) => {
   // After the write: a failed stop throws here (retried) with the finished days already kept.
   const reason = stopReason(stop);
   return { count, complete: !stop && complete.length === days.length, reason, ...(ctx.window ? {} : { window: { from, to } }) };
-}, { halveOnCap: true });
+}, { halveOnCap: true, afterRun: enqueueSeoDeclines });
 
 // ---- site picker -------------------------------------------------------------------------------------------------
 

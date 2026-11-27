@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // The post and Search Console tools over stubbed readers: access, ranking, caps, cleaning and notes. The readers'
 // SQL is checked in tests/db/post-metrics.db.test.ts and tests/db/search-day.db.test.ts.
 const perms = vi.hoisted(() => ({ set: new Set(["analytics.read"]) }));
-const data = vi.hoisted(() => ({ postsWithMetrics: vi.fn(), searchSummary: vi.fn(), searchPages: vi.fn(), searchQueries: vi.fn(), liveSources: vi.fn() }));
+const data = vi.hoisted(() => ({ postsWithMetrics: vi.fn(), searchSummary: vi.fn(), searchPages: vi.fn(), searchQueries: vi.fn(), liveSources: vi.fn(), listSeoAlerts: vi.fn() }));
 
 vi.mock("@/server/db/prisma", () => ({ prisma: {} }));
 vi.mock("@/server/auth/permissions", () => ({ effectivePermissions: vi.fn(async () => perms.set) }));
@@ -12,6 +12,7 @@ vi.mock("@/server/services/context-docs", () => ({ CONTEXT_DOC_KINDS: [{ kind: "
 vi.mock("@/server/data/sources", async (orig) => ({ ...(await orig<object>()), liveSources: data.liveSources, brandTimeZone: async () => "Europe/Paris" }));
 vi.mock("@/server/data/post-metrics-read", async (orig) => ({ ...(await orig<object>()), postsWithMetrics: data.postsWithMetrics }));
 vi.mock("@/server/data/search-read", async (orig) => ({ ...(await orig<object>()), searchSummary: data.searchSummary, searchPages: data.searchPages, searchQueries: data.searchQueries }));
+vi.mock("@/server/seo/declines", () => ({ listSeoAlerts: data.listSeoAlerts }));
 
 import { chatTools } from "@/server/chat/tools";
 
@@ -39,6 +40,7 @@ beforeEach(() => {
   data.searchSummary.mockResolvedValue({ hasSite: true, daysIn: "America/Los_Angeles", range, previousRange: range, totals: metric, previous: metric, days: [{ day: "2026-11-01", ...metric }] });
   data.searchPages.mockResolvedValue({ pages: [], nextCursor: null });
   data.searchQueries.mockResolvedValue({ queries: [], nextCursor: null, coverage: { clicks: null, impressions: null }, since: null });
+  data.listSeoAlerts.mockResolvedValue({ alerts: [], more: 0 });
 });
 
 describe("access", () => {
@@ -140,6 +142,23 @@ describe("searchPerformance", () => {
     expect(parse(t.searchPerformance, { pages: 26 })).toBe(false);
     expect(parse(t.searchPerformance, { pageSort: "position" })).toBe(false);
     expect((await run(t.searchPerformance, { from: "2026-08-01", to: "2026-11-30" })).error).toContain("at most 90 days");
+  });
+
+  it("gives the open declining pages by cleaned path and figures, never a host", async () => {
+    const flip = String.fromCharCode(0x202e);
+    data.listSeoAlerts.mockResolvedValue({
+      alerts: [
+        { id: "a1", kind: "CLICKS_DOWN", url: "https://x.test/a", path: `/a${flip}\nb`, firstDay: "2026-11-10", lastDay: "2026-11-20", open: true, text: "t", values: { now: "10", before: "40" } },
+        { id: "a2", kind: "SITE_DOWN", url: null, path: null, firstDay: "2026-11-12", lastDay: "2026-11-20", open: true, text: "t", values: { now: "600", before: "1000" } },
+      ],
+      more: 0,
+    });
+    const out = await run(chatTools(scope).searchPerformance, range);
+    expect(data.listSeoAlerts).toHaveBeenCalledWith(scope, { open: true }, 10);
+    const rows = (out.decliningPages as Rows).rows;
+    expect(String(rows[0]![0])).not.toMatch(new RegExp(`[\n${flip}]`));
+    expect(rows[0]!.slice(1)).toEqual(["CLICKS_DOWN", "10", "40", "2026-11-10"]);
+    expect(rows[1]).toEqual(["(whole site)", "SITE_DOWN", "600", "1000", "2026-11-12"]);
   });
 
   it("gives the top queries cleaned, with their coverage, the day they start and the note on hidden queries", async () => {

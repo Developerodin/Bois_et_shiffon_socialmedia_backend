@@ -24,9 +24,13 @@ function sectionLines(s: DigestSection): string[] {
     case "tasks":
       return [`Tasks: ${n(s.done)} done, ${n(s.open)} open, ${n(s.overdue)} overdue`, ...s.overdueTasks.map((t) => `  - overdue: ${t.title}`)];
     case "seo":
-      return s.data
-        ? [`Search (${s.data.range.from} to ${s.data.range.to}): ${n(s.data.totals.clicks)} clicks, ${n(s.data.totals.impressions)} impressions, CTR ${pct(s.data.totals.ctr)}`]
-        : ["Search: no data yet"];
+      return [
+        s.data
+          ? `Search (${s.data.range.from} to ${s.data.range.to}): ${n(s.data.totals.clicks)} clicks, ${n(s.data.totals.impressions)} impressions, CTR ${pct(s.data.totals.ctr)}`
+          : "Search: no data yet",
+        // Paths were cleaned when the digest was built (one line, no host or query text).
+        ...(s.declines?.count ? [`  - losing search traffic: ${n(s.declines.count)}${s.declines.pages.length ? ` (${s.declines.pages.join(", ")})` : ""}`] : []),
+      ];
     case "posts":
       return [s.published ? "Top posts:" : "Top posts: none published",...s.top.map((p) => `  - ${p.title ?? "Untitled"} (${p.channel}): ${p.reach === null ? "reach not read yet" : `${n(p.reach)} reach`}`)];
     case "sales":

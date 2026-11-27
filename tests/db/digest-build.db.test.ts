@@ -158,3 +158,41 @@ describe("ads alerts in the digest", () => {
     await prisma.brand.update({ where: { id: quiet }, data: { status: "ARCHIVED" } });
   });
 });
+
+describe("declining pages in the digest", () => {
+  const week23 = sweepAt("2026-11-16");
+  const week30 = sweepAt("2026-11-23");
+  let seq = 0;
+  const alert = (pageKey: string, createdAt: string) =>
+    prisma.seoAlert.create({
+      data: {
+        workspaceId: ws, brandId: brand, kind: pageKey ? "CLICKS_DOWN" : "SITE_DOWN", siteUrl: "sc-domain:b.test", page: pageKey ? `https://${pageKey}` : "", pageKey,
+        runKey: "r", firstDay: new Date("2026-11-17"), lastDay: new Date("2026-11-17"), values: { now: "10", before: "40", to: "2026-11-17" },
+        subjectKey: `s${++seq}`, dedupeKey: `s${seq}`, createdAt: new Date(createdAt),
+      },
+    });
+  const seoOf = (body: Awaited<ReturnType<typeof buildDigest>>) => body?.brands[0]?.sections.find((s) => s.kind === "seo");
+
+  beforeEach(async () => {
+    clearSectionMemo();
+    await prisma.seoAlert.deleteMany({});
+  });
+
+  it("counts the alerts raised in its week, each in one digest, with up to 3 cleaned paths and no host", async () => {
+    for (const p of ["b.test/a", "b.test/b", "b.test/c", "b.test/d"]) await alert(p, "2026-11-20T06:00:00Z");
+    await alert("", "2026-11-21T06:00:00Z");
+    await alert("b.test/late", "2026-11-23T09:00:00Z");
+    const s = seoOf(await buildDigest(user.admin!, ws, NOW, week23));
+    expect(s?.kind === "seo" && s.declines?.count).toBe(5);
+    expect(s?.kind === "seo" && s.declines?.pages).toHaveLength(3);
+    expect(s?.kind === "seo" && s.declines?.pages.every((p) => p.startsWith("/b") || p.startsWith("/a") || p.startsWith("/c") || p.startsWith("/d"))).toBe(true);
+    clearSectionMemo();
+    const next = seoOf(await buildDigest(user.admin!, ws, NOW, week30));
+    expect(next?.kind === "seo" && next.declines).toEqual({ count: 1, pages: ["/late"] });
+  });
+
+  it("a reader without analytics.read gets no seo section", async () => {
+    await alert("b.test/a", "2026-11-20T06:00:00Z");
+    expect(seoOf(await buildDigest(user.lead!, ws, NOW, week23))).toBeUndefined();
+  });
+});

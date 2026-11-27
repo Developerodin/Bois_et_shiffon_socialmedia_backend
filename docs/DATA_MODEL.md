@@ -468,3 +468,12 @@ Additive migrations, from `20261126150000` on (docs/superpowers/plans/2026-11-26
   chain, loop, skipped, unknown; recheck = a first 5xx), `carryCount` and `sources` (pages linking here, up to 5),
   `depth` (clicks from home when following links). Unique `(crawlId, url)`, index `(crawlId, checkedAt, kind,
   carryCount)`. Both cascade (the brand, the cycle). At most 2,000 PAGE + 2,000 TARGET rows a cycle.
+- `SeoAlert` (`20261126150200_seo_alert`): one episode of a page (or the whole site) losing Google search traffic,
+  written by the `seo.declines` job (server/seo/declines.ts) after each complete daily Search Console sync. `kind`
+  (`SeoAlertKind`: CLICKS_DOWN, POSITION_DOWN, SITE_DOWN), `siteUrl`, `page` (Google's spelling, "" for SITE_DOWN),
+  `pageKey` (urlKey), `runKey` (`seo-declines:<sourceId>:<day>`, the run that raised it), `firstDay`/`lastDay`
+  (`@db.Date`, the recent window's last Google day), `values Json` (figures as strings), `subjectKey`
+  (`<kind>:<brandId>:<pageKey>` or `SITE_DOWN:<brandId>`) and a unique `dedupeKey` (subjectKey + first day). A day
+  within 7 days of an episode's lastDay moves it on (the shared episode step, server/alerts/episode.ts). Indexes
+  `(brandId, subjectKey, lastDay)`, `(brandId, lastDay)`, `(brandId, createdAt)` (the digest's week), `(brandId,
+  pageKey)` (the URL page) and `(brandId, runKey)`. Cascades with the brand. A few rows per brand per month.
