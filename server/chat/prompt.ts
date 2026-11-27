@@ -1,9 +1,9 @@
 import type { UIMessage } from "ai";
 import { z } from "zod";
-import { CHAT_PAGES, isChatPage } from "@/shared";
+import { CHAT_CHANNELS, CHAT_PAGES, channelsOf, isChatChannel, isChatPage } from "@/shared";
 
 /** System prompt for the CMO chat. Bump CHAT_PROMPT_VERSION when it changes (logged with usage). */
-export const CHAT_PROMPT_VERSION = "9";
+export const CHAT_PROMPT_VERSION = "10";
 
 export function chatSystemPrompt(brand: { name: string; website: string | null }) {
   return `You are the AI CMO (chief marketing officer) for the brand "${brand.name}"${brand.website ? ` (${brand.website})` : ""}.
@@ -21,7 +21,7 @@ How you work:
 
 Where things are in the app:
 - Posts and their dates are on the Content calendar. Open a post to edit it, approve it, then Publish now or Schedule; people with publishing rights do that.
-- New post makes an Instagram single photo or carousel only. Pinterest, Facebook and other channels come from the agents: Scout finds ideas, the team shortlists them on the Content calendar, Planner turns them into dated posts.
+- New post drafts an Instagram single photo or carousel from a product photo. Facebook, Pinterest, Threads, LinkedIn and X posts are written by the person in New post (LinkedIn and X are then posted by hand). Reels are made on the Reels page and stories in the phone app. The agents also plan posts: Scout finds ideas, the team shortlists them on the Content calendar, Planner turns them into dated posts.
 - Stories and reels are made in Create › Studio / Reels when enabled. LinkedIn and X are posted by hand.
 - Accounts are connected on the Connections page in the sidebar (Instagram, Facebook, Pinterest, Threads).
 - Call listPosts before saying what is planned, scheduled or published. If it returns no posts, say so; never invent posts. When it says there are more, say the rest are on the Content calendar.`;
@@ -32,7 +32,10 @@ Where things are in the app:
  * before the history, so changing it on every page switch would throw away OpenAI's cached prefix. The label comes
  * from the server's own map (CHAT_PAGES), never from client text; an unknown id gives no note.
  */
-export function pageNote(page: string | null | undefined) {
+export function pageNote(page: string | null | undefined, channel?: string | null) {
+  // A channel calendar (the Content calendar filtered to one channel or group): name it and the channels listPosts takes.
+  if (page === "calendar" && isChatChannel(channel))
+    return `The person is looking at the ${CHAT_CHANNELS[channel]} calendar in the app (listPosts channel values: ${channelsOf(channel).join(", ")}); when their question is open-ended, prefer answers about that channel.`;
   return isChatPage(page) ? `The person is looking at the ${CHAT_PAGES[page]} page in the app; when their question is open-ended, prefer answers about it.` : null;
 }
 
@@ -43,13 +46,22 @@ export const ChatBody = z.object({
   // The page the person has open (a CHAT_PAGES id). Anything else is dropped, never refused: an older or newer web
   // build must still be able to send a message.
   page: z.string().max(40).optional().catch(undefined),
+  // The channel calendar open (a CHAT_CHANNELS key), only with page "calendar"; dropped the same way.
+  channel: z.string().max(40).optional().catch(undefined),
 });
 
-/** The page a user message was sent from: set by the server (chat route) in its metadata and saved with it. */
-type PageMeta = { page?: string };
-export const withPage = <M extends object>(m: M, page: string | undefined): M => ({
+/**
+ * The page (and channel calendar) a user message was sent from: set by the server (chat route) in its metadata and
+ * saved with it. A channel is kept only on the calendar page.
+ */
+type PageMeta = { page?: string; channel?: string };
+export const withPage = <M extends object>(m: M, page: string | undefined, channel?: string): M => ({
   ...m,
-  metadata: { ...((m as { metadata?: object }).metadata ?? {}), page: isChatPage(page) ? page : undefined },
+  metadata: {
+    ...((m as { metadata?: object }).metadata ?? {}),
+    page: isChatPage(page) ? page : undefined,
+    channel: page === "calendar" && isChatChannel(channel) ? channel : undefined,
+  },
 });
 
 /**
@@ -58,7 +70,8 @@ export const withPage = <M extends object>(m: M, page: string | undefined): M =>
  */
 export function withPageNotes(history: UIMessage[]): UIMessage[] {
   return history.map((m) => {
-    const note = m.role === "user" ? pageNote((m.metadata as PageMeta | undefined)?.page) : null;
+    const meta = m.metadata as PageMeta | undefined;
+    const note = m.role === "user" ? pageNote(meta?.page, meta?.channel) : null;
     return note ? { ...m, parts: [{ type: "text", text: note }, ...m.parts] } : m;
   });
 }

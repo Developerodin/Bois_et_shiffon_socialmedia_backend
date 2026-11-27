@@ -154,6 +154,14 @@ describe("listPosts", () => {
     expect(out.posts).toHaveLength(2);
   });
 
+  it("names a pin's planned board, cleaned, and leaves board out when none is set", async () => {
+    db.contentItem.findMany.mockResolvedValue([{ ...post("Pin", "PLANNED", null), plannedBoardName: "Living\nroom" }, post("Other", "PLANNED", null)]);
+    const list = (await posts({})).posts as Record<string, unknown>[];
+    expect(db.contentItem.findMany.mock.calls[0][0].select).toMatchObject({ plannedBoardName: true });
+    expect(list[0].board).toBe("Living room");
+    expect(list[1]).not.toHaveProperty("board");
+  });
+
   it("returns an empty list for a brand with no posts", async () => {
     expect(await posts({})).toMatchObject({ posts: [], byStatus: {}, more: false });
   });
@@ -199,6 +207,25 @@ describe("pageNote", () => {
   });
 });
 
+describe("pageNote with a channel calendar", () => {
+  it("names the channel and the channels listPosts takes, only on the calendar page", () => {
+    expect(pageNote("calendar", "instagram")).toContain("Instagram calendar");
+    expect(pageNote("calendar", "instagram")).toContain("INSTAGRAM_POST, INSTAGRAM_CAROUSEL, INSTAGRAM_REEL, INSTAGRAM_STORY");
+    expect(pageNote("calendar", "meta")).toContain("FACEBOOK_POST, INSTAGRAM_POST");
+    expect(pageNote("calendar", "PINTEREST_PIN")).toContain("Pinterest calendar");
+    expect(pageNote("calendar", "PINTEREST_PIN")).toContain("values: PINTEREST_PIN)");
+  });
+
+  it("keeps today's note for no channel, an unknown channel or another page", () => {
+    const plain = pageNote("calendar");
+    expect(plain).toBe("The person is looking at the Content calendar page in the app; when their question is open-ended, prefer answers about it.");
+    expect(pageNote("calendar", "MYSPACE")).toBe(plain);
+    expect(pageNote("calendar", "__proto__")).toBe(plain);
+    expect(pageNote("products", "instagram")).toBe(pageNote("products"));
+    expect(pageNote("evil", "instagram")).toBeNull();
+  });
+});
+
 describe("chat request and page notes", () => {
   const user = (id: string, text: string, page?: string): UIMessage =>
     ({ id, role: "user", parts: [{ type: "text", text }], ...(page ? { metadata: { page } } : {}) }) as UIMessage;
@@ -221,6 +248,22 @@ describe("chat request and page notes", () => {
     expect(JSON.stringify(withPageNotes(history))).toBe(JSON.stringify(once));
   });
 
+  it("saves a known channel only with the calendar page, drops a bad one, and notes it every turn", () => {
+    const meta = (m: object) => (m as { metadata?: { page?: string; channel?: string } }).metadata;
+    expect(meta(withPage({ role: "user" }, "calendar", "instagram"))).toMatchObject({ page: "calendar", channel: "instagram" });
+    expect(meta(withPage({ role: "user" }, "products", "instagram"))?.channel).toBeUndefined();
+    expect(meta(withPage({ role: "user" }, "calendar", "MYSPACE"))?.channel).toBeUndefined();
+    expect(meta(withPage({ role: "user", metadata: { channel: "meta" } }, "calendar", undefined))?.channel).toBeUndefined();
+    const parsed = ChatBody.safeParse({ id: "thread-123", message: { role: "user", parts: [] }, page: "calendar", channel: "x".repeat(500) });
+    expect(parsed.success && parsed.data.channel).toBeUndefined();
+    expect(ChatBody.safeParse({ id: "thread-123", message: { role: "user", parts: [] }, page: "calendar", channel: "meta" }).data?.channel).toBe("meta");
+
+    const msg = { id: "1", role: "user", parts: [{ type: "text", text: "hi" }], metadata: { page: "calendar", channel: "LINKEDIN_POST" } } as UIMessage;
+    const noted = withPageNotes([msg]);
+    expect(noted[0].parts[0]).toEqual({ type: "text", text: pageNote("calendar", "LINKEDIN_POST") });
+    expect(JSON.stringify(withPageNotes([msg]))).toBe(JSON.stringify(noted));
+  });
+
   it("tells the model about the product tools and keeps product data out of web searches", () => {
     const prompt = chatSystemPrompt({ name: "Oak & Co", website: null });
     expect(prompt).toContain("catalogueSummary / findProducts");
@@ -229,7 +272,8 @@ describe("chat request and page notes", () => {
 
   it("knows where things are in the app and never invents posts (prompt version 8)", () => {
     const prompt = chatSystemPrompt({ name: "Oak & Co", website: null });
-    expect(CHAT_PROMPT_VERSION).toBe("9");
+    expect(CHAT_PROMPT_VERSION).toBe("10");
+    expect(prompt).toContain("Facebook, Pinterest, Threads, LinkedIn and X posts are written by the person in New post");
     for (const tool of ["adsSummary", "adCampaigns", "adBudgets", "revenuePerAdSpend", "postPerformance", "searchPerformance"]) expect(prompt).toContain(tool);
     expect(prompt).toContain("Never put sales, revenue, ad or performance figures into a web search");
     expect(prompt).toContain("campaign names, page URLs, alert text");

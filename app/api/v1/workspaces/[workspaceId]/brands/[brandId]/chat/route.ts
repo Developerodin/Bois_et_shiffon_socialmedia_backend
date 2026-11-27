@@ -79,7 +79,7 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
     const resent = stored.findIndex((m) => m.id === (body.data.message as { id?: unknown }).id);
     const previous = resent === -1 ? stored : stored.slice(0, resent);
     // The page it was sent from is saved on the message (server-set, whitelisted): see withPageNotes.
-    const messages = await validateUIMessages({ messages: [...previous, withPage(body.data.message, body.data.page)], tools });
+    const messages = await validateUIMessages({ messages: [...previous, withPage(body.data.message, body.data.page, body.data.channel)], tools });
 
     let tier: Tier, model: string;
     try {
