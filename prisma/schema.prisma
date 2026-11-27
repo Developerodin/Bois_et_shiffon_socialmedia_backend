@@ -213,46 +213,48 @@ model Brand {
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
-  workspace          Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  profile            BrandProfile?
-  members            BrandMember[]
-  agentRuns          AgentRun[]
-  agentEvents        AgentEvent[]
-  agentConfigs       BrandAgentConfig[]
-  contextDocs        BrandContextDoc[]
-  connections        IntegrationConnection[]
-  auditReports       AuditReport[]
-  chatThreads        ChatThread[]
-  opportunities      Opportunity[]
-  contentItems       ContentItem[]
-  learningNotes      LearningNote[]
-  competitors        Competitor[]
-  invitations        Invitation[]
-  photoShoots        PhotoShoot[]
-  reelAssets         ReelAsset[]
-  products           Product[]
-  catalogPages       CatalogPage[]
-  campaigns          Campaign[]
-  tasks              Task[]
-  workProjects       WorkProject[]
-  taskComments       TaskComment[]
-  notifications      Notification[]
-  dataSources        DataSource[]
-  postMetrics        PostMetric[]
-  shopOrders         ShopOrder[]
-  shopOrderLines     ShopOrderLine[]
-  searchDays         SearchDay[]
-  adDays             AdDay[]
-  adBudgets          AdBudget[]
-  adAlerts           AdAlert[]
-  shopifyWrites      ShopifyWrite[]
-  blogArticles       BlogArticle[]
-  quotes             Quote[]
-  quoteVersions      QuoteVersion[]
-  companies          Company[]
-  customers          Customer[]
-  customerIdentities CustomerIdentity[]
-  customerNotes      CustomerNote[]
+  workspace            Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  profile              BrandProfile?
+  members              BrandMember[]
+  agentRuns            AgentRun[]
+  agentEvents          AgentEvent[]
+  agentConfigs         BrandAgentConfig[]
+  contextDocs          BrandContextDoc[]
+  connections          IntegrationConnection[]
+  auditReports         AuditReport[]
+  chatThreads          ChatThread[]
+  opportunities        Opportunity[]
+  contentItems         ContentItem[]
+  learningNotes        LearningNote[]
+  competitors          Competitor[]
+  invitations          Invitation[]
+  photoShoots          PhotoShoot[]
+  reelAssets           ReelAsset[]
+  products             Product[]
+  catalogPages         CatalogPage[]
+  campaigns            Campaign[]
+  tasks                Task[]
+  workProjects         WorkProject[]
+  taskComments         TaskComment[]
+  notifications        Notification[]
+  dataSources          DataSource[]
+  postMetrics          PostMetric[]
+  shopOrders           ShopOrder[]
+  shopOrderLines       ShopOrderLine[]
+  searchDays           SearchDay[]
+  adDays               AdDay[]
+  adBudgets            AdBudget[]
+  adAlerts             AdAlert[]
+  shopifyWrites        ShopifyWrite[]
+  blogArticles         BlogArticle[]
+  quotes               Quote[]
+  quoteVersions        QuoteVersion[]
+  conversations        Conversation[]
+  conversationMessages ConversationMessage[]
+  companies            Company[]
+  customers            Customer[]
+  customerIdentities   CustomerIdentity[]
+  customerNotes        CustomerNote[]
 
   // target for composite tenant FKs (AT-021): children reference (id, workspaceId)
   @@unique([id, workspaceId])
@@ -2084,7 +2086,7 @@ model Quote {
   contactEmail     String?
   /// the customer record (plan 2026-11-27-crm); contactName/contactEmail stay the snapshot the quote was written to
   customerId       String?
-  /// tier 2
+  /// the conversation it came from (plan 2026-11-27-crm)
   conversationId   String?
   /// the shop's currency
   currency         String
@@ -2117,13 +2119,15 @@ model Quote {
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
 
-  brand    Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  versions QuoteVersion[]
-  customer Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  brand        Brand          @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  versions     QuoteVersion[]
+  conversation Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  customer     Customer?      @relation(fields: [customerId], references: [id], onDelete: SetNull)
 
   @@unique([brandId, number])
   @@index([brandId, status, updatedAt])
   @@index([customerId])
+  @@index([conversationId])
 }
 
 /// A quote as it was before an edit or a revise (plan 2026-11-27-crm, Decision 10). No contact name or email: they stay
@@ -2210,11 +2214,12 @@ model Customer {
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
-  brand      Brand              @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
-  company    Company?           @relation(fields: [companyId], references: [id], onDelete: SetNull)
-  identities CustomerIdentity[]
-  notes      CustomerNote[]
-  quotes     Quote[]
+  brand         Brand              @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  company       Company?           @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  identities    CustomerIdentity[]
+  notes         CustomerNote[]
+  quotes        Quote[]
+  conversations Conversation[]
 
   @@index([brandId, lastActivityAt(sort: Desc), id])
   @@index([brandId, ownerId])
@@ -2263,4 +2268,98 @@ model CustomerNote {
   customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   @@index([customerId, createdAt])
+}
+
+enum ConversationChannel {
+  LOGGED
+  INSTAGRAM
+  MESSENGER
+}
+
+enum MessageMedium {
+  EMAIL
+  PHONE
+  IN_PERSON
+  WHATSAPP
+  OTHER
+}
+
+/// One thread with a customer on any channel (plan 2026-11-27-crm, Decision 1). LOGGED: typed in by a person, always
+/// with a customer. A thread from an outside system (Meta in Phase B, Gmail in Phase D) is keyed by
+/// (connectionId, externalThreadId). The follow-up state is derived from these columns (server/crm/conversations.ts).
+model Conversation {
+  id                 String              @id @default(cuid())
+  workspaceId        String
+  brandId            String
+  channel            ConversationChannel
+  /// INSTAGRAM/MESSENGER (and Gmail later) only
+  connectionId       String?
+  /// Meta: the customer's PSID/IGSID; Gmail: the threadId
+  externalThreadId   String?
+  /// the sender's id on that channel (PSID/IGSID, or a lower-cased email address)
+  customerExternalId String?
+  customerId         String?
+  /// <= 200
+  subject            String?
+  /// a member holding inbox.read
+  ownerId            String?
+  /// <= 200
+  nextAction         String?
+  nextActionDue      DateTime?           @db.Date
+  /// the latest message's sentAt, and whether the customer sent it
+  lastMessageAt      DateTime
+  lastFromCustomer   Boolean
+  /// we wrote last (our message's sentAt) or a person marked it waiting on the customer
+  waitingSince       DateTime?
+  /// the follow-up episode: the first customer message after ours (its sentAt); the follow-up task's key
+  episodeAt          DateTime?
+  /// the open follow-up task (Task.id, plain), closed on a reply or close
+  followUpTaskId     String?
+  closedAt           DateTime?
+  /// AI, <= 600 (server/crm/summary.ts)
+  summary            String?
+  summaryThrough     DateTime?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  brand    Brand                 @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  customer Customer?             @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  messages ConversationMessage[]
+  quotes   Quote[]
+
+  @@unique([connectionId, externalThreadId])
+  @@index([brandId, closedAt, lastMessageAt(sort: Desc), id])
+  @@index([brandId, ownerId])
+  @@index([brandId, nextActionDue])
+  @@index([customerId, lastMessageAt])
+  @@index([closedAt, waitingSince])
+}
+
+/// One message in a Conversation. LOGGED: typed in by a person (medium, loggedById); nothing is ever sent from here.
+/// Kept 13 months from sentAt (server/crm/retention.ts).
+model ConversationMessage {
+  id             String         @id @default(cuid())
+  workspaceId    String
+  brandId        String
+  conversationId String
+  /// Meta mid / Gmail message id; null for LOGGED
+  externalId     String?
+  medium         MessageMedium?
+  fromCustomer   Boolean
+  /// PII, <= 4,000
+  text           String
+  /// types only
+  attachments    String[]       @default([])
+  loggedById     String?
+  /// a channel's unsend (Phase B): text cleared, row kept so a late copy can't revive it
+  deletedAt      DateTime?
+  sentAt         DateTime
+  createdAt      DateTime       @default(now())
+
+  brand        Brand        @relation(fields: [brandId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, externalId])
+  @@index([conversationId, sentAt])
+  @@index([sentAt])
 }

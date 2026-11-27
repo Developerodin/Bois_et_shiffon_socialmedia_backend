@@ -2,6 +2,7 @@ import type { Customer, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { hitRateLimit } from "@/server/auth/rate-limit";
 import { brandWhere, changed, checkCrmLinks, checkOwner, crmAudit, type CrmScope, type Db, dayOf, dayString, invalid, notFound } from "@/server/crm/common";
+import { customerConversations } from "@/server/crm/conversations";
 import { normaliseIdentity } from "@/server/crm/identity";
 import { prisma } from "@/server/db/prisma";
 import { quoteTotals, quoteDiscount, quoteLines, loadQuote } from "@/server/quotes/quotes";
@@ -96,14 +97,6 @@ export async function listCustomers(s: CrmScope, query: z.infer<typeof ListQuery
   return { customers: page.map(toRow), nextCursor: rows.length > page.length && last ? toCursor({ at: last.lastActivityAt.toISOString(), id: last.id }) : null };
 }
 
-/** Customer page sections that come from other tasks (conversations, deals) plug in here; see getCustomer. */
-export type CustomerExtras = { conversations: CustomerDto["conversations"]; deals: CustomerDto["deals"] };
-let extras: (s: CrmScope, customerId: string) => Promise<CustomerExtras> = async () => ({ conversations: null, deals: [] });
-/** Registered by server/crm/conversations.ts and deals.ts (kept out of this module's imports to avoid a cycle). */
-export function registerCustomerExtras(fn: typeof extras) {
-  extras = fn;
-}
-
 const NOTE_DELETE_MS = 24 * HOUR;
 export const toNoteDto = (n: { id: string; authorId: string | null; text: string; createdAt: Date }, userId: string, now = Date.now()): CustomerNoteDto => ({
   id: n.id,
@@ -122,7 +115,8 @@ export async function getCustomer(s: CrmScope, customerId: string): Promise<Cust
   });
   if (!c) throw notFound("Customer");
   if ((await hitRateLimit(`crm-viewed:${s.userId}:${c.id}`, 1, HOUR)).allowed) await crmAudit(prisma, s, "customer.viewed", "Customer", c.id);
-  const more = await extras(s, c.id);
+  // Conversations only for people who read customer messages (Decision 17).
+  const conversations = s.perms.has("inbox.read") ? await customerConversations(s, c.id) : null;
   return {
     ...toRow(c),
     language: c.language,
@@ -130,8 +124,8 @@ export async function getCustomer(s: CrmScope, customerId: string): Promise<Cust
     identities: c.identities.map((i) => ({ id: i.id, kind: i.kind, value: i.value })),
     notes: c.notes.map((n) => toNoteDto(n, s.userId)),
     quotes: c.quotes.map((q) => ({ id: q.id, number: quoteNumber(q.number), status: q.status, total: quoteTotals(quoteLines(q.lines), quoteDiscount(q.discount), q.currency).total, currency: q.currency, updatedAt: q.updatedAt.toISOString() })),
-    deals: more.deals,
-    conversations: more.conversations,
+    deals: [],
+    conversations,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
   };
