@@ -2133,3 +2133,26 @@ removed from any future `prisma migrate dev` diff.
 - **mobile:** `src/shared/.hash`.
 
 Re-run `npm run sync:shared` after the merge so every `.hash` matches.
+
+## Next steps (written 2026-11-27 13:55 IST; owner reminder set for 15:00 IST)
+
+1. **Push and deploy** (ask before each step). Everything from 2026-11-27 is local on `main` in server and web:
+   Social landing, Overview gaps, Tasks calendar, SEO depth, CRM Phase A + its web gaps + the deal fixes, the hidden
+   page headers, the channel logos, the Overview's coming-soon agents. The server DB needs that day's migrations (about
+   18). Then turn the `crm` flag on for B&C and run `npm run reset:shopify-orders -- <brandId>`.
+2. **Owner answers still open:**
+   - CRM: keep or change: accepted quotes kept by retention; erase/export only for Owner/Admin; Approvers can't start
+     conversations or use AI drafts.
+   - Social landing: keep the Threads row? Wave's role line "Social & Content"?
+   - `Desktop\web-legal` (branch `legal-pages`, privacy/terms/data-deletion pages, unmerged): merge or delete? Meta's
+     review needs those pages.
+3. **Questions for B&C / AskCart** (unblock CRM Phases B–D; see the plan's "Platform access" section):
+   Meta business verified and who admins the Page and Instagram; can AskCart send customer records; is B&C's email
+   on Google Workspace.
+4. **Next builds, when the owner picks:** CRM Phase B for B&C (Instagram/Messenger, no Meta review needed once B&C's
+   admin has a role on our app); the blog editorial calendar; small CRM extras (create/erase a company from the
+   Companies view, a `?company=` link, a conversation search endpoint).
+5. **In progress from 13:55:** the Channels page and channel-aware calendar refinement (owner's brief, 2026-11-27),
+   web only, in passes: (1) channel list hierarchy and connection states, (2) a channel opens its filtered calendar
+   with a channel header, (3) platform-specific event card details from real post data. Later passes: channel-specific
+   composer, channel-aware assistant suggestions, channel analytics.
