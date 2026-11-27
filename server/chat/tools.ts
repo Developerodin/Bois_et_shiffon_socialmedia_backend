@@ -358,7 +358,7 @@ export function chatTools(scope: ChatScope) {
     // reaches ~100k posts.
     listPosts: tool({
       description:
-        "List this brand's posts (titles, channel, status, date in the brand's time zone): upcoming = every open post, overdue ones included and flagged; awaiting-approval; or published. Use before saying what is planned or scheduled.",
+        "List this brand's posts (titles, channel, status, date in the brand's time zone, a pin's planned board): upcoming = every open post, overdue ones included and flagged; awaiting-approval; or published. Use before saying what is planned or scheduled.",
       // Saved threads are validated against this schema: it may only widen (new optional fields, higher caps), never narrow.
       inputSchema: z.object({
         channel: z.nativeEnum(ContentChannel).optional(),
@@ -380,7 +380,7 @@ export function chatTools(scope: ChatScope) {
             where,
             orderBy: [{ scheduledFor: { sort: dir, nulls: "last" } }, { id: dir }],
             take: limit + 1,
-            select: { title: true, channel: true, status: true, scheduledFor: true },
+            select: { title: true, channel: true, status: true, scheduledFor: true, plannedBoardName: true },
           }),
           prisma.contentItem.groupBy({ by: ["status"], where, _count: { _all: true } }),
           prisma.brandProfile.findFirst({ where: { workspaceId: scope.workspaceId, brandId: scope.brandId }, select: { timeZone: true } }),
@@ -399,6 +399,8 @@ export function chatTools(scope: ChatScope) {
             channel: p.channel,
             status: shown(p.status),
             when: p.scheduledFor ? wallTime(p.scheduledFor, timeZone) : null,
+            // A pin's planned board, by the name saved with the plan (only when one is set).
+            ...(p.plannedBoardName ? { board: cleanTitle(p.plannedBoardName) } : {}),
             ...(status !== "published" && p.scheduledFor && p.scheduledFor.getTime() < now.getTime() - OVERDUE_GRACE_MS ? { overdue: true } : {}),
           })),
           byStatus,
