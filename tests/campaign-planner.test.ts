@@ -183,3 +183,14 @@ describe("Planner channel scope", () => {
     }
   });
 });
+
+describe("Planner channel scope and ideas", () => {
+  it("marks only the ideas a scoped run planned a post for", async () => {
+    planning.mockResolvedValue({ campaigns: [], timeZone: "Europe/Paris" });
+    const idea = (id: string) => ({ id, title: id, angle: "a", channels: [], timing: null });
+    db.opportunity.findMany.mockResolvedValue([idea("o1"), idea("o2")]);
+    ai = vi.fn(async () => ({ posts: [post({ opportunityId: "o1", campaignId: "", channel: "PINTEREST_PIN" }), post({ opportunityId: "o2", campaignId: "", channel: "FACEBOOK_POST" })] }));
+    await plannerAgent.run(ctx(), { channels: ["PINTEREST_PIN"] });
+    expect(db.opportunity.updateMany).toHaveBeenCalledWith({ where: { id: { in: ["o1"] } }, data: { status: "PLANNED" } });
+  });
+});

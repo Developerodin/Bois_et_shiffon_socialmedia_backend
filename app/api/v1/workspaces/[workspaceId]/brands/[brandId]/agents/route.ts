@@ -1,6 +1,7 @@
 import { fromAccessError } from "@/server/api/http-error";
 import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-route";
 import { AGENTS } from "@/server/agents/registry";
+import { handChannelsOn } from "@/server/agents/definitions/planner";
 import { prisma } from "@/server/db/prisma";
 import { kickIfDue } from "@/server/jobs/runner";
 
@@ -31,6 +32,13 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
         ) r`,
     ]);
 
+    // A failed run whose last event is INFO had nothing to do (NothingToDoError: a chained round with no posts left):
+    // the app shows it as idle, not failed.
+    const failedIds = lastRuns.filter((r) => r.status === "FAILED").map((r) => r.id);
+    const lastEvents = failedIds.length
+      ? await prisma.agentEvent.findMany({ where: { runId: { in: failedIds } }, orderBy: [{ runId: "asc" }, { id: "desc" }], distinct: ["runId"], select: { runId: true, level: true } })
+      : [];
+    const idle = new Set(lastEvents.filter((e) => e.level === "INFO").map((e) => e.runId));
     const agents = shown.map((a) => {
       const run = lastRuns.find((r) => r.agentKey === a.key);
       return {
@@ -45,11 +53,13 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
               startedAt: run.startedAt?.toISOString() ?? null,
               finishedAt: run.finishedAt?.toISOString() ?? null,
               error: run.status === "FAILED" ? (run.error?.slice(0, 300) ?? null) : null,
+              ...(idle.has(run.id) ? { nothingToDo: true } : {}),
             }
           : null,
       };
     });
-    return Response.json({ agents });
+    // Whether the Planner may plan LinkedIn and X (PLANNER_HAND_CHANNELS), so the web's channel picker can say so.
+    return Response.json({ agents, plannerHandChannels: handChannelsOn() });
   } catch (error) {
     return fromAccessError(error);
   }
