@@ -69,7 +69,9 @@ const IMAGES: Record<ContentChannel, [number, number]> = {
   X_POST: [0, 1],
 };
 const TEXT_LIMIT: Partial<Record<ContentChannel, number>> = CHANNEL_TEXT_MAX;
-const LIVE: Prisma.EnumPublicationStatusFilter = { in: ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PENDING_VERIFY", "PARTIAL"] };
+/** An attempt that is scheduled, going out or out (the post's account is taken). */
+export const LIVE_STATUSES = ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PENDING_VERIFY", "PARTIAL"] as const;
+const LIVE: Prisma.EnumPublicationStatusFilter = { in: [...LIVE_STATUSES] };
 
 export function publishRequirements(channel: ContentChannel) {
   const [minImages, maxImages] = IMAGES[channel];

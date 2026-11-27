@@ -7,7 +7,7 @@ vi.mock("@/server/db/prisma", () => ({ prisma: db }));
 vi.mock("@/server/api/brand-route", () => ({ authorizeBrandRoute: async () => ({ userId: "u1", workspaceId: "w1", brandId: "b1", perms: db.perms }) }));
 vi.mock("@/server/agents/engine", () => ({ startAgentRun: vi.fn() }));
 vi.mock("@/server/jobs/runner", () => ({ kickRunner: vi.fn() }));
-vi.mock("@/server/services/publishing", () => ({ createPost: vi.fn(), ownMediaKey: () => true, postAiAllowed: vi.fn(), PublishingError: class extends Error {} }));
+vi.mock("@/server/services/publishing", () => ({ createPost: vi.fn(), LIVE_STATUSES: ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PENDING_VERIFY", "PARTIAL"], ownMediaKey: () => true, postAiAllowed: vi.fn(), PublishingError: class extends Error {} }));
 vi.mock("@/server/storage/media", () => ({ signedMediaUrl: vi.fn() }));
 vi.mock("@/server/stories/service", () => ({ coverUrl: vi.fn(), createStory: vi.fn(), failStoryStart: vi.fn(), STORY_RENDER_JOB: "story.render", STORY_START_NOTE: "", itemForRequest: vi.fn(), storyTab: vi.fn() }));
 

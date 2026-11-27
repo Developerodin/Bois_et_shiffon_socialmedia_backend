@@ -5,16 +5,13 @@ import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-r
 import { startAgentRun } from "@/server/agents/engine";
 import { prisma } from "@/server/db/prisma";
 import { kickRunner } from "@/server/jobs/runner";
-import { createPost, ownMediaKey, postAiAllowed, PublishingError } from "@/server/services/publishing";
+import { createPost, LIVE_STATUSES, ownMediaKey, postAiAllowed, PublishingError } from "@/server/services/publishing";
 import { signedMediaUrl } from "@/server/storage/media";
 import { CONTENT_GOALS } from "@/shared";
 import { contentRange, contentWindow } from "@/server/content/window";
 import { personName } from "@/server/content/person-name";
 import { hideRightsNames, hideRightsNote, isStoryBody, revealRightsNames, revealRightsNote } from "@/server/stories/body";
 import { coverUrl, createStory, failStoryStart, itemForRequest, STORY_RENDER_JOB, STORY_START_NOTE, storyTab } from "@/server/stories/service";
-
-/** A last attempt that is scheduled, going out or out: its account is where the post goes. */
-const GOING_OUT: readonly string[] = ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PARTIAL", "PENDING_VERIFY"];
 
 /** Calendar items with their latest draft and its latest quality check. */
 export async function GET(request: Request, context: { params: Promise<BrandRouteParams> }) {
@@ -111,7 +108,7 @@ export async function GET(request: Request, context: { params: Promise<BrandRout
         publishError: publications[0]?.status === "FAILED" || publications[0]?.status === "PENDING_VERIFY" ? publications[0].error : null,
         // The account the post is scheduled to or went out on (the web names it from its connections list, e.g. a
         // Facebook Post's Page); null when its last attempt was cancelled or failed, or it has none.
-        publishConnectionId: publications[0] && GOING_OUT.includes(publications[0].status) ? publications[0].connectionId : null,
+        publishConnectionId: publications[0] && (LIVE_STATUSES as readonly string[]).includes(publications[0].status) ? publications[0].connectionId : null,
         latest: versions[0]
           ? {
               version: versions[0].version,
