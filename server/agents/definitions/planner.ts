@@ -1,5 +1,6 @@
 import { ContentChannel } from "@prisma/client";
 import { z } from "zod";
+import { chainChannels } from "@/server/agents/chain";
 import { NothingToDoError, startAgentRun } from "@/server/agents/engine";
 import { HAND_CHANNELS, plannerPromptVersion, plannerSystem } from "@/server/agents/prompts/content";
 import type { AgentDefinition } from "@/server/agents/types";
@@ -25,6 +26,7 @@ const MAX_OPPORTUNITIES = 5;
 const DAY = 86_400_000;
 /** ponytail: 2 posts per campaign and per standing priority per 30 days, fixed; a per-row number when asked. */
 const POSTS_PER_CAMPAIGN = 2;
+const PLAN_LOCK_TIMEOUT_MS = 10 * 60_000;
 
 /**
  * Planner: shortlisted opportunities and the commercial owner's campaigns and priorities → posts on the 30-day
@@ -32,8 +34,12 @@ const POSTS_PER_CAMPAIGN = 2;
  * inside the window for a dated campaign. Each campaign needs 2 posts dated in the next 30 days minus those it has;
  * the cap is applied here, not trusted to the model.
  * Falls back to the top RECOMMEND ideas when nobody has shortlisted yet, and says so.
- * ponytail: two runs at once (the chained one and a manual one) both read the same needs and can each plan a
- * campaign's posts; the extras show on the calendar. The upgrade is a per-brand advisory lock around the write loop.
+ * Two runs for one brand (different channels, or chain on and off, which the engine doesn't fold) take turns on a
+ * per-brand advisory lock from the first read to the last write: the second sees the first's posts and PLANNED ideas.
+ * ponytail: the lock lives in a transaction (so a pooled connection never keeps it) that holds one connection idle
+ * through the AI call, and a waiting run holds another; past PLAN_LOCK_TIMEOUT_MS (both runs' work) Prisma ends the
+ * transaction and the run fails and retries (posts already written stay; the retry skips their ideas). Upgrade if
+ * plans get much longer or many brands plan at once: a lease row per brand instead of a held connection.
  */
 export const plannerAgent: AgentDefinition = {
   key: "planner",
@@ -41,14 +47,26 @@ export const plannerAgent: AgentDefinition = {
   description: "Turns shortlisted ideas into dated posts on your 30-day calendar.",
   // chain: start the next agent of the posts chain when done (Planner → Brief writer → Creator → Quality), the app's "Generate calendar".
   // channels: plan only on these (the web's "Plan with agents" picks them); enforced on the model's posts below, not only asked.
-  inputSchema: z.object({ chain: z.boolean().optional(), channels: z.array(z.nativeEnum(ContentChannel)).min(1).max(9).transform((c) => [...new Set(c)]).optional() }).strict(),
+  inputSchema: z.object({ chain: z.boolean().optional(), channels: chainChannels }).strict(),
   async run(ctx, input) {
     const { brand } = ctx;
     const only = (input as { channels?: ContentChannel[] }).channels;
     const hand = handChannelsOn();
     const plannable: readonly string[] = hand ? [...CHANNELS, ...HAND_CHANNELS] : CHANNELS;
-    const allowed = only ? new Set<string>(only.filter((c) => plannable.includes(c))) : null;
+    // Every channel the Planner can plan chosen = no limit: the run plans, marks ideas and chains as an unscoped one.
+    const allowed = only && !plannable.every((c) => only.includes(c as ContentChannel)) ? new Set<string>(only.filter((c) => plannable.includes(c))) : null;
     if (allowed && !allowed.size) throw new NothingToDoError("None of the chosen channels can be planned by the Planner: pick another channel");
+    // Only the lock is on tx; reads and writes use prisma, so the posts written stay written whatever the transaction does.
+    return prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`planner:${brand.brandId}`}))`;
+      return plan(ctx, input as { chain?: boolean }, hand, allowed);
+    }, { maxWait: 10_000, timeout: PLAN_LOCK_TIMEOUT_MS });
+  },
+};
+
+/** The Planner's work, run while holding the brand's planner lock. */
+async function plan(ctx: Parameters<AgentDefinition["run"]>[0], input: { chain?: boolean }, hand: boolean, allowed: Set<string> | null) {
+    const { brand } = ctx;
     const scope = { workspaceId: brand.workspaceId, brandId: brand.brandId };
     const now = new Date();
     const from = new Date(now.getTime() + DAY); // tomorrow: a campaign over before then gets no posts and costs no AI
@@ -178,11 +196,17 @@ export const plannerAgent: AgentDefinition = {
       if (p.opportunityId) ideasPlanned.add(p.opportunityId);
       await ctx.log("SUCCESS", `Planned ${p.channel.replace(/_/g, " ").toLowerCase()}${when ? ` for ${when.toISOString().slice(0, 10)}` : " (no free slot in 30 days)"}: ${p.title}`, { type: "ContentItem", id: item.id });
     }
-    // A run limited to some channels marks only the ideas it planned a post for: the others stay to plan on another channel.
-    const marked = allowed ? opps.filter((o) => ideasPlanned.has(o.id)) : opps;
+    // A run limited to some channels marks only the ideas it planned a post for, or an earlier (retried) run did: the
+    // others stay to plan on another channel.
+    const marked = allowed ? opps.filter((o) => ideasPlanned.has(o.id) || already.has(o.id)) : opps;
     if (marked.length) await prisma.opportunity.updateMany({ where: { id: { in: marked.map((o) => o.id) } }, data: { status: "PLANNED" } });
+    // Nothing planned on the chosen channels: the run is refunded and starts no chain.
+    if (allowed && !planned) {
+      const names = [...allowed].map((c) => c.replace(/_/g, " ").toLowerCase()).join(", ");
+      throw new NothingToDoError(`Nothing to plan on ${names}: the ideas left don't suit these channels. Pick more channels, or plan on all of them.`);
+    }
     if (unscheduled) await ctx.log("WARN", `${unscheduled} post(s) had no free slot in the next 30 days`);
-    if ((input as { chain?: boolean }).chain && planned) await startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey: "brief", trigger: "event", input: { chain: true } }).catch(() => null);
+    // A scoped chain stays on its channels: the Brief writer and Creator take only their posts.
+    if (input.chain && planned) await startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey: "brief", trigger: "event", input: { chain: true, ...(allowed ? { channels: [...allowed] } : {}) } }).catch(() => null);
     return { planned, unscheduled };
-  },
-};
+}

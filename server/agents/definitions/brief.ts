@@ -1,5 +1,6 @@
+import type { ContentChannel } from "@prisma/client";
 import { z } from "zod";
-import { CHAIN_ROUNDS } from "@/server/agents/chain";
+import { CHAIN_ROUNDS, chainChannels } from "@/server/agents/chain";
 import { NothingToDoError, startAgentRun } from "@/server/agents/engine";
 import { postAiAllowed } from "@/server/services/publishing";
 import { BRIEF_SYSTEM, CONTENT_PROMPT_VERSION } from "@/server/agents/prompts/content";
@@ -26,9 +27,10 @@ const StoryBrief = Brief.extend({ frames: z.array(z.object({ purpose: z.string()
 const PER_RUN = 8;
 /**
  * Planned posts with no version yet. A planned item that already has one (a duplicated story) holds a person's text:
- * briefing it would let the Creator rewrite that text as the next version.
+ * briefing it would let the Creator rewrite that text as the next version. A scoped Plan's chain (channels) takes only
+ * the posts on its channels.
  */
-const WAITING = (brandId: string) => ({ brandId, status: "PLANNED" as const, studio: false, versions: { none: {} } });
+const WAITING = (brandId: string, channels?: ContentChannel[]) => ({ brandId, status: "PLANNED" as const, studio: false, versions: { none: {} }, ...(channels ? { channel: { in: channels } } : {}) });
 
 /** Brief writer: each PLANNED post gets a production brief → BRIEF_READY. */
 export const briefAgent: AgentDefinition = {
@@ -36,11 +38,13 @@ export const briefAgent: AgentDefinition = {
   name: "Brief writer",
   description: "Writes a production brief for each planned post: goal, audience, message, products, call to action.",
   // chain: start the next agent of the posts chain when done (Planner → Brief writer → Creator → Quality), the app's "Generate calendar".
-  inputSchema: z.object({ chain: z.boolean().optional(), round: z.number().int().min(0).max(CHAIN_ROUNDS).optional() }).strict(),
+  // channels: a scoped Plan's channels, passed down the chain; only posts on them are briefed.
+  inputSchema: z.object({ chain: z.boolean().optional(), round: z.number().int().min(0).max(CHAIN_ROUNDS).optional(), channels: chainChannels }).strict(),
   async run(ctx, input) {
     const { brand } = ctx;
+    const { chain, round = 0, channels } = input as { chain?: boolean; round?: number; channels?: ContentChannel[] };
     const items = await prisma.contentItem.findMany({
-      where: WAITING(brand.brandId), // studio reels plan themselves
+      where: WAITING(brand.brandId, channels), // studio reels plan themselves
       orderBy: [{ scheduledFor: "asc" }, { createdAt: "asc" }],
       take: PER_RUN,
       include: { opportunity: { select: { title: true, summary: true, angle: true, reason: true } } },
@@ -108,12 +112,11 @@ export const briefAgent: AgentDefinition = {
       });
       await ctx.log(count ? "SUCCESS" : "WARN", count ? `Brief ready: ${item.title}` : `Skipped (it moved on while I was writing): ${item.title}`, { type: "ContentItem", id: item.id });
     }
-    const { chain, round = 0 } = input as { chain?: boolean; round?: number };
     if (chain) {
       const start = (agentKey: string, next: number) =>
-        startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey, trigger: "event", input: { chain: true, round: next } }).catch(() => null);
+        startAgentRun({ workspaceId: brand.workspaceId, brandId: brand.brandId, agentKey, trigger: "event", input: { chain: true, round: next, ...(channels ? { channels } : {}) } }).catch(() => null);
       await start("creator", round);
-      const waiting = await prisma.contentItem.count({ where: WAITING(brand.brandId) });
+      const waiting = await prisma.contentItem.count({ where: WAITING(brand.brandId, channels) });
       if (waiting > 0 && round + 1 < CHAIN_ROUNDS && (await postAiAllowed(brand.workspaceId))) await start("brief", round + 1);
     }
     return { briefed: items.length };

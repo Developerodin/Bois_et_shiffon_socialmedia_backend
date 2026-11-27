@@ -4,6 +4,8 @@ const db = vi.hoisted(() => ({
   opportunity: { findMany: vi.fn(), updateMany: vi.fn() },
   contentItem: { findMany: vi.fn(), create: vi.fn() },
   brandProfile: { findFirst: vi.fn(async () => null) },
+  $executeRaw: vi.fn(async () => 0),
+  $transaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn(db)),
 }));
 const planning = vi.hoisted(() => vi.fn());
 
@@ -16,6 +18,7 @@ vi.mock("@/server/catalog/linked", () => ({
 }));
 
 import { plannerAgent } from "@/server/agents/definitions/planner";
+import { startAgentRun } from "@/server/agents/engine";
 
 const NOW = new Date("2026-11-05T10:00:00Z"); // a Thursday
 const H = 3_600_000;
@@ -192,5 +195,69 @@ describe("Planner channel scope and ideas", () => {
     ai = vi.fn(async () => ({ posts: [post({ opportunityId: "o1", campaignId: "", channel: "PINTEREST_PIN" }), post({ opportunityId: "o2", campaignId: "", channel: "FACEBOOK_POST" })] }));
     await plannerAgent.run(ctx(), { channels: ["PINTEREST_PIN"] });
     expect(db.opportunity.updateMany).toHaveBeenCalledWith({ where: { id: { in: ["o1"] } }, data: { status: "PLANNED" } });
+  });
+});
+
+describe("Planner scope: all channels, declined ideas, the chain and the brand lock", () => {
+  const idea = (id: string) => ({ id, title: id, angle: "a", channels: [], timing: null });
+  beforeEach(() => {
+    vi.stubEnv("PLANNER_HAND_CHANNELS", "");
+    planning.mockResolvedValue({ campaigns: [], timeZone: "Europe/Paris" });
+    db.opportunity.findMany.mockResolvedValue([idea("o1"), idea("o2")]);
+    db.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(db));
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("runs unscoped when the chosen channels cover every channel it can plan (Reels aside)", async () => {
+    ai = vi.fn(async () => ({ posts: [post({ opportunityId: "o1", campaignId: "", channel: "PINTEREST_PIN" })] }));
+    const all = ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "FACEBOOK_POST", "PINTEREST_PIN", "THREADS_POST", "INSTAGRAM_STORY", "INSTAGRAM_REEL"];
+    await plannerAgent.run(ctx(), { chain: true, channels: all });
+    expect(String((ai.mock.calls[0] as unknown as [{ prompt: string }])[0].prompt)).not.toContain("Use only these channels");
+    // Both ideas marked, as an unscoped run does; the chain is unscoped too.
+    expect(db.opportunity.updateMany).toHaveBeenCalledWith({ where: { id: { in: ["o1", "o2"] } }, data: { status: "PLANNED" } });
+    expect(vi.mocked(startAgentRun).mock.calls[0]![0].input).toEqual({ chain: true });
+  });
+
+  it("stays scoped when a plannable channel is missing", async () => {
+    ai = vi.fn(async () => ({ posts: [post({ opportunityId: "o1", campaignId: "", channel: "PINTEREST_PIN" })] }));
+    await plannerAgent.run(ctx(), { channels: ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "FACEBOOK_POST", "PINTEREST_PIN", "THREADS_POST"] });
+    expect(String((ai.mock.calls[0] as unknown as [{ prompt: string }])[0].prompt)).toContain("Use only these channels");
+  });
+
+  it("has nothing to do (refunded, no chain) when a scoped run plans no post, and still marks ideas an earlier run planned", async () => {
+    done = [{ opportunityId: "o2" }];
+    ai = vi.fn(async () => ({ posts: [post({ opportunityId: "o1", campaignId: "", channel: "FACEBOOK_POST" })] }));
+    await expect(plannerAgent.run(ctx(), { chain: true, channels: ["PINTEREST_PIN"] })).rejects.toThrow("Nothing to plan on pinterest pin");
+    expect(db.contentItem.create).not.toHaveBeenCalled();
+    expect(db.opportunity.updateMany).toHaveBeenCalledWith({ where: { id: { in: ["o2"] } }, data: { status: "PLANNED" } });
+    expect(startAgentRun).not.toHaveBeenCalled();
+  });
+
+  it("marks the ideas it planned and those an earlier run planned, and passes its channels down the chain", async () => {
+    done = [{ opportunityId: "o2" }];
+    ai = vi.fn(async () => ({ posts: [post({ opportunityId: "o1", campaignId: "", channel: "PINTEREST_PIN" })] }));
+    await plannerAgent.run(ctx(), { chain: true, channels: ["PINTEREST_PIN"] });
+    expect(db.opportunity.updateMany).toHaveBeenCalledWith({ where: { id: { in: ["o1", "o2"] } }, data: { status: "PLANNED" } });
+    expect(vi.mocked(startAgentRun).mock.calls[0]![0]).toMatchObject({ agentKey: "brief", input: { chain: true, channels: ["PINTEREST_PIN"] } });
+  });
+
+  it("holds the brand's planner lock from the first read to the last write", async () => {
+    const order: string[] = [];
+    db.$executeRaw.mockImplementation(async () => (order.push("lock"), 0));
+    db.opportunity.findMany.mockImplementation(async () => (order.push("read"), [idea("o1")]));
+    db.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => {
+      order.push("begin");
+      const out = await fn(db);
+      order.push("commit");
+      return out;
+    });
+    ai = vi.fn(async () => ({ posts: [post({ opportunityId: "o1", campaignId: "" })] }));
+    db.opportunity.updateMany.mockImplementation(async () => (order.push("write"), { count: 1 }));
+    await plannerAgent.run(ctx(), {});
+    expect(order).toEqual(["begin", "lock", "read", "write", "commit"]);
+    const [strings, ...values] = db.$executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]];
+    expect(strings.join("?")).toContain("pg_advisory_xact_lock(hashtext(?))");
+    expect(values).toEqual(["planner:b1"]);
+    expect((db.$transaction.mock.calls[0] as unknown[])[1]).toMatchObject({ timeout: 600_000 });
   });
 });
