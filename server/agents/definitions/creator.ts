@@ -17,6 +17,7 @@ import { storeImage } from "@/server/research/brand-assets";
 import { lock, postAiAllowed, TX } from "@/server/services/publishing";
 import { isStoryBody } from "@/server/stories/body";
 import { changeRequest, onlyMediaBlockers, writeStory } from "@/server/stories/writer";
+import { CHANNEL_IMAGES } from "@/shared";
 
 export const Draft = z.object({
   hook: z.string(),
@@ -222,7 +223,7 @@ export const creatorAgent: AgentDefinition = {
       const own = switchNow ? [] : ((last?.body as { photoKeys?: string[] } | undefined)?.photoKeys ?? (item.brief as { photoKeys?: string[] } | null)?.photoKeys ?? []);
       // (an upload on an earlier draft isn't among the product photos, but it stays the person's choice)
       const chosen = own.filter((k) => itemKeys.has(k) || !!last);
-      const max = item.channel === "INSTAGRAM_CAROUSEL" ? 10 : item.channel === "THREADS_POST" || item.channel === "INSTAGRAM_REEL" ? 0 : 1;
+      const max = CHANNEL_IMAGES[item.channel][1]; // what the channel publishes (Threads one image, Reels none)
       const photoKeys = [...new Set([...switchedIn.map((p) => p.key), ...chosen, ...draft.photoKeys.filter((k) => !switchNow || !fromOld(k))])].slice(0, max);
       // The pin's destination is the person's, not the writer's: a rewrite keeps it.
       const pinLink = item.channel === "PINTEREST_PIN" ? (last?.body as { pinLink?: string } | undefined)?.pinLink : undefined;

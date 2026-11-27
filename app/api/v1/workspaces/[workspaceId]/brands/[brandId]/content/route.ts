@@ -5,9 +5,9 @@ import { authorizeBrandRoute, type BrandRouteParams } from "@/server/api/brand-r
 import { startAgentRun } from "@/server/agents/engine";
 import { prisma } from "@/server/db/prisma";
 import { kickRunner } from "@/server/jobs/runner";
-import { createPost, LIVE_STATUSES, ownMediaKey, postAiAllowed, PublishingError } from "@/server/services/publishing";
+import { createPost, createWrittenPost, LIVE_STATUSES, ownMediaKey, postAiAllowed, PublishingError } from "@/server/services/publishing";
 import { signedMediaUrl } from "@/server/storage/media";
-import { CONTENT_GOALS } from "@/shared";
+import { CONTENT_GOALS, NEW_POST_CHANNELS, WRITTEN_POST_CHANNELS } from "@/shared";
 import { contentRange, contentWindow } from "@/server/content/window";
 import { personName } from "@/server/content/person-name";
 import { hideRightsNames, hideRightsNote, isStoryBody, revealRightsNames, revealRightsNote } from "@/server/stories/body";
@@ -141,6 +141,19 @@ const NewPostInput = z.object({
   scheduledFor: z.string().datetime({ offset: true }).optional(),
 });
 
+// A post the person writes (Facebook, Pinterest, Threads, LinkedIn, X): its limits are checked by createWrittenPost
+// (writtenPostProblem, the web's own check); these bounds only keep the request small.
+const WrittenPostInput = z.object({
+  channel: z.enum(WRITTEN_POST_CHANNELS),
+  text: z.string().max(5000),
+  pinTitle: z.string().max(200).optional(),
+  pinLink: z.string().max(2000).optional(),
+  photoKeys: z.array(z.string().min(1).max(300)).max(10).default([]),
+  requestId: z.string().uuid().optional(),
+  scheduledFor: z.string().datetime({ offset: true }).optional(),
+});
+const isWritten = (channel: unknown) => (WRITTEN_POST_CHANNELS as readonly unknown[]).includes(channel);
+
 // A new story (P07): paid, once per requestId (a uuid the app makes when the person taps).
 const NewStoryInput = z.object({
   channel: z.literal("INSTAGRAM_STORY"),
@@ -150,18 +163,19 @@ const NewStoryInput = z.object({
   requestId: z.string().uuid(),
 });
 
-/** A new post or story from the app (P06/P07): the Creator writes it now, then Quality checks it. */
+/** A new post or story from the app (P06/P07): the Creator writes it now, then Quality checks it. A written post (WrittenPostInput) goes straight to the check. */
 export async function POST(request: Request, context: { params: Promise<BrandRouteParams> }) {
   try {
     const json = await request.json().catch(() => null);
-    const isStory = (json as { channel?: unknown } | null)?.channel === "INSTAGRAM_STORY";
-    const parsed = isStory ? NewStoryInput.safeParse(json) : NewPostInput.safeParse(json);
+    const channel = (json as { channel?: unknown } | null)?.channel;
+    const isStory = channel === "INSTAGRAM_STORY";
+    const parsed = isStory ? NewStoryInput.safeParse(json) : isWritten(channel) ? WrittenPostInput.safeParse(json) : NewPostInput.safeParse(json);
     if (!parsed.success) return problemResponse({ type: "https://api.brandpilot/errors/validation", title: "Invalid request", status: 400, detail: parsed.error.issues[0]?.message });
     const scope = await authorizeBrandRoute(request, context.params, "content.create");
     if (scope instanceof Response) return scope;
     // A retried request gets its post or story back without touching the rate limit.
     const again = "requestId" in parsed.data && parsed.data.requestId
-      ? await itemForRequest(scope, parsed.data.requestId, { channel: parsed.data.channel === "INSTAGRAM_STORY" ? "INSTAGRAM_STORY" : ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL"] })
+      ? await itemForRequest(scope, parsed.data.requestId, { channel: parsed.data.channel === "INSTAGRAM_STORY" ? "INSTAGRAM_STORY" : [...NEW_POST_CHANNELS] })
       : null;
     if (again) return Response.json({ id: again.id });
     if (!(await postAiAllowed(scope.workspaceId))) return problemResponse({ type: "https://api.brandpilot/errors/limit", title: "Too many posts written today. Try again tomorrow.", status: 429 });
@@ -177,6 +191,15 @@ export async function POST(request: Request, context: { params: Promise<BrandRou
       }
       kickRunner();
       return Response.json({ id: story.id }, { status: 201 });
+    }
+    if ("text" in parsed.data) {
+      const { scheduledFor, ...written } = parsed.data;
+      const { item, version, repeated } = await createWrittenPost({ ...scope, ...written, ...(scheduledFor ? { scheduledFor: new Date(scheduledFor) } : {}) });
+      if (repeated) return Response.json({ id: item.id });
+      // Written already: check it now, as after an edit.
+      await startAgentRun({ workspaceId: scope.workspaceId, brandId: scope.brandId, agentKey: "quality", trigger: "event", input: { itemId: item.id, version } }).catch(() => null);
+      kickRunner();
+      return Response.json({ id: item.id }, { status: 201 });
     }
     const { scheduledFor, ...post } = parsed.data;
     const { item, repeated } = await createPost({ ...scope, ...post, ...(scheduledFor ? { scheduledFor: new Date(scheduledFor) } : {}) });

@@ -5,7 +5,7 @@ import { prisma } from "@/server/db/prisma";
 import { instagramPermalink, instagramPublishingLimit, PUBLISHERS, PublishRefused } from "@/server/integrations/publishers";
 import { enqueueJob, holdsLease, type Lease } from "@/server/jobs/queue";
 import { accessToken, markReconnect, ReconnectNeeded } from "@/server/services/connections";
-import { CAPTION_LIMITS, CHANNEL_TEXT_MAX, safeHttpUrl } from "@/shared";
+import { CAPTION_LIMITS, CHANNEL_IMAGES, CHANNEL_TEXT_MAX, cleanPinLink, NEW_POST_CHANNELS, safeHttpUrl, writtenPostProblem, type WrittenPostChannel } from "@/shared";
 import { brandMemberPerms, hasOtherApprover, isClientMember, requirePermission } from "@/server/auth/permissions";
 import { rolePermissions, type PermissionKey } from "@/server/auth/permissions.catalog";
 import { linkedProducts } from "@/server/catalog/linked";
@@ -56,18 +56,8 @@ const CHANNEL_PROVIDER: Record<ContentChannel, IntegrationProvider | null> = {
   LINKEDIN_POST: null,
   X_POST: null,
 };
-// How many images each channel takes [min, max]; Reels take a video instead.
-const IMAGES: Record<ContentChannel, [number, number]> = {
-  INSTAGRAM_POST: [1, 1],
-  PINTEREST_PIN: [1, 1],
-  INSTAGRAM_CAROUSEL: [2, 10],
-  FACEBOOK_POST: [0, 1],
-  THREADS_POST: [0, 1],
-  INSTAGRAM_REEL: [0, 0],
-  INSTAGRAM_STORY: [0, 0], // frames, not images: see publishRequirements
-  LINKEDIN_POST: [0, 1],
-  X_POST: [0, 1],
-};
+// How many images each channel takes [min, max] (shared with New post); Reels take a video, stories their frames.
+const IMAGES: Record<ContentChannel, readonly [number, number]> = CHANNEL_IMAGES;
 const TEXT_LIMIT: Partial<Record<ContentChannel, number>> = CHANNEL_TEXT_MAX;
 /** An attempt that is scheduled, going out or out (the post's account is taken). */
 export const LIVE_STATUSES = ["SCHEDULED", "PUBLISHING", "PUBLISHED", "PENDING_VERIFY", "PARTIAL"] as const;
@@ -219,7 +209,7 @@ export async function createPost(input: { workspaceId: string; brandId: string; 
   return prisma.$transaction(async (tx) => {
     if (input.requestId) {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${requestLockKey(input, input.requestId)}))`;
-      const existing = await itemForRequest(input, input.requestId, { channel: ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL"] }, tx);
+      const existing = await itemForRequest(input, input.requestId, { channel: [...NEW_POST_CHANNELS] }, tx);
       if (existing) return { item: existing, repeated: true };
     }
     const item = await tx.contentItem.create({
@@ -233,6 +223,48 @@ export async function createPost(input: { workspaceId: string; brandId: string; 
       data: { workspaceId: input.workspaceId, brandId: input.brandId, actorUserId: input.userId, action: "content.create", entityType: "ContentItem", entityId: item.id, metadata: { channel: input.channel, goal: input.goal, ...(input.requestId ? { requestId: input.requestId } : {}) } },
     });
     return { item, repeated: false };
+  }, TX);
+}
+
+/** A post the person writes in New post (Facebook, Pinterest, Threads, LinkedIn, X); `text` is its caption (a pin's description). */
+export type WrittenPost = { channel: WrittenPostChannel; text: string; pinTitle?: string; pinLink?: string; photoKeys: string[]; requestId?: string; scheduledFor?: Date };
+
+/**
+ * A written post: the item and its first version (by the person) in one transaction, waiting for the Quality check,
+ * which the caller starts. It never sits at BRIEF_READY, so the Creator never writes over it; like any person's
+ * draft, the Creator rewrites it only if the check blocks it. requestId and scheduledFor as createPost.
+ */
+export async function createWrittenPost(input: { workspaceId: string; brandId: string; userId: string } & WrittenPost): Promise<{ item: { id: string }; version: number; repeated: boolean }> {
+  const pin = input.channel === "PINTEREST_PIN";
+  const problem = writtenPostProblem(input.channel, { text: input.text, pinTitle: input.pinTitle, pinLink: input.pinLink, photos: new Set(input.photoKeys).size });
+  if (problem) throw new PublishingError(problem, 400, "post.invalid");
+  if (input.scheduledFor && input.scheduledFor.getTime() < Date.now() - 60_000) throw new PublishingError("Pick a time in the future", 400);
+  const body = cleanDraft(input, {
+    hook: "", caption: input.text, hashtags: [], slides: [], script: [], pinTitle: pin ? (input.pinTitle ?? "") : "", altText: "",
+    photoKeys: input.photoKeys, ...(pin && input.pinLink?.trim() ? { pinLink: input.pinLink } : {}),
+  });
+  const productIds = body.photoKeys?.[0] ? await productIdsForPhoto(input.workspaceId, input.brandId, body.photoKeys[0]) : [];
+  // The calendar's name for it: the pin's title, else the text's first line.
+  const firstLine = body.caption.split("\n")[0]!.trim();
+  const title = pin ? body.pinTitle : firstLine.length > 80 ? `${firstLine.slice(0, 79).trimEnd()}…` : firstLine;
+  return prisma.$transaction(async (tx) => {
+    if (input.requestId) {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${requestLockKey(input, input.requestId)}))`;
+      const existing = await itemForRequest(input, input.requestId, { channel: [...NEW_POST_CHANNELS] }, tx);
+      if (existing) return { item: existing, version: 0, repeated: true };
+    }
+    const item = await tx.contentItem.create({
+      data: {
+        workspaceId: input.workspaceId, brandId: input.brandId, title, channel: input.channel, status: "DRAFT_REVIEW", productIds, ownerId: input.userId,
+        ...(input.scheduledFor ? { scheduledFor: input.scheduledFor } : {}),
+        brief: { written: true, ...(input.requestId ? { requestId: input.requestId } : {}) },
+      },
+    });
+    await tx.contentVersion.create({ data: { contentItemId: item.id, version: 1, body: { ...body, productIds } as Prisma.InputJsonValue, createdBy: input.userId } });
+    await tx.auditEvent.create({
+      data: { workspaceId: input.workspaceId, brandId: input.brandId, actorUserId: input.userId, action: "content.create", entityType: "ContentItem", entityId: item.id, metadata: { channel: input.channel, written: true, ...(input.requestId ? { requestId: input.requestId } : {}) } },
+    });
+    return { item, version: 1, repeated: false };
   }, TX);
 }
 
@@ -329,13 +361,8 @@ export const ownMediaKey = (scope: { workspaceId: string; brandId: string }, key
 // A person can edit until the post is handed to a platform; a scheduled post must be cancelled first.
 export const EDITABLE = ["PLANNED", "BRIEF_READY", "DRAFT_REVIEW", "AWAITING_APPROVAL", "APPROVED", "REJECTED", "BLOCKED"];
 
-/** A pin's destination as the person typed it: https only, no credentials, at most 2000 characters; kept as URL.href. Null when it isn't one. */
-export function cleanPinLink(raw: string): string | null {
-  const t = raw.trim();
-  if (t.length > 2000) return null;
-  const u = safeHttpUrl(t);
-  return u && u.protocol === "https:" && !u.username && !u.password ? u.href : null;
-}
+// cleanPinLink lives in shared/ (New post checks a pin link with it too).
+export { cleanPinLink };
 
 /** Where a pin leads: its own link (re-checked, since the body is JSON anyone with edit rights could have shaped), else the brand's website. */
 export function pinDestination(pinLink: unknown, websiteUrl: string | null | undefined): string | null {
@@ -347,25 +374,31 @@ export function pinDestination(pinLink: unknown, websiteUrl: string | null | und
  * holding), back to draft review for the Quality check. The editor can't approve it themselves when someone else can.
  * `version` is the one they edited (0 when writing the first draft); a newer one means they'd overwrite it.
  */
-export async function saveDraft(input: { workspaceId: string; brandId: string; userId: string; itemId: string; version: number; body: DraftInput }) {
+/** A person's draft as it is stored: trimmed, hashtags with one #, the pin link checked, only this brand's photos. */
+export function cleanDraft(scope: { workspaceId: string; brandId: string }, raw: DraftInput): DraftInput {
   const body: DraftInput = {
-    hook: input.body.hook.trim(),
-    caption: input.body.caption.trim(),
-    hashtags: [...new Set(input.body.hashtags.map((h) => h.trim().replace(/^#*/, "")).filter(Boolean).map((h) => `#${h}`))],
-    slides: input.body.slides.map((s) => s.trim()).filter(Boolean),
-    script: input.body.script.map((s) => s.trim()).filter(Boolean),
-    pinTitle: input.body.pinTitle.trim(),
-    altText: input.body.altText.trim(),
-    ...(input.body.pinLink?.trim() ? { pinLink: input.body.pinLink.trim() } : {}),
-    ...(input.body.photoKeys === undefined ? {} : { photoKeys: [...new Set(input.body.photoKeys)] }),
+    hook: raw.hook.trim(),
+    caption: raw.caption.trim(),
+    hashtags: [...new Set(raw.hashtags.map((h) => h.trim().replace(/^#*/, "")).filter(Boolean).map((h) => `#${h}`))],
+    slides: raw.slides.map((s) => s.trim()).filter(Boolean),
+    script: raw.script.map((s) => s.trim()).filter(Boolean),
+    pinTitle: raw.pinTitle.trim(),
+    altText: raw.altText.trim(),
+    ...(raw.pinLink?.trim() ? { pinLink: raw.pinLink.trim() } : {}),
+    ...(raw.photoKeys === undefined ? {} : { photoKeys: [...new Set(raw.photoKeys)] }),
   };
   if (!body.caption) throw new PublishingError("The caption can't be empty", 400);
-  if (body.photoKeys?.some((k) => !ownMediaKey(input, k))) throw new PublishingError("Unknown image", 400);
+  if (body.photoKeys?.some((k) => !ownMediaKey(scope, k))) throw new PublishingError("Unknown image", 400);
   if (body.pinLink !== undefined) {
     const href = cleanPinLink(body.pinLink);
     if (!href) throw new PublishingError("The pin's link must be a full https:// address (no password in it, 2000 characters at most).", 400);
     body.pinLink = href;
   }
+  return body;
+}
+
+export async function saveDraft(input: { workspaceId: string; brandId: string; userId: string; itemId: string; version: number; body: DraftInput }) {
+  const body = cleanDraft(input, input.body);
   return prisma.$transaction(async (tx) => {
     await lock(tx, input.itemId);
     const { item, latest } = await loadItem(input, input.itemId, tx);
