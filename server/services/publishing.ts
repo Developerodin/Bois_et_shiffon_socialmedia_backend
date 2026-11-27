@@ -44,7 +44,7 @@ export class PublishingError extends Error {
 
 type Body = { hook?: string; caption?: string; hashtags?: string[]; pinTitle?: string; altText?: string; pinLink?: string; aiDisclosure?: boolean; presenter?: string; voice?: string; language?: string };
 
-const CHANNEL_PROVIDER: Record<ContentChannel, IntegrationProvider | null> = {
+export const CHANNEL_PROVIDER: Record<ContentChannel, IntegrationProvider | null> = {
   FACEBOOK_POST: "META",
   INSTAGRAM_POST: "INSTAGRAM",
   THREADS_POST: "THREADS",

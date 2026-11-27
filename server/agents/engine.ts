@@ -102,6 +102,8 @@ export async function startAgentRun(input: {
         trigger: input.trigger,
         triggeredByUserId: input.userId,
         input: runInput as Prisma.InputJsonValue,
+        // A content workflow's stage: found by its column, not by reading input JSON.
+        workflowId: typeof agentInput.workflowId === "string" ? agentInput.workflowId : null,
       },
     });
     await tx.agentEvent.create({

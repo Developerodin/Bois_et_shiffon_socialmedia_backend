@@ -10,6 +10,7 @@ const db = vi.hoisted(() => {
     product: { findMany: vi.fn(async () => [] as unknown[]) },
     brandProfile: { findFirst: vi.fn(async () => null) },
     qualityCheck: { findMany: vi.fn(async () => [] as unknown[]), create: vi.fn() },
+    contentWorkflow: { findFirst: vi.fn(async () => null as unknown), findMany: vi.fn(async () => [] as unknown[]), updateMany: vi.fn(async () => ({ count: 1 })) },
     $transaction: vi.fn(),
   };
   d.$transaction.mockImplementation(async (fn: (tx: typeof d) => unknown) => fn(d));
@@ -73,7 +74,7 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("Brief writer and campaigns", () => {
-  const planned = (over: object = {}) => ({ id: "i1", title: "Un salon chaleureux", channel: "INSTAGRAM_POST", status: "PLANNED", pillar: null, scheduledFor: new Date("2026-11-29T09:00:00Z"), brief: {}, opportunity: null, campaignId: "c1", ...over });
+  const planned = (over: object = {}) => ({ id: "i1", title: "Un salon chaleureux", channel: "INSTAGRAM_POST", status: "PLANNED", pillar: null, scheduledFor: new Date("2026-11-29T09:00:00Z"), brief: {}, opportunity: null, campaignId: "c1", productIds: [], ...over });
 
   it("gives a campaign post its facts after the divider and ranks the campaign's products", async () => {
     withCampaigns(campaign());
@@ -266,5 +267,106 @@ describe("A scoped Plan's chain stays on its channels", () => {
     await creatorAgent.run(ctx, { chain: true });
     expect(db.contentItem.findMany.mock.calls[0]![0].where).not.toHaveProperty("channel");
     expect(started()).toContainEqual(["creator", { chain: true, round: 1 }]);
+  });
+});
+
+describe("A content workflow's stages", () => {
+  const started = () => vi.mocked(startAgentRun).mock.calls.map((c) => [c[0].agentKey, c[0].input]);
+  const item = (over: object = {}) => ({
+    id: "i1", title: "Post", channel: "INSTAGRAM_POST", status: "PLANNED", pillar: null, scheduledFor: null, brief: {}, opportunity: null, campaignId: null,
+    productIds: [], workflowId: "wf1", versions: [], decisions: [], ...over,
+  });
+  const workflow = (status = "RUNNING") => ({ id: "wf1", status, input: { productMode: "catalogue", productIds: [], targets: [{ channel: "INSTAGRAM_POST", connectionId: null }] } });
+
+  it("take an optional workflowId; the inputs the phone and the chain send still parse", () => {
+    for (const a of [briefAgent, creatorAgent, qualityAgent]) {
+      expect(a.inputSchema.parse({ workflowId: "wf1" })).toEqual({ workflowId: "wf1" });
+      expect(a.inputSchema.safeParse({}).success).toBe(true);
+      expect(a.inputSchema.safeParse({ productIds: ["p1"] }).success).toBe(false); // ids come from the workflow row
+    }
+    expect(briefAgent.inputSchema.safeParse({ chain: true, round: 2 }).success).toBe(true);
+    expect(creatorAgent.inputSchema.safeParse({ itemId: "i1" }).success).toBe(true);
+    expect(qualityAgent.inputSchema.safeParse({ itemId: "i1", version: 2 }).success).toBe(true);
+  });
+
+  it("the Brief writer sweeps only the workflow's posts, runs its next round with its id, and starts no Creator", async () => {
+    db.contentWorkflow.findFirst.mockResolvedValue(workflow());
+    db.contentItem.findMany.mockResolvedValue([item()]);
+    db.contentItem.count.mockResolvedValue(3);
+    await briefAgent.run(ctx, { chain: true, workflowId: "wf1" });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).toMatchObject({ status: "PLANNED", workflowId: "wf1" });
+    expect((db.contentItem.count.mock.calls[0] as unknown as [{ where: object }])[0].where).toMatchObject({ workflowId: "wf1" });
+    expect(started()).toEqual([["brief", { chain: true, round: 1, workflowId: "wf1" }]]);
+  });
+
+  it("the Brief writer's last round stops at the briefs' gate", async () => {
+    db.contentWorkflow.findFirst.mockResolvedValue(workflow());
+    db.contentItem.findMany.mockResolvedValue([item()]);
+    db.contentItem.count.mockResolvedValue(0);
+    await briefAgent.run(ctx, { chain: true, workflowId: "wf1" });
+    expect(started()).toEqual([]);
+    expect(db.contentWorkflow.updateMany).toHaveBeenCalledWith({ where: { id: "wf1", status: { not: "CANCELLED" } }, data: { status: "REVIEW_BRIEFS" } });
+  });
+
+  it("a cancel during the Brief writer's run stops before the next AI call and chains nothing", async () => {
+    db.contentWorkflow.findFirst.mockResolvedValueOnce(workflow()).mockResolvedValue(workflow("CANCELLED"));
+    db.contentItem.findMany.mockResolvedValue([item()]);
+    await briefAgent.run(ctx, { chain: true, workflowId: "wf1" });
+    expect(db.contentItem.updateMany).not.toHaveBeenCalled();
+    expect(started()).toEqual([]);
+    expect(db.contentWorkflow.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("the Creator passes the workflow's id to Quality and to its next round", async () => {
+    db.contentWorkflow.findFirst.mockResolvedValue(workflow());
+    db.contentItem.findMany.mockResolvedValue([item({ status: "BRIEF_READY" })]);
+    db.contentItem.count.mockResolvedValue(2);
+    await creatorAgent.run(ctx, { chain: true, workflowId: "wf1" });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).toMatchObject({ workflowId: "wf1" });
+    expect(started()).toContainEqual(["creator", { chain: true, round: 1, workflowId: "wf1" }]);
+    for (const [key, input] of started()) if (key === "quality") expect(input).toEqual({ round: 0, workflowId: "wf1" });
+  });
+
+  it("a stage of another brand's (or a gone) workflow has nothing to do", async () => {
+    db.contentWorkflow.findFirst.mockResolvedValue(null);
+    await expect(briefAgent.run(ctx, { workflowId: "wf1" })).rejects.toThrow("This workflow no longer exists");
+    expect((db.contentWorkflow.findFirst.mock.calls[0] as unknown as [object])[0]).toMatchObject({ where: { id: "wf1", workspaceId: "w1", brandId: "b1" } });
+  });
+});
+
+describe("Runs without a workflow leave a workflow's posts to its gates", () => {
+  const item = (over: object = {}) => ({
+    id: "i1", title: "Post", channel: "INSTAGRAM_POST", status: "PLANNED", pillar: null, scheduledFor: null, brief: {}, opportunity: null, campaignId: null,
+    productIds: [], workflowId: null, versions: [], decisions: [], ...over,
+  });
+
+  it("the Brief writer's plain sweep and its waiting count take only posts outside a workflow", async () => {
+    db.contentItem.findMany.mockResolvedValue([item()]);
+    db.contentItem.count.mockResolvedValue(0);
+    await briefAgent.run(ctx, { chain: true });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).toMatchObject({ workflowId: null });
+    expect((db.contentItem.count.mock.calls[0] as unknown as [{ where: object }])[0].where).toMatchObject({ workflowId: null });
+  });
+
+  it("the Creator's plain sweep too, but one post asked for by id is written whatever its workflow", async () => {
+    db.contentItem.findMany.mockResolvedValue([item({ status: "BRIEF_READY" })]);
+    await creatorAgent.run(ctx, { chain: true });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).toMatchObject({ workflowId: null });
+    vi.clearAllMocks();
+    db.contentItem.findMany.mockResolvedValue([item({ status: "BRIEF_READY", workflowId: "wf1" })]);
+    await creatorAgent.run(ctx, { itemId: "i1" });
+    expect(db.contentItem.findMany.mock.calls[0]![0].where).not.toHaveProperty("workflowId");
+  });
+
+  it("a post whose locked products are all gone is briefed with none, never given a substitute", async () => {
+    linked.mockImplementation(async (_db: unknown, _scope: unknown, ids: string[]) => ids.map((id) => ({ id, row: null, group: [], name: "a removed product", state: "gone" })));
+    db.product.findMany.mockResolvedValue([catalogue.p9]);
+    db.contentItem.findMany.mockResolvedValue([item({ productIds: ["p1"] })]);
+    await briefAgent.run(ctx, {});
+    expect(prompt()).toContain("Products: none.");
+    expect(prompt()).not.toContain("Catalogue candidates");
+    const data = (db.contentItem.updateMany.mock.calls[0] as unknown as [{ data: Record<string, unknown> }])[0].data;
+    expect(data).not.toHaveProperty("productIds");
+    expect((data.brief as { products: string[] }).products).toEqual([]);
   });
 });

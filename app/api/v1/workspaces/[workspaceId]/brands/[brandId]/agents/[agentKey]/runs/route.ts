@@ -51,6 +51,11 @@ export async function POST(request: Request, context: { params: Promise<Params> 
       return problemResponse({ type: "https://api.brandpilot/errors/agent-start", title: "Agent could not start", status: 403, detail: "This agent is started from its own feature." });
     }
     const body = await request.json().catch(() => ({}));
+    // A workflow's stages are started by the workflow (content-workflows), which checks and charges them.
+    const input = (body as { input?: unknown } | null)?.input;
+    if (input && typeof input === "object" && "workflowId" in input) {
+      return problemResponse({ type: "https://api.brandpilot/errors/agent-start", title: "Agent could not start", status: 422, detail: "Start a workflow's stages from the workflow." });
+    }
     return paidStart(request, { feature: `agent-run:${agentKey}`, workspaceId: scope.workspaceId }, async () => {
       // Generating the calendar needs a plan (mobile L05).
       if (agentKey === "planner") {
