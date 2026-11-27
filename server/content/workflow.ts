@@ -1,6 +1,6 @@
 import { ContentChannel, Prisma, type AgentRunStatus } from "@prisma/client";
 import { z } from "zod";
-import { plannableChannels } from "@/server/agents/definitions/planner";
+import { plannableChannels } from "@/server/agents/chain";
 import { AgentStartError, startAgentRun } from "@/server/agents/engine";
 import { fromAccessError, problemResponse } from "@/server/api/http-error";
 import { linkedProducts } from "@/server/catalog/linked";
@@ -121,7 +121,7 @@ async function startPlanner(scope: Scope, userId: string | undefined, workflowId
     throw e;
   }
   try {
-    const run = await startAgentRun({ ...scope, agentKey: "planner", trigger: "manual", userId, input: { chain: true, workflowId }, prepaidChargeId: chargeId });
+    const run = await startAgentRun({ workspaceId: scope.workspaceId, brandId: scope.brandId, agentKey: "planner", trigger: "manual", userId, input: { chain: true, workflowId }, prepaidChargeId: chargeId });
     if ((run.input as { chargeId?: string } | null)?.chargeId !== chargeId) await refundCharge(scope.workspaceId, chargeId);
     else await prisma.contentWorkflow.update({ where: { id: workflowId }, data: { chargeIds: { push: chargeId } } });
     return run;
@@ -151,7 +151,7 @@ export async function startWorkflow(scope: Scope, userId: string | undefined, ra
   let row: { id: string };
   try {
     row = await prisma.contentWorkflow.create({
-      data: { ...scope, requestId: body.requestId, source: body.source, status: "PLANNING", input: input as Prisma.InputJsonValue, createdByUserId: userId ?? null },
+      data: { workspaceId: scope.workspaceId, brandId: scope.brandId, requestId: body.requestId, source: body.source, status: "PLANNING", input: input as Prisma.InputJsonValue, createdByUserId: userId ?? null },
       select: { id: true },
     });
   } catch (e) {
@@ -285,7 +285,7 @@ export async function retryStage(scope: Scope, userId: string | undefined, workf
       throw new WorkflowError("No posts in this workflow are waiting for that step", 409);
     }
     if (!(await postAiAllowed(scope.workspaceId))) throw new WorkflowError("Today's AI allowance for posts is used up. Try again tomorrow.", 429);
-    runId = (await startAgentRun({ ...scope, agentKey: stage, trigger: "event", userId, input: stage === "quality" ? { workflowId } : { chain: true, workflowId } })).id;
+    runId = (await startAgentRun({ workspaceId: scope.workspaceId, brandId: scope.brandId, agentKey: stage, trigger: "event", userId, input: stage === "quality" ? { workflowId } : { chain: true, workflowId } })).id;
   }
   // The status follows from the new run (workflowStatus derives it and saves it back).
   return { workflow: await workflowStatus(scope, workflowId), runId };

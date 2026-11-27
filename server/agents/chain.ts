@@ -1,5 +1,15 @@
 import { ContentChannel } from "@prisma/client";
 import { z } from "zod";
+import { HAND_CHANNELS } from "@/server/agents/prompts/content";
+
+// No INSTAGRAM_REEL: a planned reel would have a script but no video to post. Reels are made in the app's Studio.
+// Stories are planned: the Creator writes their frames from the brand's photos (paid by the Planner's own charge).
+export const PLANNER_CHANNELS = ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "FACEBOOK_POST", "PINTEREST_PIN", "THREADS_POST", "INSTAGRAM_STORY"] as const;
+// HAND_CHANNELS (LinkedIn and X) are posted by hand; the Planner offers them only with PLANNER_HAND_CHANNELS=on, turned on
+// once the phone build that names them is released. Posts on them (made by hand, publishing, limits) work either way.
+export const handChannelsOn = () => process.env.PLANNER_HAND_CHANNELS === "on";
+/** The channels the Planner can plan on now. */
+export const plannableChannels = (hand = handChannelsOn()): readonly string[] => (hand ? [...PLANNER_CHANNELS, ...HAND_CHANNELS] : PLANNER_CHANNELS);
 
 /**
  * The posts chain ("Generate calendar"): Brief writer and Creator work in batches (8 and 5 per run), so each starts

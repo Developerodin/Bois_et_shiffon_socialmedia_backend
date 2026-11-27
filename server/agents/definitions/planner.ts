@@ -1,6 +1,6 @@
 import { ContentChannel } from "@prisma/client";
 import { z } from "zod";
-import { chainChannels } from "@/server/agents/chain";
+import { chainChannels, handChannelsOn, PLANNER_CHANNELS as CHANNELS, plannableChannels } from "@/server/agents/chain";
 import { NothingToDoError, startAgentRun } from "@/server/agents/engine";
 import { HAND_CHANNELS, plannerPromptVersion, plannerSystem } from "@/server/agents/prompts/content";
 import type { AgentDefinition } from "@/server/agents/types";
@@ -12,14 +12,9 @@ import { wallTime } from "@/server/content/offer-checks";
 import { activeWorkflow, workflowCancelled, workflowIdInput, type WorkflowContext } from "@/server/content/workflow-context";
 import { prisma } from "@/server/db/prisma";
 
-// No INSTAGRAM_REEL: a planned reel would have a script but no video to post. Reels are made in the app's Studio.
-// Stories are planned: the Creator writes their frames from the brand's photos (paid by the Planner's own charge).
-export const CHANNELS = ["INSTAGRAM_POST", "INSTAGRAM_CAROUSEL", "FACEBOOK_POST", "PINTEREST_PIN", "THREADS_POST", "INSTAGRAM_STORY"] as const;
-// HAND_CHANNELS (LinkedIn and X) are posted by hand; the Planner offers them only with PLANNER_HAND_CHANNELS=on, turned on
-// once the phone build that names them is released. Posts on them (made by hand, publishing, limits) work either way.
-export const handChannelsOn = () => process.env.PLANNER_HAND_CHANNELS === "on";
-/** The channels the Planner can plan on now. */
-export const plannableChannels = (hand = handChannelsOn()): readonly string[] => (hand ? [...CHANNELS, ...HAND_CHANNELS] : CHANNELS);
+// The channels and the PLANNER_HAND_CHANNELS switch live in chain.ts, so the workflow service reads them without
+// importing this file (which would load the agent registry before this agent is defined).
+export { handChannelsOn };
 const postSchema = (hand: boolean) =>
   // campaignId "" = none; opportunityId "" = a campaign-only post.
   z.object({ opportunityId: z.string(), campaignId: z.string(), title: z.string(), channel: z.enum(hand ? [...CHANNELS, ...HAND_CHANNELS] : CHANNELS), pillar: z.string(), angle: z.string() });
