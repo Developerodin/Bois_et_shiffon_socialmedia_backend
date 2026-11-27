@@ -2227,3 +2227,41 @@ Re-run `npm run sync:shared` after the merge so every `.hash` matches.
      variants + `connectionId` used by auto-publish, 5 product-aware Quality rows, 6 entry points/filters, 7 timeline,
      8 Analyst loop. Owner answer 6 (disconnected channel → future-dated drafts get a notification + attention badge on
      /social; past dates nothing) not built yet.
+
+## Monday start here (written 2026-11-27 ~17:50 IST)
+
+**Pushed to GitHub on Friday evening** (server and web `main`, if the push succeeded — check `git log origin/main`):
+everything from 2026-11-27: Social landing, Overview gaps, Tasks calendar, SEO depth, CRM Phase A, Channels page and
+channel calendars, channel batches 1–4, analytics page (all six channels), agents phase 1 (full chain from the web),
+workflow card + agent peeks, "Show on calendar", product-aware workflow Phase 2 (server only, no web UI uses it yet).
+Production builds (`next build` in clean worktrees `Desktop\sma-build\{server,web}`) and full unit suites passed first.
+
+**Deploy (the owner does it on EC2; see `docs/DEPLOY_EC2.md`):**
+1. `prisma migrate deploy` — about 21 migrations from 2026-11-27, including `20261127180000_content_workflow` and
+   `20261127190000_content_workflow_review_briefs` (one `ALTER TYPE … ADD VALUE`; NOT yet applied on the DEV DB —
+   apply it on dev too before testing workflows: stop server, `npx prisma migrate deploy`, restart).
+2. Turn the `crm` flag on for B&C; `npm run reset:shopify-orders -- <brandId>` for B&C.
+3. Env: `PLANNER_HAND_CHANNELS` stays off (owner: leave LinkedIn and X out of agent planning for now).
+
+**In flight when the session ended (not merged, not pushed):**
+- Agent drawer redesign (owner brief: `C:\Users\INTEL\AppData\Local\Temp\claude\510d4fc7e483f2e2\cf5a7854-35c2-4d5b-a146-db5d9df2bbfb\scratchpad\briefs\agent-drawer-brief.md`
+  — copy it into `docs/` on Monday; the scratchpad may be cleared). Two parallel branches in web:
+  `drawer-a` (`Desktop\sma-drawer-a\web`: shared drawer with Overview/Outputs/Activity tabs, Planner, Brief writer,
+  Creator, Analyst, collapsible logs; it creates PLACEHOLDER `components/agents/drawer/scout-outputs.tsx` and
+  `quality-outputs.tsx`) and `drawer-b` (`Desktop\sma-drawer-b\web`: the real versions of those two files). Merge A
+  first, then B (B's files replace A's placeholders), run checks, review (4 lenses), browser-check all six drawers on
+  /calendar and /social.
+- Worktrees to remove after: `sma-p2\server` (its node_modules is a REAL folder with a private @prisma/client —
+  delete the folder, don't unlink), `sma-build\{server,web}` (junctions), `sma-peek\web`, `sma-drawer-a\web`,
+  `sma-drawer-b\web` (junctions). Branches `workflow-p2`, `agent-peek` can be deleted once merged.
+
+**Next work, in order (plan: `docs/superpowers/plans/2026-11-27-product-aware-content-workflow.md`, owner answers at
+its end):**
+1. Finish and merge the drawer redesign.
+2. Phase 3: the "Create with agents" wizard on the new `content-workflows` API — destinations, products (manual /
+   catalogue / none), ideas, and the approval screens for each pause (REVIEW_PLAN, REVIEW_BRIEFS; REVIEW_IDEAS and
+   Scout start are not built server-side yet). Then the workflow card's scope line.
+3. Phase 4: per-channel variants, use `ContentItem.connectionId` in auto-publish and the schedule dialog.
+4. Owner answer 6: disconnected channel + future-dated drafts → notification + attention badge on its /social row.
+5. Phases 5–8 (product-aware Quality rows, calendar filters, post timeline + retries, Analyst loop).
+6. Small: the "attribute mismatch" hydration warning on every page (pre-existing).
