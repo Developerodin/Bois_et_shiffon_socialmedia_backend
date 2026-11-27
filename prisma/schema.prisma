@@ -931,6 +931,7 @@ enum ContentWorkflowStatus {
   REVIEW_IDEAS
   PLANNING
   REVIEW_PLAN
+  REVIEW_BRIEFS
   RUNNING
   DONE
   NEEDS_ATTENTION
@@ -941,7 +942,8 @@ enum ContentWorkflowStatus {
 /**
  * One "create posts with agents" request: what a person chose (destinations, products, ideas, campaign) and its
  * idempotency key. The stages stay AgentRuns (input.workflowId, AgentRun.workflowId) and status-driven sweeps; the
- * stored status is written on start, cancel and failure, and workflowStatus derives the rest from runs and posts.
+ * stored status is written on start, at each review gate (REVIEW_PLAN, REVIEW_BRIEFS: one approval of the stage's
+ * output starts the next agent), on approval and on cancel; workflowStatus derives the rest from runs and posts.
  * input: the validated request (server/content/workflow.ts), the truth the agents read. chargeIds: its paid stages.
  */
 model ContentWorkflow {
