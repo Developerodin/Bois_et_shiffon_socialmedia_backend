@@ -1905,6 +1905,14 @@ Plan: docs/superpowers/plans/2026-11-26-seo-depth.md. Server, web and mobile (sh
   analytics.read (clients included); none on a site's first evaluation (`settings.declinesSeenFor`) or for a run that
   only extended episodes. The bell links to the page's URL history (or the Search tab for a group or the whole site)
   only when the `data` web flag is on. Visibility shares `alertBrandsSql` with the ads alerts (server/tasks/access.ts).
+- **AI briefs** (Task 6, `POST seo/briefs`, server/seo/briefs.ts; analytics.read and tasks.manage; 2 credits,
+  `CREDIT_COSTS.seoBrief`): "Write a brief" on a finding with 2+ pages (audit board) or on checked declining pages
+  (Search tab). One AI call (`seo.brief`, `seo-brief-v1`) over stored data only (the finding, each page's 28-day
+  numbers and top 5 queries), cleaned and inside a `<data>` block under a data-only system line; items for pages not
+  given are dropped. From a finding, the brief is prepended to its open task (people's edits kept; the task is checked
+  under its lock before credits and again under patchTask's lock after the AI), or makes the finding's task; from
+  declines, a new task re-checked in 28 days. Credits are given back on any failure after the spend; 20 briefs per
+  person per brand per hour. A content brief offers "Write an article" (the blog page's start from a task).
 - Waits on Search Console verification for B&C: everything above but the link check ships tested against fixtures and
   stays empty until then. Web components weren't browser-checked on the branch (no dev server or build was run).
 

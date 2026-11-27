@@ -252,15 +252,21 @@ export async function createTask(scope: TaskScope, v: TaskViewer, raw: TaskInput
  * - A new url clears "checked live".
  * ponytail: last write wins per field (the apps send only changed fields); add an updatedAt precondition if people clash.
  */
-export async function patchTask(scope: TaskScope, v: TaskViewer, taskId: string, body: Record<string, unknown>): Promise<TaskDetailDto> {
-  const parsed = TaskPatch.safeParse(pickPatch(body));
-  if (!parsed.success) throw new TaskError(parsed.error.issues[0]?.message ?? "Invalid task", 400);
+export async function patchTask(
+  scope: TaskScope, v: TaskViewer, taskId: string, body: Record<string, unknown>,
+  /** `edit`: builds the body from the task as read under its lock (it may throw to refuse); `body` is then ignored. */
+  opts: { edit?: (current: Task) => Record<string, unknown> } = {},
+): Promise<TaskDetailDto> {
+  const first = TaskPatch.safeParse(pickPatch(body));
+  if (!first.success) throw new TaskError(first.error.issues[0]?.message ?? "Invalid task", 400);
   await prisma.$transaction(async (tx) => {
     await lockRow(tx, "task", taskId);
     if (!(await findVisibleTask(tx, v, taskId))) throw notFound();
     const current = await tx.task.findUnique({ where: { id: taskId } });
     if (!current) throw notFound();
     if (!managesTask(scope, current)) throw new TaskError("Only the task's owner, its creator or an admin can change this.", 403);
+    const parsed = opts.edit ? TaskPatch.safeParse(pickPatch(opts.edit(current))) : first;
+    if (!parsed.success) throw new TaskError(parsed.error.issues[0]?.message ?? "Invalid task", 400);
     const data = columns(withOneOwner(parsed.data));
     const changed = Object.keys(data).filter((k) => !same(current[k as keyof typeof current], data[k]));
     if (!changed.length) return;
