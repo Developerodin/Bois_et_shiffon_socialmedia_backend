@@ -7,7 +7,7 @@ import { ownedBySql, visibleTaskSql, type TaskViewer } from "@/server/tasks/acce
 import { fromCursor, toCursor } from "@/server/tasks/cursor";
 import { TaskError } from "@/server/tasks/errors";
 import { TASK_DTO_INCLUDE, toTaskDtos, type TaskScope } from "@/server/tasks/service";
-import { brandLocalDay, openTaskSql } from "@/server/tasks/sql";
+import { brandLocalDay, dueSql, openTaskSql } from "@/server/tasks/sql";
 import { DONE_DAYS, isBlocked, isOverdue, OPEN_STATUSES, TASK_AREAS, TASK_VIEWS, type PostRow, type TaskDto, type TaskView, type TodayDto } from "@/shared";
 
 /**
@@ -29,7 +29,7 @@ const TODAY_ROWS = 5;
 const POSTS = 20;
 
 const OPEN = openTaskSql;
-const DUE = Prisma.sql`COALESCE(t."dueOn", 'infinity'::date)`;
+const DUE = dueSql;
 /** In review with this person as reviewer: the Approvals view and Today's approvals group. */
 const toReview = (userId: string) => Prisma.sql`t.status = 'IN_REVIEW' AND t."reviewerId" = ${userId}`;
 
@@ -89,7 +89,7 @@ export function listSql(v: TaskViewer, q: ListQuery, now = new Date()): Prisma.S
 }
 
 /** Rows for ids from a visibility-checked query, in that query's order. */
-async function rowsFor(ids: string[]) {
+export async function rowsFor(ids: string[]) {
   if (!ids.length) return [];
   const rows = await prisma.task.findMany({ where: { id: { in: ids } }, include: TASK_DTO_INCLUDE });
   const byId = new Map(rows.map((r) => [r.id, r]));

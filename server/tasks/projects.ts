@@ -46,7 +46,7 @@ function parse<T>(schema: z.ZodType<T>, body: unknown, what: string): T {
 
 const notFound = () => new TaskError("Project not found", 404);
 /** The project row a viewer may see: same brand, and shared with the client when the viewer is one. */
-const projectWhere = (v: TaskViewer, projectId?: string): Prisma.WorkProjectWhereInput => ({
+export const projectWhere = (v: TaskViewer, projectId?: string): Prisma.WorkProjectWhereInput => ({
   ...(projectId ? { id: projectId } : {}),
   workspaceId: v.workspaceId,
   brandId: v.brandId,

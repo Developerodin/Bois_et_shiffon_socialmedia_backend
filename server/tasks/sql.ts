@@ -13,6 +13,9 @@ export const taskStatusInSql = (statuses: readonly (typeof OPEN_TASK_STATUSES)[n
 /** Open tasks (to do, in progress, in review). */
 export const openTaskSql = taskStatusInSql(OPEN_TASK_STATUSES);
 
+/** A task's due day, undated as 'infinity': the expression the (brand, due, id) indexes are built on, so filter on it. */
+export const dueSql = Prisma.sql`COALESCE(t."dueOn", 'infinity'::date)`;
+
 /**
  * The brand-local day at `now`: the brand profile's time zone, else DEFAULT_TIME_ZONE (passed as a value). Reads
  * `bp."timeZone"`, so the query must join "BrandProfile" bp.
