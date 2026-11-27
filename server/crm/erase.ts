@@ -35,11 +35,13 @@ export async function checkEraseAccess(s: CrmScope) {
  * or a person); the same for its versions' notes and free lines. Shared by erasure and retention so the lists can't
  * drift. Raw SQL: `updatedAt` stays, so the status sync's 60-day payment watch isn't extended.
  */
-export async function blankQuotes(tx: Prisma.TransactionClient, quoteIds: string[]) {
+export async function blankQuotes(tx: Prisma.TransactionClient, quoteIds: string[], erasedCustomerIds: string[] = []) {
   if (!quoteIds.length) return;
   const freeTitles = (col: Prisma.Sql) => Prisma.sql`(SELECT COALESCE(jsonb_agg(CASE WHEN l->>'productId' IS NULL THEN jsonb_set(l, '{title}', '"Item"') ELSE l END ORDER BY n), '[]'::jsonb) FROM jsonb_array_elements(${col}) WITH ORDINALITY AS e(l, n))`;
   await tx.$executeRaw`
-    UPDATE "Quote" SET "contactName" = NULL, "contactEmail" = NULL, "declinedReason" = NULL, note = NULL, "internalNote" = NULL, "invoiceUrl" = NULL, "customerId" = NULL,
+    UPDATE "Quote" SET "contactName" = NULL, "contactEmail" = NULL, "declinedReason" = NULL, note = NULL, "internalNote" = NULL, "invoiceUrl" = NULL,
+      -- Unlinked from the erased customers only: a quote linked to someone else keeps that link.
+      "customerId" = CASE WHEN "customerId" = ANY(${erasedCustomerIds}::text[]) THEN NULL ELSE "customerId" END,
       lines = CASE WHEN jsonb_typeof(lines) = 'array' THEN ${freeTitles(Prisma.sql`lines`)} ELSE lines END
     WHERE id = ANY(${quoteIds}::text[])`;
   await tx.$executeRaw`
@@ -51,14 +53,16 @@ export async function blankQuotes(tx: Prisma.TransactionClient, quoteIds: string
  * Erases `ids` (this brand's, locked here in id order). Returns the ids actually erased. `recheck` runs after the lock
  * inside this transaction and returns the ids still to erase (retention: still inactive). `emailQuotesBefore`: quotes
  * found only by contact email are blanked when closed and unchanged since then (retention must not strip a fresh
- * quote of someone who just came back); a person's own erasure request reaches them all.
+ * quote of someone who just came back); a person's own erasure request reaches them all. `keepAccepted` (retention):
+ * accepted quotes are the business's record of a sale (a hand-accepted one has no Shopify order), so they are only
+ * unlinked, never blanked, by the retention sweep; a person's erasure request still blanks them.
  */
 export async function eraseCustomers(
   tx: Prisma.TransactionClient,
   scope: Brand,
   ids: string[],
   audit: { action: string; actorUserId: string | null },
-  opts: { recheck?: (tx: Prisma.TransactionClient, ids: string[]) => Promise<string[]>; emailQuotesBefore?: Date } = {},
+  opts: { recheck?: (tx: Prisma.TransactionClient, ids: string[]) => Promise<string[]>; emailQuotesBefore?: Date; keepAccepted?: boolean } = {},
 ) {
   const b = { workspaceId: scope.workspaceId, brandId: scope.brandId };
   let locked = [...(await lockCustomers(tx, b, ids))];
@@ -73,7 +77,9 @@ export async function eraseCustomers(
           OR (${emails.length > 0} AND lower("contactEmail") = ANY(${emails}::text[])
               AND (${before === null} OR ("updatedAt" < ${before ?? new Date(0)} AND status IN ('ACCEPTED', 'EXPIRED', 'CANCELLED', 'DECLINED')))))`
   ).map((r) => r.id);
-  await blankQuotes(tx, quoteIds);
+  const accepted = opts.keepAccepted && quoteIds.length ? new Set((await tx.quote.findMany({ where: { id: { in: quoteIds }, status: "ACCEPTED" }, select: { id: true } })).map((q) => q.id)) : new Set<string>();
+  if (accepted.size) await tx.$executeRaw`UPDATE "Quote" SET "customerId" = NULL WHERE id = ANY(${[...accepted]}::text[]) AND "customerId" = ANY(${locked}::text[])`;
+  await blankQuotes(tx, quoteIds.filter((id) => !accepted.has(id)), locked);
   const convs = await tx.conversation.findMany({ where: { ...brandWhere(b), customerId: { in: locked } }, select: { id: true, followUpTaskId: true } });
   const convIds = convs.map((c) => c.id);
   // Their deals, and deals tied to them only through one of their conversations: unlinked and stripped.

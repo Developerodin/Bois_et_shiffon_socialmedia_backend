@@ -13,8 +13,9 @@ import { closeTasks } from "@/server/tasks/system-tasks";
  *     erasing transaction, so an irreversible delete never trusts a stale hint. Customers with a SHOPIFY identity
  *     are skipped (they go with their source, Phase C). Erased through eraseCustomers, audited per customer.
  *  3. Deals with no customer, and companies with no customers or deals, 24 months after their last change.
- *  4. Closed quotes not linked to anyone are blanked like an erased customer's (blankQuotes) 24 months after their
- *     last change (the Shopify order stays the accounting record). Quotes found only by an erased customer's email
+ *  4. Expired, cancelled and declined quotes not linked to anyone are blanked like an erased customer's (blankQuotes)
+ *     24 months after their last change. Accepted quotes are a record of a sale (a hand-accepted one has no Shopify
+ *     order): retention never blanks them; a person's erasure request does. Quotes found only by an erased customer's email
  *     are blanked here only when closed and older than the cut, so someone who came back keeps their new quote.
  * ponytail: at most 50k messages and 5k customers per sweep, within about 60 s; a backlog drains over the next days.
  */
@@ -86,6 +87,7 @@ export async function pruneCrm(now = new Date()) {
               // Re-checked after the rows are locked, in this transaction: a note or message committed meanwhile keeps them.
               recheck: async (t, locked) => (await inactiveCustomers(t, cut, locked, locked.length)).map((c) => c.id),
               emailQuotesBefore: cut,
+              keepAccepted: true,
             }),
           TX,
         )
@@ -105,7 +107,7 @@ export async function pruneCrm(now = new Date()) {
 
   // 4. Old closed quotes nobody is linked to: blanked as erasure does (blankQuotes, updatedAt left as it is).
   const stale = await prisma.$queryRaw<{ id: string }[]>`
-    SELECT id FROM "Quote" WHERE "customerId" IS NULL AND status IN ('ACCEPTED', 'EXPIRED', 'CANCELLED', 'DECLINED') AND "updatedAt" < ${cut}
+    SELECT id FROM "Quote" WHERE "customerId" IS NULL AND status IN ('EXPIRED', 'CANCELLED', 'DECLINED') AND "updatedAt" < ${cut}
       AND ("contactName" IS NOT NULL OR "contactEmail" IS NOT NULL OR "declinedReason" IS NOT NULL OR note IS NOT NULL OR "internalNote" IS NOT NULL) LIMIT 5000`;
   if (stale.length) await prisma.$transaction((tx) => blankQuotes(tx, stale.map((q) => q.id)), TX);
   out.quotes = stale.length;

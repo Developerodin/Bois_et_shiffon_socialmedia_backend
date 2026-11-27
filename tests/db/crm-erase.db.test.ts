@@ -69,6 +69,15 @@ describe("erasure", () => {
     expect(JSON.stringify(audit)).not.toMatch(/Jeanne|jeanne/i);
   });
 
+  it("a quote with the erased person's email but linked to someone else keeps that link", async () => {
+    const a1 = await createCustomer(s, CustomerCreate.parse({ displayName: "Anna", identities: [{ kind: "EMAIL", value: "anna@a.fr" }] }));
+    const b1 = await createCustomer(s, CustomerCreate.parse({ displayName: "Studio B" }));
+    const q = await createQuote(s, QuoteCreate.parse({ currency: "EUR", contactName: "Anna", contactEmail: "anna@a.fr", lines: [] }));
+    await setQuoteCustomer(s, q.id, { customerId: b1.id });
+    await eraseCustomer(s, a1.id);
+    expect(await prisma.quote.findUniqueOrThrow({ where: { id: q.id } })).toMatchObject({ customerId: b1.id, contactName: null, contactEmail: null });
+  });
+
   it("erase and export need a workspace owner or admin", async () => {
     const c = await createCustomer(s, CustomerCreate.parse({ displayName: "Guarded" }));
     await expect(eraseCustomer(manager, c.id)).rejects.toMatchObject({ name: "AccessDeniedError" });
@@ -129,9 +138,17 @@ describe("retention", () => {
     await age(gone.id, 25 * 30);
     const fresh = await createQuote(s, QuoteCreate.parse({ currency: "EUR", contactName: "Back Again", contactEmail: "back@again.fr", lines: [] }));
 
+    // An accepted quote is a record of a sale: retention unlinks it but keeps it whole.
+    const sold = await createQuote(s, QuoteCreate.parse({ currency: "EUR", contactName: "Long gone", contactEmail: "gone@x.fr", lines: [{ title: "Bespoke", quantity: 1, unitPrice: "10" }] }));
+    await setQuoteCustomer(s, sold.id, { customerId: gone.id });
+    const sentSold = await quoteAction(s, sold.id, QuoteAction.parse({ action: "markSent", version: sold.version }));
+    await quoteAction(s, sold.id, QuoteAction.parse({ action: "markAccepted", version: sentSold.version }));
+    await prisma.$executeRaw`UPDATE "Quote" SET "updatedAt" = ${new Date(Date.now() - 800 * DAY)} WHERE id = ${sold.id}`;
+    await age(gone.id, 25 * 30);
     const out = await pruneCrm();
     expect(out).toMatchObject({ customers: 1, messages: 1, conversations: 1, deals: 1 });
     expect(await prisma.quote.findUniqueOrThrow({ where: { id: fresh.id } })).toMatchObject({ contactName: "Back Again", contactEmail: "back@again.fr" });
+    expect(await prisma.quote.findUniqueOrThrow({ where: { id: sold.id } })).toMatchObject({ customerId: null, contactName: "Long gone", status: "ACCEPTED" });
     expect(await prisma.customer.findUnique({ where: { id: gone.id } })).toBeNull();
     expect(await prisma.customer.findUnique({ where: { id: noted.id } })).not.toBeNull();
     expect(await prisma.customer.findUnique({ where: { id: shop.id } })).not.toBeNull();

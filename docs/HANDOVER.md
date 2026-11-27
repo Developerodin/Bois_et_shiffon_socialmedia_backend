@@ -1911,8 +1911,14 @@ removed from any future `prisma migrate dev` diff.
   also changes the existing mobile reply drafts.
 - B&C's privacy notice must name this tool, OpenAI (summaries and drafts) and Neon, and check Neon's region.
 
+- Retention never blanks accepted quotes (a record of a sale; a quote accepted by hand has no Shopify order). They
+  are unlinked from a deleted customer and kept whole. A person's erasure request still blanks them. Owner may
+  override.
+- The Overview change is four small edits in `components/workspace/workspace.tsx` (an import, a `crmOn?` prop, its
+  default, the `due=` fragment) and one line in `app/(shell)/page.tsx`.
+
 **Open items:**
-- Browser check: customer → log message → queue → overdue task → deal → quote sent by hand → declined → versions →
+- The web was never rendered: no browser check and no e2e run. This blocks turning on the `crm` flag. Browser check: customer → log message → queue → overdue task → deal → quote sent by hand → declined → versions →
   erase/export.
 - Not built on the web: a company list (a company is erased from one of its customers' pages), moving a conversation to
   another customer, and linking a deal to a conversation. The server supports all three.
